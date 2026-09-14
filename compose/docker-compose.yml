@@ -36,6 +36,7 @@ services:
   cadvisor:
     <<: *restart
     image: gcr.io/cadvisor/cadvisor:v0.52.1
+    profiles: [cadvisor]
     privileged: true
     volumes:
       - /:/rootfs:ro
