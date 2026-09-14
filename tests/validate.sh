@@ -10,7 +10,9 @@ ${CONTAINER_ENGINE:-docker} run --rm -v "$PWD/core/prometheus/rules:/r" --entryp
 python3 - <<'PY' || fail=1
 import yaml,glob,sys
 bad=[]
-for f in glob.glob("core/prometheus/rules/*.yml")+glob.glob("core/loki/rules/fake/*.yml"):
+files=glob.glob("core/prometheus/rules/*.yml")+glob.glob("core/loki/rules/fake/*.yml")
+assert files, "no rule files found"
+for f in files:
     for g in yaml.safe_load(open(f))["groups"]:
         for r in g["rules"]:
             if "alert" not in r: continue

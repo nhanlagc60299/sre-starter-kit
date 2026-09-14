@@ -16,11 +16,12 @@ echo '[{"targets":["http://prometheus:9090/-/healthy"],"labels":{"service":"prom
 $COMPOSE up -d
 for i in $(seq 1 30); do
   sleep 4
-  down=$(curl -sf $H:9090/api/v1/targets | SKIP="${SMOKE_SKIP_JOBS:-}" python3 -c 'import sys,json,os; skip=set(os.environ["SKIP"].split(",")); t=json.load(sys.stdin)["data"]["activeTargets"]; print(" ".join(x["labels"]["job"] for x in t if x["health"]!="up" and x["labels"]["job"] not in skip))' 2>/dev/null || echo "api-not-ready")
+  down=$(curl -sf $H:9090/api/v1/targets | SKIP="${SMOKE_SKIP_JOBS:-}" python3 -c 'import sys,json,os; skip=set(os.environ["SKIP"].split(",")); t=json.load(sys.stdin)["data"]["activeTargets"]; print("no-targets-yet" if not t else " ".join(x["labels"]["job"] for x in t if x["health"]!="up" and x["labels"]["job"] not in skip))' 2>/dev/null || echo "api-not-ready")
   [ -z "$down" ] && break
 done
 [ -z "$down" ] || { echo "FAIL: targets not up: $down"; $COMPOSE ps; exit 1; }
-curl -sf $H:3000/api/health | grep -q '"database": "ok"' || { echo "FAIL: grafana unhealthy"; exit 1; }
+for i in $(seq 1 15); do curl -sf $H:3000/api/health | grep -q '"database": *"ok"' && break; sleep 4; done
+curl -sf $H:3000/api/health | grep -q '"database": *"ok"' || { echo "FAIL: grafana unhealthy after 60s"; exit 1; }
 for i in $(seq 1 15); do curl -sf $H:3100/ready | grep -q ready && break; sleep 4; done
 curl -sf $H:3100/ready | grep -q ready || { echo "FAIL: loki not ready after 60s"; exit 1; }
 rules=$(curl -sf $H:3100/loki/api/v1/rules 2>/dev/null || true)
