@@ -1,0 +1,36 @@
+rule_files:
+  - /p/rules/app.yml
+evaluation_interval: 1m
+tests:
+  - interval: 1m
+    input_series:
+      - series: 'probe_success{job="blackbox-http",service="api",instance="http://api/health"}'
+        values: '0x5'
+      - series: 'probe_ssl_earliest_cert_expiry{job="blackbox-http",service="api",instance="http://api/health"}'
+        values: '500000x5'   # epoch seconds; eval time is ~0 so this is <7d away
+      - series: 'http_requests_total{service="api",status="500"}'
+        values: '0+60x10'    # 1 req/s errors
+      - series: 'http_requests_total{service="api",status="200"}'
+        values: '0+60x10'    # 1 req/s ok  => 50% error rate
+    alert_rule_test:
+      - eval_time: 3m
+        alertname: ServiceDown
+        exp_alerts:
+          - exp_labels: { severity: critical, module: app, job: blackbox-http, service: api, instance: "http://api/health" }
+            exp_annotations:
+              summary: "Service api is DOWN (http://api/health)"
+              runbook_url: https://gitlab.com/nhanlagc60299/sre-starter-kit/-/wikis/ServiceDown
+      - eval_time: 2m
+        alertname: CertExpiresIn7d
+        exp_alerts:
+          - exp_labels: { severity: warning, module: app, job: blackbox-http, service: api, instance: "http://api/health" }
+            exp_annotations:
+              summary: "TLS cert for api expires in less than 7 days"
+              runbook_url: https://gitlab.com/nhanlagc60299/sre-starter-kit/-/wikis/CertExpiresIn7d
+      - eval_time: 10m
+        alertname: HighErrorRate
+        exp_alerts:
+          - exp_labels: { severity: critical, module: app, service: api }
+            exp_annotations:
+              summary: "api 5xx rate is 50% over 5m"
+              runbook_url: https://gitlab.com/nhanlagc60299/sre-starter-kit/-/wikis/HighErrorRate
