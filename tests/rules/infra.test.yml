@@ -38,3 +38,28 @@ tests:
       - eval_time: 5m
         alertname: DiskLow
         exp_alerts: []
+  - interval: 1m
+    input_series:
+      - series: 'container_oom_events_total{job="cadvisor",name="api"}'
+        values: '0 0 1 1 1 1 1 1 1 1 1'
+      - series: 'container_oom_events_total{job="cadvisor",name="web"}'
+        values: '0x10'
+      - series: 'container_start_time_seconds{job="cadvisor",name="worker"}'
+        values: '100 100 200 200 300 300 400 400 500 500 500'
+      - series: 'container_start_time_seconds{job="cadvisor",name="web"}'
+        values: '100x10'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: OOMKilled
+        exp_alerts:
+          - exp_labels: { severity: critical, module: infra, job: cadvisor, name: api }
+            exp_annotations:
+              summary: "Container api was OOM killed"
+              runbook_url: https://gitlab.com/nhanlagc60299/sre-starter-kit/-/wikis/OOMKilled
+      - eval_time: 10m
+        alertname: ContainerRestartLoop
+        exp_alerts:
+          - exp_labels: { severity: critical, module: infra, job: cadvisor, name: worker }
+            exp_annotations:
+              summary: "Container worker restarted >3 times in 15m"
+              runbook_url: https://gitlab.com/nhanlagc60299/sre-starter-kit/-/wikis/ContainerRestartLoop

@@ -57,7 +57,7 @@ groups:
           runbook_url: https://gitlab.com/nhanlagc60299/sre-starter-kit/-/wikis/OOMKilled
 
       - alert: ContainerRestartLoop
-        expr: increase(container_restart_count[15m]) > 3
+        expr: changes(container_start_time_seconds{name!=""}[15m]) > 3
         labels: { severity: critical, module: infra }
         annotations:
           summary: "Container {{ $labels.name }} restarted >3 times in 15m"
