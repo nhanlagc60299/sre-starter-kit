@@ -5,7 +5,12 @@ cd "$(dirname "$0")/.."
 CE=${CONTAINER_ENGINE:-docker}
 COMPOSE="$CE compose -p sre-kit-smoke --env-file .env -f compose/docker-compose.yml"
 H=${SMOKE_HOST:-localhost}   # CI with docker-in-docker: SMOKE_HOST=docker
-cleanup() { $COMPOSE down -v >/dev/null 2>&1 || true; [ -n "${BACKUP:-}" ] && mv "$BACKUP" .env || rm -f .env; }
+cleanup() {
+  $COMPOSE down -v >/dev/null 2>&1 || true
+  # render.sh wiped build/ for the throwaway .env; put the real config back.
+  if [ -n "${BACKUP:-}" ]; then mv "$BACKUP" .env; bash scripts/render.sh >/dev/null || true
+  else rm -f .env; rm -rf build; fi
+}
 trap cleanup EXIT
 if [ -f .env ]; then BACKUP=$(mktemp); mv .env "$BACKUP"; fi
 sed 's/^GRAFANA_ADMIN_PASSWORD=.*/GRAFANA_ADMIN_PASSWORD=smoke/; s#^SLACK_WEBHOOK_URL=.*#SLACK_WEBHOOK_URL=http://localhost:9/#' .env.example > .env

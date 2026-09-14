@@ -25,6 +25,14 @@ inhibit_rules:
   - source_matchers: [ 'alertname="NodeDown"' ]
     target_matchers: [ 'module="infra"' ]
     equal: [instance]
+  # Disk is already critical on this mount: the warning adds nothing.
+  - source_matchers: [ 'alertname="DiskFull"' ]
+    target_matchers: [ 'alertname="DiskLow"' ]
+    equal: [instance, mountpoint]
+  # Same pair for error rate.
+  - source_matchers: [ 'alertname="HighErrorRate"' ]
+    target_matchers: [ 'alertname="ElevatedErrorRate"' ]
+    equal: [service]
 
 receivers:
   - name: critical

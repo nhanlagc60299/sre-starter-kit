@@ -35,12 +35,26 @@ PY
 # 2. disk thresholds into rendered infra rules (core/ stays untouched)
 # Two phase: tag both lines first, then fill in the values, so a chosen threshold
 # can never be re-matched by the other expression (e.g. crit=15 vs the "< 15" anchor).
-[ -f "$ROOT/build/prometheus/rules/infra.yml" ] && sed -i.bak -e "s/\* 100 < 5$/* 100 < __CRIT__/" -e "s/\* 100 < 15$/* 100 < __WARN__/" "$ROOT/build/prometheus/rules/infra.yml" && sed -i.bak -e "s/__CRIT__/${DISK_CRIT_PCT:-5}/" -e "s/__WARN__/${DISK_WARN_PCT:-15}/" "$ROOT/build/prometheus/rules/infra.yml" && rm -f "$ROOT/build/prometheus/rules/infra.yml.bak"
+INFRA="$ROOT/build/prometheus/rules/infra.yml"
+if [ -f "$INFRA" ]; then
+  sed -i.bak -e "s/\* 100 < 5$/* 100 < __CRIT__/" -e "s/\* 100 < 15$/* 100 < __WARN__/" "$INFRA"
+  sed -i.bak -e "s/__CRIT__/${DISK_CRIT_PCT:-5}/" -e "s/__WARN__/${DISK_WARN_PCT:-15}/" "$INFRA"
+  rm -f "$INFRA.bak"
+  # A rules edit that renames or reflows these two expressions would silently ship the defaults.
+  grep -q "\* 100 < ${DISK_CRIT_PCT:-5}\$" "$INFRA" && grep -q "\* 100 < ${DISK_WARN_PCT:-15}\$" "$INFRA" || {
+    echo "ERROR: disk thresholds were not applied to $INFRA (expected crit ${DISK_CRIT_PCT:-5}%, warn ${DISK_WARN_PCT:-15}%)." >&2
+    echo "       core/prometheus/rules/infra.yml must keep the '* 100 < 5' / '* 100 < 15' expressions." >&2
+    exit 1; }
+fi
 # 3. optional receivers
 AM="$ROOT/build/alertmanager/alertmanager.yml"
 add() { # marker block
   python3 - "$AM" "$1" "$2" <<'PY'
-import sys; p,marker,block=sys.argv[1:]; s=open(p).read(); open(p,"w").write(s.replace("    # "+marker, block+"\n    # "+marker))
+import sys
+p,marker,block=sys.argv[1:]; s=open(p).read()
+if "    # "+marker not in s:
+    sys.exit("ERROR: receiver marker '%s' not found in %s - core/alertmanager/alertmanager.yml.tpl must keep it." % (marker,p))
+open(p,"w").write(s.replace("    # "+marker, block+"\n    # "+marker))
 PY
 }
 if [ -f "$AM" ] && [ -n "${TELEGRAM_BOT_TOKEN:-}" ]; then

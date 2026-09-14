@@ -6,6 +6,8 @@ tests:
     input_series:
       - series: 'probe_success{job="blackbox-http",service="api",instance="http://api/health"}'
         values: '0x5'
+      - series: 'up{job="blackbox-http",instance="blackbox:9115"}'
+        values: '0x10'
       - series: 'probe_ssl_earliest_cert_expiry{job="blackbox-http",service="api",instance="http://api/health"}'
         values: '500000x5'   # epoch seconds; eval time is ~0 so this is <7d away
       - series: 'http_requests_total{service="api",status="500"}'
@@ -20,6 +22,13 @@ tests:
             exp_annotations:
               summary: "Service api is DOWN (http://api/health)"
               runbook_url: https://gitlab.com/nhanlagc60299/sre-starter-kit/-/wikis/ServiceDown
+      - eval_time: 6m
+        alertname: BlackboxExporterDown
+        exp_alerts:
+          - exp_labels: { severity: critical, module: app, job: blackbox-http, instance: "blackbox:9115" }
+            exp_annotations:
+              summary: "Blackbox exporter is down - service probes are not running"
+              runbook_url: https://gitlab.com/nhanlagc60299/sre-starter-kit/-/wikis/BlackboxExporterDown
       - eval_time: 2m
         alertname: CertExpiresIn7d
         exp_alerts:

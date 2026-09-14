@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Interactive wizard. Writes .env. Re-run to change answers (previous values become defaults).
 set -euo pipefail
+umask 077   # .env holds the Grafana password and every webhook token
 ROOT="$(pwd)"
 [ -f "$ROOT/.env" ] && { set -a; . "$ROOT/.env"; set +a; }
 ask() { # var prompt default
@@ -23,6 +24,7 @@ ask TELEGRAM_BOT_TOKEN "Telegram bot token (optional)" ""
 ask TELEGRAM_CHAT_ID "Telegram chat id (optional)" ""
 ask TEAMS_WEBHOOK_URL "MS Teams Workflows webhook URL (optional)" ""
 echo "Services to probe, one per line as name=http://host:port/health. Empty line to finish."
+echo "Name each probe after its compose service name so its logs and metrics line up in the dashboards."
 svcs=()
 while true; do
   read -r -p "  service: " line
@@ -41,6 +43,14 @@ ask GRAFANA_ADMIN_PASSWORD "Grafana admin password" "change-me"
 case "${MODULE_SECURITY:-true}" in true) sec_default=y ;; *) sec_default=n ;; esac
 ask MODULE_SECURITY_ANS "Enable SSH early-warning alerts? (y/n)" "$sec_default"
 case "$MODULE_SECURITY_ANS" in y|Y|yes|YES) MODULE_SECURITY=true ;; *) MODULE_SECURITY=false ;; esac
+ask CONTAINER_SOCK "Container socket" "/var/run/docker.sock"
+# cAdvisor needs Docker's /var/lib/docker, so it is a profile rather than a plain service.
+case "${COMPOSE_PROFILES-cadvisor}" in *cadvisor*) cad_default=y ;; *) cad_default=n ;; esac  # unset (first run) -> on; empty -> off
+ask CADVISOR_ANS "Enable cAdvisor container metrics? (y/n; answer n on Podman)" "$cad_default"
+case "$CADVISOR_ANS" in y|Y|yes|YES) COMPOSE_PROFILES=cadvisor ;; *) COMPOSE_PROFILES= ;; esac
+if [ "$MODULE_SECURITY" = true ]; then
+  ask AUTH_LOG_PATH "Auth log path (RHEL/Amazon Linux: /var/log/secure)" "/var/log/auth.log"
+fi
 [ -z "$SLACK_WEBHOOK_URL" ] && { echo "ERROR: Slack webhook is required in the free tier." >&2; exit 1; }
 
 cat > "$ROOT/.env" <<ENV
@@ -61,6 +71,6 @@ GRAFANA_ADMIN_PASSWORD=$(q "$GRAFANA_ADMIN_PASSWORD")
 MODULE_SECURITY=$(q "$MODULE_SECURITY")
 AUTH_LOG_PATH=$(q "${AUTH_LOG_PATH:-/var/log/auth.log}")
 CONTAINER_SOCK=$(q "${CONTAINER_SOCK:-/var/run/docker.sock}")
-COMPOSE_PROFILES=$(q "${COMPOSE_PROFILES:-cadvisor}")
+COMPOSE_PROFILES=$(q "${COMPOSE_PROFILES:-}")
 ENV
 echo "wrote .env"

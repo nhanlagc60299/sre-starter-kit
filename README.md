@@ -40,7 +40,7 @@ Only set `BIND_ADDR=0.0.0.0` if a reverse proxy in front of the host is doing th
 |---|---|
 | Metrics | node_exporter, cAdvisor, blackbox HTTP probes for every service you list |
 | Logs | Loki + Grafana Alloy (Promtail is EOL — this kit does not use it) |
-| Alerts | critical → Slack now, repeats hourly. warning → batched every 30 min. NodeDown silences the other infra alerts on that node. |
+| Alerts | critical → Slack now, repeats hourly. warning → batched every 30 min. NodeDown silences the other infra alerts on that node; DiskFull silences DiskLow, HighErrorRate silences ElevatedErrorRate. |
 | Receivers | Slack (required), Telegram, MS Teams |
 | Dashboards | Overview (is anything wrong?), Node, App |
 | Early warning | SSH failed-login bursts, root logins. **Not a security control.** |
@@ -55,6 +55,13 @@ Error-rate and latency alerts fire if your service exposes Prometheus metrics na
 `http_requests_total{status}` and `http_request_duration_seconds_bucket`. Most client libraries
 (prom-client, prometheus_client, promhttp middleware) emit these by default. Add the scrape target
 to `core/prometheus/prometheus.yml.tpl` under a job with a `service` label (`build/` is regenerated on every `make up`).
+
+Name each probe after its compose service name (`api=http://...` for compose service `api`) so logs and
+metrics line up in the dashboards: `service` is the probe name in Prometheus but the container's compose
+service name in Loki, so the App and Overview log panels stay empty when the two differ.
+
+`build/` contains rendered secrets (Slack/Telegram/Teams webhooks) readable by other local users — run
+the kit on a host you control.
 
 ## Sizing
 
@@ -78,6 +85,10 @@ make validate     # promtool/amtool/loki config checks, <10s
 make test-rules   # promtool unit tests
 make smoke        # full stack up, all targets UP, down
 ```
+
+`make smoke` starts a second stack (`sre-kit-smoke`) on the same ports and overwrites `build/` with
+throwaway config; on exit it restores your `.env` and re-renders `build/`. Do not run it on a host that
+is serving production traffic.
 
 ## Pro
 
