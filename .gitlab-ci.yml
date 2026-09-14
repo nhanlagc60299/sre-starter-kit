@@ -1,0 +1,23 @@
+image: docker:27
+services: [docker:27-dind]
+variables:
+  DOCKER_HOST: tcp://docker:2375
+  DOCKER_TLS_CERTDIR: ""
+  SMOKE_HOST: docker
+  SMOKE_BIND_ADDR: 0.0.0.0   # the job container reaches the stack over the dind network
+  TMPDIR: $CI_PROJECT_DIR
+before_script:
+  - apk add --no-cache bash make curl python3 py3-yaml gettext git
+stages: [test]
+static:
+  stage: test
+  script:
+    - make validate
+    - make test-rules
+    - bash tests/test_render.sh
+    - bash tests/test_init.sh
+    - bash tests/test_env_example.sh
+smoke:
+  stage: test
+  script:
+    - make smoke

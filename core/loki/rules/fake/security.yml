@@ -1,0 +1,21 @@
+groups:
+  - name: security
+    rules:
+      - alert: SSHFailedLoginBurst
+        expr: |
+          sum by (ip) (
+            count_over_time({job="authlog"} |= "Failed password" | regexp `from (?P<ip>\d+\.\d+\.\d+\.\d+)` [5m])
+          ) > 20
+        for: 1m
+        labels: { severity: warning, module: security }
+        annotations:
+          summary: "SSH: >20 failed logins in 5m from {{ $labels.ip }} (early warning, not a security control)"
+          runbook_url: https://gitlab.com/nhanlagc60299/sre-starter-kit/-/wikis/SSHFailedLoginBurst
+
+      - alert: RootLoginDetected
+        expr: |
+          sum(count_over_time({job="authlog"} |~ "Accepted (password|publickey) for root" [5m])) > 0
+        labels: { severity: warning, module: security }
+        annotations:
+          summary: "SSH: root login accepted (early warning, not a security control)"
+          runbook_url: https://gitlab.com/nhanlagc60299/sre-starter-kit/-/wikis/RootLoginDetected

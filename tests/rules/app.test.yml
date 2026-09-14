@@ -1,0 +1,90 @@
+rule_files:
+  - /p/rules/app.yml
+evaluation_interval: 1m
+tests:
+  - interval: 1m
+    input_series:
+      - series: 'probe_success{job="blackbox-http",service="api",instance="http://api/health"}'
+        values: '0x5'
+      - series: 'up{job="blackbox-http",instance="blackbox:9115"}'
+        values: '0x10'
+      - series: 'probe_ssl_earliest_cert_expiry{job="blackbox-http",service="api",instance="http://api/health"}'
+        values: '500000x5'   # epoch seconds; eval time is ~0 so this is <7d away
+      - series: 'http_requests_total{service="api",status="500"}'
+        values: '0+60x10'    # 1 req/s errors
+      - series: 'http_requests_total{service="api",status="200"}'
+        values: '0+60x10'    # 1 req/s ok  => 50% error rate
+    alert_rule_test:
+      - eval_time: 3m
+        alertname: ServiceDown
+        exp_alerts:
+          - exp_labels: { severity: critical, module: app, job: blackbox-http, service: api, instance: "http://api/health" }
+            exp_annotations:
+              summary: "Service api is DOWN (http://api/health)"
+              runbook_url: https://gitlab.com/nhanlagc60299/sre-starter-kit/-/wikis/ServiceDown
+      - eval_time: 6m
+        alertname: BlackboxExporterDown
+        exp_alerts:
+          - exp_labels: { severity: critical, module: app, job: blackbox-http, instance: "blackbox:9115" }
+            exp_annotations:
+              summary: "Blackbox exporter is down - service probes are not running"
+              runbook_url: https://gitlab.com/nhanlagc60299/sre-starter-kit/-/wikis/BlackboxExporterDown
+      - eval_time: 2m
+        alertname: CertExpiresIn7d
+        exp_alerts:
+          - exp_labels: { severity: warning, module: app, job: blackbox-http, service: api, instance: "http://api/health" }
+            exp_annotations:
+              summary: "TLS cert for api expires in less than 7 days"
+              runbook_url: https://gitlab.com/nhanlagc60299/sre-starter-kit/-/wikis/CertExpiresIn7d
+      - eval_time: 10m
+        alertname: HighErrorRate
+        exp_alerts:
+          - exp_labels: { severity: critical, module: app, service: api }
+            exp_annotations:
+              summary: "api 5xx rate is 50% over 5m"
+              runbook_url: https://gitlab.com/nhanlagc60299/sre-starter-kit/-/wikis/HighErrorRate
+
+  - interval: 1m
+    input_series:
+      # "slow": 2% errors (fires ElevatedErrorRate after 15m, not HighErrorRate), p95 ~2s (fires HighP95Latency)
+      - series: 'http_requests_total{service="slow",status="500"}'
+        values: '0+2x20'
+      - series: 'http_requests_total{service="slow",status="200"}'
+        values: '0+98x20'
+      - series: 'http_request_duration_seconds_bucket{service="slow",le="0.5"}'
+        values: '0+10x20'
+      - series: 'http_request_duration_seconds_bucket{service="slow",le="1"}'
+        values: '0+20x20'
+      - series: 'http_request_duration_seconds_bucket{service="slow",le="2.5"}'
+        values: '0+100x20'
+      - series: 'http_request_duration_seconds_bucket{service="slow",le="+Inf"}'
+        values: '0+100x20'
+      # "ok": 0.5% errors, p95 well under 1s — must fire nothing
+      - series: 'http_requests_total{service="ok",status="500"}'
+        values: '0+1x20'
+      - series: 'http_requests_total{service="ok",status="200"}'
+        values: '0+199x20'
+      - series: 'http_request_duration_seconds_bucket{service="ok",le="0.5"}'
+        values: '0+190x20'
+      - series: 'http_request_duration_seconds_bucket{service="ok",le="1"}'
+        values: '0+200x20'
+      - series: 'http_request_duration_seconds_bucket{service="ok",le="+Inf"}'
+        values: '0+200x20'
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: HighErrorRate
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: ElevatedErrorRate
+        exp_alerts:
+          - exp_labels: { severity: warning, module: app, service: slow }
+            exp_annotations:
+              summary: "slow 5xx rate is 2.0% over 15m"
+              runbook_url: https://gitlab.com/nhanlagc60299/sre-starter-kit/-/wikis/ElevatedErrorRate
+      - eval_time: 15m
+        alertname: HighP95Latency
+        exp_alerts:
+          - exp_labels: { severity: warning, module: app, service: slow }
+            exp_annotations:
+              summary: "slow p95 latency is 2.41s"
+              runbook_url: https://gitlab.com/nhanlagc60299/sre-starter-kit/-/wikis/HighP95Latency

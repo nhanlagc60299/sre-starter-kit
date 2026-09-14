@@ -1,0 +1,64 @@
+groups:
+  - name: infra
+    rules:
+      - alert: NodeDown
+        expr: up{job="node"} == 0
+        for: 2m
+        labels: { severity: critical, module: infra }
+        annotations:
+          summary: "Node {{ $labels.instance }} is down"
+          runbook_url: https://gitlab.com/nhanlagc60299/sre-starter-kit/-/wikis/NodeDown
+
+      - alert: DiskFull
+        expr: (node_filesystem_avail_bytes{fstype!~"tmpfs|overlay"} / node_filesystem_size_bytes) * 100 < 5
+        for: 2m
+        labels: { severity: critical, module: infra }
+        annotations:
+          summary: "Disk {{ $labels.mountpoint }} on {{ $labels.instance }} has {{ $value | printf \"%.0f\" }}% free"
+          runbook_url: https://gitlab.com/nhanlagc60299/sre-starter-kit/-/wikis/DiskFull
+
+      - alert: DiskLow
+        expr: (node_filesystem_avail_bytes{fstype!~"tmpfs|overlay"} / node_filesystem_size_bytes) * 100 < 15
+        for: 10m
+        labels: { severity: warning, module: infra }
+        annotations:
+          summary: "Disk {{ $labels.mountpoint }} on {{ $labels.instance }} has {{ $value | printf \"%.0f\" }}% free"
+          runbook_url: https://gitlab.com/nhanlagc60299/sre-starter-kit/-/wikis/DiskLow
+
+      - alert: DiskWillFillIn24h
+        expr: predict_linear(node_filesystem_avail_bytes{fstype!~"tmpfs|overlay"}[6h], 24*3600) < 0
+        for: 30m
+        labels: { severity: warning, module: infra }
+        annotations:
+          summary: "Disk {{ $labels.mountpoint }} on {{ $labels.instance }} will fill within 24h"
+          runbook_url: https://gitlab.com/nhanlagc60299/sre-starter-kit/-/wikis/DiskWillFillIn24h
+
+      - alert: HighCPU
+        expr: 100 - (avg by (instance) (rate(node_cpu_seconds_total{mode="idle"}[5m])) * 100) > 85
+        for: 15m
+        labels: { severity: warning, module: infra }
+        annotations:
+          summary: "CPU on {{ $labels.instance }} above 85% for 15m"
+          runbook_url: https://gitlab.com/nhanlagc60299/sre-starter-kit/-/wikis/HighCPU
+
+      - alert: HighMemory
+        expr: (1 - node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes) * 100 > 90
+        for: 10m
+        labels: { severity: warning, module: infra }
+        annotations:
+          summary: "Memory on {{ $labels.instance }} above 90% for 10m"
+          runbook_url: https://gitlab.com/nhanlagc60299/sre-starter-kit/-/wikis/HighMemory
+
+      - alert: OOMKilled
+        expr: increase(container_oom_events_total[10m]) > 0
+        labels: { severity: critical, module: infra }
+        annotations:
+          summary: "Container {{ $labels.name }} was OOM killed"
+          runbook_url: https://gitlab.com/nhanlagc60299/sre-starter-kit/-/wikis/OOMKilled
+
+      - alert: ContainerRestartLoop
+        expr: changes(container_start_time_seconds{name!=""}[15m]) > 3
+        labels: { severity: critical, module: infra }
+        annotations:
+          summary: "Container {{ $labels.name }} restarted >3 times in 15m"
+          runbook_url: https://gitlab.com/nhanlagc60299/sre-starter-kit/-/wikis/ContainerRestartLoop

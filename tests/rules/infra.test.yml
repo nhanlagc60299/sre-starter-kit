@@ -1,0 +1,65 @@
+rule_files:
+  - /p/rules/infra.yml
+evaluation_interval: 1m
+tests:
+  - interval: 1m
+    input_series:
+      - series: 'up{job="node",instance="n1"}'
+        values: '0x5'
+      - series: 'node_filesystem_avail_bytes{job="node",instance="n1",mountpoint="/",fstype="ext4"}'
+        values: '4x5'
+      - series: 'node_filesystem_size_bytes{job="node",instance="n1",mountpoint="/",fstype="ext4"}'
+        values: '100x5'
+    alert_rule_test:
+      - eval_time: 3m
+        alertname: NodeDown
+        exp_alerts:
+          - exp_labels: { severity: critical, module: infra, job: node, instance: n1 }
+            exp_annotations:
+              summary: "Node n1 is down"
+              runbook_url: https://gitlab.com/nhanlagc60299/sre-starter-kit/-/wikis/NodeDown
+      - eval_time: 5m
+        alertname: DiskFull
+        exp_alerts:
+          - exp_labels: { severity: critical, module: infra, job: node, instance: n1, mountpoint: "/", fstype: ext4 }
+            exp_annotations:
+              summary: "Disk / on n1 has 4% free"
+              runbook_url: https://gitlab.com/nhanlagc60299/sre-starter-kit/-/wikis/DiskFull
+  - interval: 1m
+    input_series:
+      - series: 'node_filesystem_avail_bytes{job="node",instance="n1",mountpoint="/",fstype="ext4"}'
+        values: '50x5'
+      - series: 'node_filesystem_size_bytes{job="node",instance="n1",mountpoint="/",fstype="ext4"}'
+        values: '100x5'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: DiskFull
+        exp_alerts: []
+      - eval_time: 5m
+        alertname: DiskLow
+        exp_alerts: []
+  - interval: 1m
+    input_series:
+      - series: 'container_oom_events_total{job="cadvisor",name="api"}'
+        values: '0 0 1 1 1 1 1 1 1 1 1'
+      - series: 'container_oom_events_total{job="cadvisor",name="web"}'
+        values: '0x10'
+      - series: 'container_start_time_seconds{job="cadvisor",name="worker"}'
+        values: '100 100 200 200 300 300 400 400 500 500 500'
+      - series: 'container_start_time_seconds{job="cadvisor",name="web"}'
+        values: '100x10'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: OOMKilled
+        exp_alerts:
+          - exp_labels: { severity: critical, module: infra, job: cadvisor, name: api }
+            exp_annotations:
+              summary: "Container api was OOM killed"
+              runbook_url: https://gitlab.com/nhanlagc60299/sre-starter-kit/-/wikis/OOMKilled
+      - eval_time: 10m
+        alertname: ContainerRestartLoop
+        exp_alerts:
+          - exp_labels: { severity: critical, module: infra, job: cadvisor, name: worker }
+            exp_annotations:
+              summary: "Container worker restarted >3 times in 15m"
+              runbook_url: https://gitlab.com/nhanlagc60299/sre-starter-kit/-/wikis/ContainerRestartLoop

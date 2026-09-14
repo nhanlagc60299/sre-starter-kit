@@ -1,0 +1,57 @@
+groups:
+  - name: app
+    rules:
+      - alert: ServiceDown
+        expr: probe_success{job="blackbox-http"} == 0
+        for: 2m
+        labels: { severity: critical, module: app }
+        annotations:
+          summary: "Service {{ $labels.service }} is DOWN ({{ $labels.instance }})"
+          runbook_url: https://gitlab.com/nhanlagc60299/sre-starter-kit/-/wikis/ServiceDown
+
+      - alert: BlackboxExporterDown
+        expr: up{job="blackbox-http"} == 0
+        for: 5m
+        labels: { severity: critical, module: app }
+        annotations:
+          summary: "Blackbox exporter is down - service probes are not running"
+          runbook_url: https://gitlab.com/nhanlagc60299/sre-starter-kit/-/wikis/BlackboxExporterDown
+
+      - alert: CertExpiresIn7d
+        expr: probe_ssl_earliest_cert_expiry{job="blackbox-http"} - time() < 7*24*3600
+        for: 1m
+        labels: { severity: warning, module: app }
+        annotations:
+          summary: "TLS cert for {{ $labels.service }} expires in less than 7 days"
+          runbook_url: https://gitlab.com/nhanlagc60299/sre-starter-kit/-/wikis/CertExpiresIn7d
+
+      # The three rules below need the app to expose http_requests_total{service,status}
+      # and http_request_duration_seconds_bucket{service,le}. See README "App metrics".
+      - alert: HighErrorRate
+        expr: |
+          sum by (service) (rate(http_requests_total{status=~"5.."}[5m]))
+            / sum by (service) (rate(http_requests_total[5m])) * 100 > 5
+        for: 5m
+        labels: { severity: critical, module: app }
+        annotations:
+          summary: "{{ $labels.service }} 5xx rate is {{ $value | printf \"%.0f\" }}% over 5m"
+          runbook_url: https://gitlab.com/nhanlagc60299/sre-starter-kit/-/wikis/HighErrorRate
+
+      - alert: ElevatedErrorRate
+        expr: |
+          sum by (service) (rate(http_requests_total{status=~"5.."}[5m]))
+            / sum by (service) (rate(http_requests_total[5m])) * 100 > 1
+        for: 15m
+        labels: { severity: warning, module: app }
+        annotations:
+          summary: "{{ $labels.service }} 5xx rate is {{ $value | printf \"%.1f\" }}% over 15m"
+          runbook_url: https://gitlab.com/nhanlagc60299/sre-starter-kit/-/wikis/ElevatedErrorRate
+
+      - alert: HighP95Latency
+        expr: |
+          histogram_quantile(0.95, sum by (service, le) (rate(http_request_duration_seconds_bucket[5m]))) > 1
+        for: 10m
+        labels: { severity: warning, module: app }
+        annotations:
+          summary: "{{ $labels.service }} p95 latency is {{ $value | printf \"%.2f\" }}s"
+          runbook_url: https://gitlab.com/nhanlagc60299/sre-starter-kit/-/wikis/HighP95Latency
