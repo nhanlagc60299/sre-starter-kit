@@ -11,7 +11,7 @@ grep -qxF "PROJECT_NAME='acme'" "$tmp/.env"
 grep -qxF "CONTAINER_SOCK='/var/run/docker.sock'" "$tmp/.env"
 grep -qxF "COMPOSE_PROFILES='cadvisor'" "$tmp/.env"
 grep -qxF "AUTH_LOG_PATH='/var/log/secure'" "$tmp/.env"
-[ "$(stat -f '%Lp' "$tmp/.env" 2>/dev/null || stat -c '%a' "$tmp/.env")" = 600 ] || { echo "FAIL: .env is not 0600"; exit 1; }
+case "$(ls -ld "$tmp/.env")" in -rw-------*) ;; *) echo "FAIL: .env is not 0600: $(ls -ld "$tmp/.env")"; exit 1 ;; esac
 grep -qxF "TELEGRAM_BOT_TOKEN='123:abc'" "$tmp/.env"
 grep -qxF "DISK_WARN_PCT='20'" "$tmp/.env"
 grep -qxF "SERVICES='api=http://api:8080/health,web=http://web/'" "$tmp/.env"
