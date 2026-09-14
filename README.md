@@ -31,8 +31,7 @@ Re-run `make init` any time; previous answers are the defaults.
 
 Full alert list: [core/prometheus/rules](core/prometheus/rules) (infra + app) and
 [core/loki/rules/fake/security.yml](core/loki/rules/fake/security.yml) (SSH early warning).
-Every alert carries a `runbook_url` annotation you can point at your own docs (wiki stubs ship
-by default) — written runbook content for every alert is a Pro feature, see below.
+Every alert carries a `runbook_url` annotation pointing at this project's wiki; no runbook content ships with the free tier — edit the URL in `core/` to point at your own docs. Written runbooks for every alert are a Pro feature, see below.
 
 ## App metrics (optional)
 
