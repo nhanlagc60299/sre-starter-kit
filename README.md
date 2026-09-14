@@ -6,7 +6,7 @@ Production-tuned Prometheus + Grafana + Loki stack for small teams on VMs/EC2. O
 
 ## 5-minute install
 
-Requirements: Docker + Compose v2 (or Podman: `CONTAINER_ENGINE=podman make up`), bash, `envsubst` (`apt install gettext-base` / `brew install gettext`).
+Requirements: Docker + Compose v2 (or Podman: `CONTAINER_ENGINE=podman make up`), bash, `envsubst` (`apt install gettext-base` / `brew install gettext`), `python3` (ships with virtually every Linux/macOS; used by the render and validate scripts).
 
 ```bash
 git clone https://gitlab.com/nhanlagc60299/sre-starter-kit && cd sre-starter-kit
@@ -24,12 +24,15 @@ Re-run `make init` any time; previous answers are the defaults.
 |---|---|
 | Metrics | node_exporter, cAdvisor, blackbox HTTP probes for every service you list |
 | Logs | Loki + Grafana Alloy (Promtail is EOL — this kit does not use it) |
-| Alerts | critical → Slack now, repeats hourly. warning → batched every 30 min. NodeDown silences the rest of that node. |
+| Alerts | critical → Slack now, repeats hourly. warning → batched every 30 min. NodeDown silences the other infra alerts on that node. |
 | Receivers | Slack (required), Telegram, MS Teams |
 | Dashboards | Overview (is anything wrong?), Node, App |
 | Early warning | SSH failed-login bursts, root logins. **Not a security control.** |
 
-Full alert list: [core/prometheus/rules](core/prometheus/rules). Every alert links to a runbook page.
+Full alert list: [core/prometheus/rules](core/prometheus/rules) (infra + app) and
+[core/loki/rules/fake/security.yml](core/loki/rules/fake/security.yml) (SSH early warning).
+Every alert carries a `runbook_url` annotation you can point at your own docs (wiki stubs ship
+by default) — written runbook content for every alert is a Pro feature, see below.
 
 ## App metrics (optional)
 
@@ -64,4 +67,4 @@ make smoke        # full stack up, all targets UP, down
 ## Pro
 
 Helm chart for EKS, AWS CloudWatch alerts (RDS/ELB/EC2), Airflow module, SLO burn-rate alerts,
-backup dead-man's switch, watchdog, deploy markers, runbooks for every alert. → *link when live*
+backup dead-man's switch, watchdog, deploy markers, written runbooks for every alert. → *link when live*
