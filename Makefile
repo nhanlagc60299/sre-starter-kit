@@ -26,7 +26,7 @@ validate:        ## static checks (<10s)
 	@bash tests/validate.sh
 
 test-rules:      ## promtool unit tests for alert rules
-	@$(CONTAINER_ENGINE) run --rm -v "$(PWD)/core/prometheus:/p" -v "$(PWD)/tests/rules:/t" --entrypoint promtool $(PROM_IMG) test rules /t/*.test.yml
+	@$(CONTAINER_ENGINE) run --rm -v "$(PWD)/core/prometheus:/p" -v "$(PWD)/tests/rules:/t" --entrypoint promtool $(PROM_IMG) test rules $(patsubst tests/rules/%,/t/%,$(wildcard tests/rules/*.test.yml))
 
 smoke:           ## bring stack up, check all targets UP, tear down
 	@bash tests/smoke.sh
