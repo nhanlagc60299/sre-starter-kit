@@ -1,0 +1,40 @@
+rule_files:
+  - /p/rules/infra.yml
+evaluation_interval: 1m
+tests:
+  - interval: 1m
+    input_series:
+      - series: 'up{job="node",instance="n1"}'
+        values: '0x5'
+      - series: 'node_filesystem_avail_bytes{job="node",instance="n1",mountpoint="/",fstype="ext4"}'
+        values: '4x5'
+      - series: 'node_filesystem_size_bytes{job="node",instance="n1",mountpoint="/",fstype="ext4"}'
+        values: '100x5'
+    alert_rule_test:
+      - eval_time: 3m
+        alertname: NodeDown
+        exp_alerts:
+          - exp_labels: { severity: critical, module: infra, job: node, instance: n1 }
+            exp_annotations:
+              summary: "Node n1 is down"
+              runbook_url: https://gitlab.com/nhanlagc60299/sre-starter-kit/-/wikis/NodeDown
+      - eval_time: 5m
+        alertname: DiskFull
+        exp_alerts:
+          - exp_labels: { severity: critical, module: infra, job: node, instance: n1, mountpoint: "/", fstype: ext4 }
+            exp_annotations:
+              summary: "Disk / on n1 has 4% free"
+              runbook_url: https://gitlab.com/nhanlagc60299/sre-starter-kit/-/wikis/DiskFull
+  - interval: 1m
+    input_series:
+      - series: 'node_filesystem_avail_bytes{job="node",instance="n1",mountpoint="/",fstype="ext4"}'
+        values: '50x5'
+      - series: 'node_filesystem_size_bytes{job="node",instance="n1",mountpoint="/",fstype="ext4"}'
+        values: '100x5'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: DiskFull
+        exp_alerts: []
+      - eval_time: 5m
+        alertname: DiskLow
+        exp_alerts: []
