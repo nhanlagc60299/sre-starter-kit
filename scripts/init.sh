@@ -28,7 +28,9 @@ ask DISK_CRIT_PCT "Disk free % critical threshold" "5"
 ask PROM_RETENTION_TIME "Prometheus retention" "15d"
 ask LOKI_RETENTION_PERIOD "Loki retention" "168h"
 ask GRAFANA_ADMIN_PASSWORD "Grafana admin password" "change-me"
-ask MODULE_SECURITY_ANS "Enable SSH early-warning alerts? (y/n)" "y"
+# Keep the current setting as the default so a re-run does not silently re-enable it.
+case "${MODULE_SECURITY:-true}" in true) sec_default=y ;; *) sec_default=n ;; esac
+ask MODULE_SECURITY_ANS "Enable SSH early-warning alerts? (y/n)" "$sec_default"
 case "$MODULE_SECURITY_ANS" in y|Y|yes|YES) MODULE_SECURITY=true ;; *) MODULE_SECURITY=false ;; esac
 [ -z "$SLACK_WEBHOOK_URL" ] && { echo "ERROR: Slack webhook is required in the free tier." >&2; exit 1; }
 

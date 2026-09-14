@@ -27,7 +27,9 @@ out=[{"targets":[u],"labels":{"service":n}} for n,u in (x.split("=",1) for x in 
 json.dump(out, open(f"{root}/build/prometheus/targets/services.json","w"))
 PY
 # 2. disk thresholds into rendered infra rules (core/ stays untouched)
-[ -f "$ROOT/build/prometheus/rules/infra.yml" ] && sed -i.bak -e "s/\* 100 < 5$/* 100 < ${DISK_CRIT_PCT:-5}/" -e "s/\* 100 < 15$/* 100 < ${DISK_WARN_PCT:-15}/" "$ROOT/build/prometheus/rules/infra.yml" && rm -f "$ROOT/build/prometheus/rules/infra.yml.bak"
+# Two phase: tag both lines first, then fill in the values, so a chosen threshold
+# can never be re-matched by the other expression (e.g. crit=15 vs the "< 15" anchor).
+[ -f "$ROOT/build/prometheus/rules/infra.yml" ] && sed -i.bak -e "s/\* 100 < 5$/* 100 < __CRIT__/" -e "s/\* 100 < 15$/* 100 < __WARN__/" "$ROOT/build/prometheus/rules/infra.yml" && sed -i.bak -e "s/__CRIT__/${DISK_CRIT_PCT:-5}/" -e "s/__WARN__/${DISK_WARN_PCT:-15}/" "$ROOT/build/prometheus/rules/infra.yml" && rm -f "$ROOT/build/prometheus/rules/infra.yml.bak"
 # 3. optional receivers
 AM="$ROOT/build/alertmanager/alertmanager.yml"
 add() { # marker block
@@ -38,19 +40,19 @@ PY
 if [ -f "$AM" ] && [ -n "${TELEGRAM_BOT_TOKEN:-}" ]; then
   for m in RECEIVERS_CRITICAL_EXTRA RECEIVERS_WARNING_EXTRA; do
     add "$m" "    telegram_configs:
-      - bot_token: ${TELEGRAM_BOT_TOKEN}
-        chat_id: ${TELEGRAM_CHAT_ID}
+      - bot_token: ${TELEGRAM_BOT_TOKEN:-}
+        chat_id: ${TELEGRAM_CHAT_ID:-}
         parse_mode: ''
         send_resolved: true
-        message: '[${PROJECT_NAME}] {{ .CommonLabels.alertname }}: {{ range .Alerts }}{{ .Annotations.summary }} {{ end }}'"
+        message: '[${PROJECT_NAME:-}] {{ .CommonLabels.alertname }}: {{ range .Alerts }}{{ .Annotations.summary }} {{ end }}'"
   done
 fi
 if [ -f "$AM" ] && [ -n "${TEAMS_WEBHOOK_URL:-}" ]; then
   for m in RECEIVERS_CRITICAL_EXTRA RECEIVERS_WARNING_EXTRA; do
     add "$m" "    msteamsv2_configs:
-      - webhook_url: ${TEAMS_WEBHOOK_URL}
+      - webhook_url: ${TEAMS_WEBHOOK_URL:-}
         send_resolved: true
-        title: '[${PROJECT_NAME}] {{ .CommonLabels.alertname }}'
+        title: '[${PROJECT_NAME:-}] {{ .CommonLabels.alertname }}'
         text: '{{ range .Alerts }}{{ .Annotations.summary }} {{ end }}'"
   done
 fi

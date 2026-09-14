@@ -33,3 +33,4 @@ smoke:           ## bring stack up, check all targets UP, tear down
 
 test: validate test-rules
 	@bash tests/test_render.sh
+	@bash tests/test_init.sh
