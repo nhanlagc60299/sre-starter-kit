@@ -96,3 +96,7 @@ is serving production traffic.
 
 Helm chart for EKS, AWS CloudWatch alerts (RDS/ELB/EC2), Airflow module, SLO burn-rate alerts,
 backup dead-man's switch, watchdog, deploy markers, written runbooks for every alert. → *link when live*
+
+## License
+
+MIT. See [LICENSE](LICENSE).
