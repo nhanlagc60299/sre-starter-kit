@@ -16,7 +16,23 @@ make up        # http://localhost:3000  (admin / your password)
 
 Re-run `make init` any time; previous answers are the defaults.
 
+`make up` re-renders `build/` from `.env` and reloads Prometheus, Alertmanager and Alloy in place, so it is also the command to run after any config change.
+
 **Podman hosts:** set `CONTAINER_ENGINE=podman`, point `CONTAINER_SOCK` at your Podman socket, and leave `COMPOSE_PROFILES` empty in `.env` — cAdvisor needs Docker's `/var/lib/docker` and will not start. Its scrape target then shows DOWN in Prometheus; no alert keys on it.
+
+## Exposure
+
+Prometheus (9090), Alertmanager (9093) and Loki (3100) have **no authentication** — anyone who can
+reach the port can read your metrics and logs and silence your alerts. Grafana (3000) has a password.
+So everything binds to `127.0.0.1` by default (`BIND_ADDR` in `.env`).
+
+To reach Grafana from your laptop, tunnel instead of opening the port:
+
+```bash
+ssh -L 3000:127.0.0.1:3000 you@your-host   # then http://localhost:3000
+```
+
+Only set `BIND_ADDR=0.0.0.0` if a reverse proxy in front of the host is doing the authentication.
 
 ## What you get
 

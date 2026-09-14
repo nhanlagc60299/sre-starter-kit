@@ -15,7 +15,7 @@ services:
     volumes:
       - ../build/prometheus:/etc/prometheus:ro
       - prom-data:/prometheus
-    ports: ["9090:9090"]
+    ports: ["${BIND_ADDR:-127.0.0.1}:9090:9090"]
 
   alertmanager:
     <<: *restart
@@ -24,7 +24,7 @@ services:
     volumes:
       - ../build/alertmanager:/etc/alertmanager:ro
       - am-data:/alertmanager
-    ports: ["9093:9093"]
+    ports: ["${BIND_ADDR:-127.0.0.1}:9093:9093"]
 
   node-exporter:
     <<: *restart
@@ -57,7 +57,7 @@ services:
     volumes:
       - ../build/loki:/etc/loki:ro
       - loki-data:/loki
-    ports: ["3100:3100"]
+    ports: ["${BIND_ADDR:-127.0.0.1}:3100:3100"]
 
   alloy:
     <<: *restart
@@ -79,6 +79,6 @@ services:
       - ../build/grafana/provisioning:/etc/grafana/provisioning:ro
       - ../build/grafana/dashboards:/var/lib/grafana/dashboards:ro
       - grafana-data:/var/lib/grafana
-    ports: ["3000:3000"]
+    ports: ["${BIND_ADDR:-127.0.0.1}:3000:3000"]
 
 volumes: { prom-data: {}, am-data: {}, loki-data: {}, alloy-data: {}, grafana-data: {} }

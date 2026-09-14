@@ -4,6 +4,12 @@ set -euo pipefail
 ROOT="$(pwd)"
 [ -f "$ROOT/.env" ] || { echo "ERROR: .env not found. Run 'make init' first." >&2; exit 1; }
 set -a; . "$ROOT/.env"; set +a
+# Alertmanager silently crash-loops on an empty slack api_url, so refuse to render one.
+# Guarded on the template so the minimal render fixture in tests/ is unaffected.
+if [ -f "$ROOT/core/alertmanager/alertmanager.yml.tpl" ] && [ -z "${SLACK_WEBHOOK_URL:-}" ]; then
+  echo "ERROR: SLACK_WEBHOOK_URL is empty. Set it in .env (or run 'make init')." >&2
+  exit 1
+fi
 rm -rf "$ROOT/build"; mkdir -p "$ROOT/build"
 # Only substitute variables that are defined in .env, so Prometheus/Alloy $labels etc. survive.
 VARS=$(grep -oE '^[A-Z_][A-Z0-9_]*=' "$ROOT/.env" | sed 's/=$//' | sed 's/^/\$/' | tr '\n' ' ')
