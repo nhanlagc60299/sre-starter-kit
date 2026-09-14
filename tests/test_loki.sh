@@ -6,6 +6,8 @@ sed 's#^SLACK_WEBHOOK_URL=.*#SLACK_WEBHOOK_URL=http://localhost:9/#' .env.exampl
 cp -r core "$tmp/core"
 ( cd "$tmp" && bash "$OLDPWD/scripts/render.sh" >/dev/null )
 ${CONTAINER_ENGINE:-docker} run --rm -v "$tmp/build/loki:/c" grafana/loki:3.5.0 -config.file=/c/loki.yml -verify-config
+# -verify-config accepts the un-substituted template too, so check the value actually landed
+grep -q 'retention_period: 168h' "$tmp/build/loki/loki.yml" || { echo "FAIL: LOKI_RETENTION_PERIOD not substituted"; exit 1; }
 ${CONTAINER_ENGINE:-docker} run --rm -v "$tmp/build/loki:/c" grafana/alloy:v1.9.0 fmt /c/config.alloy >/dev/null
 # lokitool is not present in the loki image; assert the rules file rendered to the
 # tenant path and declares exactly the two alerts, instead of relying on loki -verify-config

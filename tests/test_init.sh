@@ -64,4 +64,11 @@ printf '\n\n\n\n\nbad=http://x/a,b\nok=http://ok/\n\n20%%\n20\n8\n\n\n\n\n\n\n' 
 grep -qxF "SERVICES='ok=http://ok/'" "$tmp/.env"
 grep -qxF "DISK_WARN_PCT='20'" "$tmp/.env"
 grep -qxF "DISK_CRIT_PCT='8'" "$tmp/.env"
+
+# --- re-run 6: a Teams webhook reaches both receivers and the result is still valid ---
+printf '\n\n\n\nhttps://example.invalid/hook\n\n\n\n\n\n\n\n\n\n' | ( cd "$tmp" && bash scripts/init.sh >/dev/null )
+grep -qxF "TEAMS_WEBHOOK_URL='https://example.invalid/hook'" "$tmp/.env"
+( cd "$tmp" && bash scripts/render.sh >/dev/null )
+[ "$(grep -c msteamsv2_configs "$tmp/build/alertmanager/alertmanager.yml")" = 2 ] || { echo "FAIL: teams receiver not in both receivers"; exit 1; }
+${CONTAINER_ENGINE:-docker} run --rm -v "$tmp/build/alertmanager:/c" --entrypoint amtool prom/alertmanager:v0.28.1 check-config /c/alertmanager.yml >/dev/null
 echo "test_init OK"

@@ -1,3 +1,6 @@
 .env
 build/
 *.log
+.superpowers/
+*.tmp
+tmp.*

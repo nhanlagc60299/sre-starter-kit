@@ -14,7 +14,7 @@ make init      # answers -> .env
 make up        # http://localhost:3000  (admin / your password)
 ```
 
-Re-run `make init` any time; previous answers are the defaults.
+Re-run `make init` any time; previous answers are the defaults. A blank answer on re-run keeps the previous value; to clear a value, edit `.env` directly.
 
 `make up` re-renders `build/` from `.env` and reloads Prometheus, Alertmanager and Alloy in place, so it is also the command to run after any config change.
 
@@ -71,7 +71,9 @@ the kit on a host you control.
 | ≤30 hosts, 15 services | 2 vCPU, 4 GB | 100 GB |
 
 Rule of thumb: ~1 GB per host for 15 days of metrics, ~2 GB per service for 7 days of logs.
-Prometheus stops at `PROM_RETENTION_SIZE` (default 20 GB) so it cannot fill the disk.
+Prometheus stops at `PROM_RETENTION_SIZE` (default 20 GB). Loki is capped by time only
+(`LOKI_RETENTION_PERIOD`), so its disk use follows how much you log — size the disk for your peak
+ingest rate and watch the DiskLow alert.
 
 ## Layout
 

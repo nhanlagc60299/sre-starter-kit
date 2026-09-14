@@ -12,6 +12,7 @@ cleanup() {
   else rm -f .env; rm -rf build; fi
 }
 trap cleanup EXIT
+trap 'cleanup; exit 130' INT   # Ctrl-C must not report success
 if [ -f .env ]; then BACKUP=$(mktemp); mv .env "$BACKUP"; fi
 sed 's/^GRAFANA_ADMIN_PASSWORD=.*/GRAFANA_ADMIN_PASSWORD=smoke/; s#^SLACK_WEBHOOK_URL=.*#SLACK_WEBHOOK_URL=http://localhost:9/#' .env.example > .env
 sed -i.bak "s/^BIND_ADDR=.*/BIND_ADDR=${SMOKE_BIND_ADDR:-127.0.0.1}/" .env && rm -f .env.bak

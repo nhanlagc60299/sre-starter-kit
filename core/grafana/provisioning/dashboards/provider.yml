@@ -4,5 +4,5 @@ providers:
     folder: SRE Kit
     type: file
     disableDeletion: false
-    allowUiUpdates: true
+    allowUiUpdates: false   # dashboards come from core/; UI edits would be silently reverted on re-provision
     options: { path: /var/lib/grafana/dashboards, foldersFromFilesStructure: false }
