@@ -21,5 +21,6 @@ for i in $(seq 1 30); do
 done
 [ -z "$down" ] || { echo "FAIL: targets not up: $down"; $COMPOSE ps; exit 1; }
 curl -sf $H:3000/api/health | grep -q '"database": "ok"' || { echo "FAIL: grafana unhealthy"; exit 1; }
-curl -sf $H:3100/ready | grep -q ready || { echo "FAIL: loki not ready"; exit 1; }
+for i in $(seq 1 15); do curl -sf $H:3100/ready | grep -q ready && break; sleep 4; done
+curl -sf $H:3100/ready | grep -q ready || { echo "FAIL: loki not ready after 60s"; exit 1; }
 echo "smoke OK: all targets up"
