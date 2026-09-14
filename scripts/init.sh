@@ -8,6 +8,14 @@ ask() { # var prompt default
   read -r -p "$p [${d}]: " a
   printf -v "$v" '%s' "${a:-$d}"
 }
+ask_pct() { # var prompt default -- integer 1-99
+  while true; do
+    ask "$1" "$2" "$3"
+    case "${!1}" in [1-9]|[1-9][0-9]) return 0 ;; esac
+    echo "  enter a number 1-99"
+  done
+}
+q() { printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"; }  # shell-quote a value for .env
 echo "== SRE Starter Kit setup =="
 ask PROJECT_NAME "Project name" "myproject"
 ask SLACK_WEBHOOK_URL "Slack webhook URL (required)" ""
@@ -19,12 +27,13 @@ svcs=()
 while true; do
   read -r -p "  service: " line
   [ -z "$line" ] && break
+  case "$line" in *,*) echo "  commas are not allowed in a service line"; continue ;; esac
   [[ "$line" == *=http* ]] || { echo "  format: name=http://..."; continue; }
   svcs+=("$line")
 done
 [ ${#svcs[@]} -gt 0 ] && SERVICES=$(IFS=,; echo "${svcs[*]}")
-ask DISK_WARN_PCT "Disk free % warning threshold" "15"
-ask DISK_CRIT_PCT "Disk free % critical threshold" "5"
+ask_pct DISK_WARN_PCT "Disk free % warning threshold" "15"
+ask_pct DISK_CRIT_PCT "Disk free % critical threshold" "5"
 ask PROM_RETENTION_TIME "Prometheus retention" "15d"
 ask LOKI_RETENTION_PERIOD "Loki retention" "168h"
 ask GRAFANA_ADMIN_PASSWORD "Grafana admin password" "change-me"
@@ -35,22 +44,22 @@ case "$MODULE_SECURITY_ANS" in y|Y|yes|YES) MODULE_SECURITY=true ;; *) MODULE_SE
 [ -z "$SLACK_WEBHOOK_URL" ] && { echo "ERROR: Slack webhook is required in the free tier." >&2; exit 1; }
 
 cat > "$ROOT/.env" <<ENV
-PROJECT_NAME=$PROJECT_NAME
-SLACK_WEBHOOK_URL=$SLACK_WEBHOOK_URL
-TELEGRAM_BOT_TOKEN=$TELEGRAM_BOT_TOKEN
-TELEGRAM_CHAT_ID=$TELEGRAM_CHAT_ID
-TEAMS_WEBHOOK_URL=$TEAMS_WEBHOOK_URL
-TRIAGE_WEBHOOK_URL=${TRIAGE_WEBHOOK_URL:-http://localhost:9/}
-SERVICES=${SERVICES:-}
-DISK_WARN_PCT=$DISK_WARN_PCT
-DISK_CRIT_PCT=$DISK_CRIT_PCT
-PROM_RETENTION_TIME=$PROM_RETENTION_TIME
-PROM_RETENTION_SIZE=${PROM_RETENTION_SIZE:-20GB}
-LOKI_RETENTION_PERIOD=$LOKI_RETENTION_PERIOD
-GRAFANA_ADMIN_PASSWORD=$GRAFANA_ADMIN_PASSWORD
-MODULE_SECURITY=$MODULE_SECURITY
-AUTH_LOG_PATH=${AUTH_LOG_PATH:-/var/log/auth.log}
-CONTAINER_SOCK=${CONTAINER_SOCK:-/var/run/docker.sock}
-COMPOSE_PROFILES=${COMPOSE_PROFILES:-cadvisor}
+PROJECT_NAME=$(q "$PROJECT_NAME")
+SLACK_WEBHOOK_URL=$(q "$SLACK_WEBHOOK_URL")
+TELEGRAM_BOT_TOKEN=$(q "$TELEGRAM_BOT_TOKEN")
+TELEGRAM_CHAT_ID=$(q "$TELEGRAM_CHAT_ID")
+TEAMS_WEBHOOK_URL=$(q "$TEAMS_WEBHOOK_URL")
+TRIAGE_WEBHOOK_URL=$(q "${TRIAGE_WEBHOOK_URL:-http://localhost:9/}")
+SERVICES=$(q "${SERVICES:-}")
+DISK_WARN_PCT=$(q "$DISK_WARN_PCT")
+DISK_CRIT_PCT=$(q "$DISK_CRIT_PCT")
+PROM_RETENTION_TIME=$(q "$PROM_RETENTION_TIME")
+PROM_RETENTION_SIZE=$(q "${PROM_RETENTION_SIZE:-20GB}")
+LOKI_RETENTION_PERIOD=$(q "$LOKI_RETENTION_PERIOD")
+GRAFANA_ADMIN_PASSWORD=$(q "$GRAFANA_ADMIN_PASSWORD")
+MODULE_SECURITY=$(q "$MODULE_SECURITY")
+AUTH_LOG_PATH=$(q "${AUTH_LOG_PATH:-/var/log/auth.log}")
+CONTAINER_SOCK=$(q "${CONTAINER_SOCK:-/var/run/docker.sock}")
+COMPOSE_PROFILES=$(q "${COMPOSE_PROFILES:-cadvisor}")
 ENV
 echo "wrote .env"
