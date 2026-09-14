@@ -1,0 +1,33 @@
+{
+  "uid": "sre-app", "title": "SRE Kit / App", "schemaVersion": 39, "time": {"from": "now-6h", "to": "now"},
+  "refresh": "30s", "tags": ["sre-kit"],
+  "templating": {"list": [{"name": "service", "type": "query", "datasource": {"type": "prometheus", "uid": "prometheus"},
+    "query": "label_values(probe_success{job=\"blackbox-http\"}, service)", "includeAll": true, "multi": true, "current": {"text": "All", "value": "$__all"}}]},
+  "panels": [
+    {"id": 1, "type": "stat", "title": "Up", "gridPos": {"x": 0, "y": 0, "w": 6, "h": 4},
+     "datasource": {"type": "prometheus", "uid": "prometheus"},
+     "targets": [{"expr": "probe_success{job=\"blackbox-http\", service=~\"$service\"}", "legendFormat": "{{service}}", "refId": "A"}],
+     "fieldConfig": {"defaults": {"mappings": [{"type": "value", "options": {"0": {"text": "DOWN", "color": "red"}, "1": {"text": "UP", "color": "green"}}}]}}},
+    {"id": 2, "type": "timeseries", "title": "Probe duration", "gridPos": {"x": 6, "y": 0, "w": 18, "h": 8},
+     "datasource": {"type": "prometheus", "uid": "prometheus"},
+     "targets": [{"expr": "probe_duration_seconds{job=\"blackbox-http\", service=~\"$service\"}", "legendFormat": "{{service}}", "refId": "A"}],
+     "fieldConfig": {"defaults": {"unit": "s"}}},
+    {"id": 3, "type": "timeseries", "title": "Requests/s by status", "gridPos": {"x": 0, "y": 8, "w": 12, "h": 8},
+     "datasource": {"type": "prometheus", "uid": "prometheus"},
+     "targets": [{"expr": "sum by (service, status) (rate(http_requests_total{service=~\"$service\"}[5m]))", "legendFormat": "{{service}} {{status}}", "refId": "A"}]},
+    {"id": 4, "type": "timeseries", "title": "Latency p50 / p95 / p99", "gridPos": {"x": 12, "y": 8, "w": 12, "h": 8},
+     "datasource": {"type": "prometheus", "uid": "prometheus"},
+     "targets": [
+       {"expr": "histogram_quantile(0.50, sum by (service, le) (rate(http_request_duration_seconds_bucket{service=~\"$service\"}[5m])))", "legendFormat": "{{service}} p50", "refId": "A"},
+       {"expr": "histogram_quantile(0.95, sum by (service, le) (rate(http_request_duration_seconds_bucket{service=~\"$service\"}[5m])))", "legendFormat": "{{service}} p95", "refId": "B"},
+       {"expr": "histogram_quantile(0.99, sum by (service, le) (rate(http_request_duration_seconds_bucket{service=~\"$service\"}[5m])))", "legendFormat": "{{service}} p99", "refId": "C"}],
+     "fieldConfig": {"defaults": {"unit": "s"}}},
+    {"id": 5, "type": "stat", "title": "Cert days left", "gridPos": {"x": 0, "y": 16, "w": 6, "h": 4},
+     "datasource": {"type": "prometheus", "uid": "prometheus"},
+     "targets": [{"expr": "(probe_ssl_earliest_cert_expiry{job=\"blackbox-http\", service=~\"$service\"} - time()) / 86400", "legendFormat": "{{service}}", "refId": "A"}],
+     "fieldConfig": {"defaults": {"unit": "d", "thresholds": {"mode": "absolute", "steps": [{"color": "red", "value": null}, {"color": "orange", "value": 7}, {"color": "green", "value": 30}]}}}},
+    {"id": 6, "type": "logs", "title": "Logs", "gridPos": {"x": 6, "y": 16, "w": 18, "h": 8},
+     "datasource": {"type": "loki", "uid": "loki"},
+     "targets": [{"expr": "{service=~\"$service\"}", "refId": "A"}]}
+  ]
+}
