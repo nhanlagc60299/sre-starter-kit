@@ -23,4 +23,6 @@ done
 curl -sf $H:3000/api/health | grep -q '"database": "ok"' || { echo "FAIL: grafana unhealthy"; exit 1; }
 for i in $(seq 1 15); do curl -sf $H:3100/ready | grep -q ready && break; sleep 4; done
 curl -sf $H:3100/ready | grep -q ready || { echo "FAIL: loki not ready after 60s"; exit 1; }
+rules=$(curl -sf $H:3100/loki/api/v1/rules 2>/dev/null || true)
+echo "$rules" | grep -q SSHFailedLoginBurst && echo "$rules" | grep -q RootLoginDetected || { echo "FAIL: loki ruler did not load security rules"; exit 1; }
 echo "smoke OK: all targets up"
