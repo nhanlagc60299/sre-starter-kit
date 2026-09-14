@@ -62,7 +62,7 @@ services:
   alloy:
     <<: *restart
     image: grafana/alloy:v1.9.0
-    command: [run, /etc/alloy/config.alloy, --server.http.listen-addr=0.0.0.0:12345]
+    command: [run, /etc/alloy/config.alloy, --server.http.listen-addr=0.0.0.0:12345, --storage.path=/var/lib/alloy/data]
     volumes:
       - ../build/loki/config.alloy:/etc/alloy/config.alloy:ro
       - ${CONTAINER_SOCK}:/var/run/docker.sock:ro

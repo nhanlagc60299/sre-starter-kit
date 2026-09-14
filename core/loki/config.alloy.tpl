@@ -13,7 +13,7 @@ discovery.relabel "containers" {
   targets = discovery.docker.containers.targets
   rule {
     source_labels = ["__meta_docker_container_name"]
-    regex         = "/(.*)"
+    regex         = "/?(.*)"
     target_label  = "container"
   }
   rule {
