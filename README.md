@@ -94,9 +94,10 @@ is serving production traffic.
 
 ## Pro
 
-AWS CloudWatch alerts (RDS/ELB/EC2), SLO burn-rate alerts, backup dead-man's switch,
-monitoring watchdog, deploy markers on every dashboard, and a written runbook for all 32 alerts.
-An Airflow module and a Helm chart for EKS are on the roadmap, not in the current release.
+AWS CloudWatch alerts (RDS/ELB/EC2), an Airflow module (scheduler health, DAG failures, run
+duration, queue backlog), SLO burn-rate alerts, backup dead-man's switch, monitoring watchdog,
+deploy markers on every dashboard, and a written runbook for all 39 alerts.
+A Helm chart for EKS is on the roadmap, not in the current release.
 To buy Pro or ask what it covers, email **nhanlagc60299@gmail.com**.
 
 ## License
