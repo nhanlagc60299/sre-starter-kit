@@ -95,8 +95,9 @@ is serving production traffic.
 ## Pro
 
 AWS CloudWatch alerts (RDS/ELB/EC2), an Airflow module (scheduler health, DAG failures, run
-duration, queue backlog), SLO burn-rate alerts, backup dead-man's switch, monitoring watchdog,
-deploy markers on every dashboard, and a written runbook for all 39 alerts.
+duration against a 7-day baseline, queue backlog), SLO burn-rate alerts, backup dead-man's switch,
+monitoring watchdog, deploy markers on every dashboard, and a written runbook for all 39 alerts
+(37 from Prometheus metrics, 2 from Loki logs).
 A Helm chart for EKS is on the roadmap, not in the current release.
 To buy Pro or ask what it covers, email **nhanlagc60299@gmail.com**.
 
