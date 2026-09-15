@@ -7,7 +7,7 @@ groups:
         labels: { severity: critical, module: app }
         annotations:
           summary: "Service {{ $labels.service }} is DOWN ({{ $labels.instance }})"
-          runbook_url: https://github.com/nhanlagc60299/sre-starter-kit/wiki/ServiceDown
+          runbook_url: https://github.com/nhanlagc60299/sre-starter-kit/blob/main/docs/ALERTS.md#servicedown
 
       - alert: BlackboxExporterDown
         expr: up{job="blackbox-http"} == 0
@@ -15,7 +15,7 @@ groups:
         labels: { severity: critical, module: app }
         annotations:
           summary: "Blackbox exporter is down - service probes are not running"
-          runbook_url: https://github.com/nhanlagc60299/sre-starter-kit/wiki/BlackboxExporterDown
+          runbook_url: https://github.com/nhanlagc60299/sre-starter-kit/blob/main/docs/ALERTS.md#blackboxexporterdown
 
       - alert: CertExpiresIn7d
         expr: probe_ssl_earliest_cert_expiry{job="blackbox-http"} - time() < 7*24*3600
@@ -23,7 +23,7 @@ groups:
         labels: { severity: warning, module: app }
         annotations:
           summary: "TLS cert for {{ $labels.service }} expires in less than 7 days"
-          runbook_url: https://github.com/nhanlagc60299/sre-starter-kit/wiki/CertExpiresIn7d
+          runbook_url: https://github.com/nhanlagc60299/sre-starter-kit/blob/main/docs/ALERTS.md#certexpiresin7d
 
       # The three rules below need the app to expose http_requests_total{service,status}
       # and http_request_duration_seconds_bucket{service,le}. See README "App metrics".
@@ -35,7 +35,7 @@ groups:
         labels: { severity: critical, module: app }
         annotations:
           summary: "{{ $labels.service }} 5xx rate is {{ $value | printf \"%.0f\" }}% over 5m"
-          runbook_url: https://github.com/nhanlagc60299/sre-starter-kit/wiki/HighErrorRate
+          runbook_url: https://github.com/nhanlagc60299/sre-starter-kit/blob/main/docs/ALERTS.md#higherrorrate
 
       - alert: ElevatedErrorRate
         expr: |
@@ -45,7 +45,7 @@ groups:
         labels: { severity: warning, module: app }
         annotations:
           summary: "{{ $labels.service }} 5xx rate is {{ $value | printf \"%.1f\" }}% over 15m"
-          runbook_url: https://github.com/nhanlagc60299/sre-starter-kit/wiki/ElevatedErrorRate
+          runbook_url: https://github.com/nhanlagc60299/sre-starter-kit/blob/main/docs/ALERTS.md#elevatederrorrate
 
       - alert: HighP95Latency
         expr: |
@@ -54,4 +54,4 @@ groups:
         labels: { severity: warning, module: app }
         annotations:
           summary: "{{ $labels.service }} p95 latency is {{ $value | printf \"%.2f\" }}s"
-          runbook_url: https://github.com/nhanlagc60299/sre-starter-kit/wiki/HighP95Latency
+          runbook_url: https://github.com/nhanlagc60299/sre-starter-kit/blob/main/docs/ALERTS.md#highp95latency

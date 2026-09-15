@@ -10,7 +10,7 @@ groups:
         labels: { severity: warning, module: security }
         annotations:
           summary: "SSH: >20 failed logins in 5m from {{ $labels.ip }} (early warning, not a security control)"
-          runbook_url: https://github.com/nhanlagc60299/sre-starter-kit/wiki/SSHFailedLoginBurst
+          runbook_url: https://github.com/nhanlagc60299/sre-starter-kit/blob/main/docs/ALERTS.md#sshfailedloginburst
 
       - alert: RootLoginDetected
         expr: |
@@ -18,4 +18,4 @@ groups:
         labels: { severity: warning, module: security }
         annotations:
           summary: "SSH: root login accepted (early warning, not a security control)"
-          runbook_url: https://github.com/nhanlagc60299/sre-starter-kit/wiki/RootLoginDetected
+          runbook_url: https://github.com/nhanlagc60299/sre-starter-kit/blob/main/docs/ALERTS.md#rootlogindetected

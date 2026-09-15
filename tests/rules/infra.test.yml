@@ -17,14 +17,14 @@ tests:
           - exp_labels: { severity: critical, module: infra, job: node, instance: n1 }
             exp_annotations:
               summary: "Node n1 is down"
-              runbook_url: https://github.com/nhanlagc60299/sre-starter-kit/wiki/NodeDown
+              runbook_url: https://github.com/nhanlagc60299/sre-starter-kit/blob/main/docs/ALERTS.md#nodedown
       - eval_time: 5m
         alertname: DiskFull
         exp_alerts:
           - exp_labels: { severity: critical, module: infra, job: node, instance: n1, mountpoint: "/", fstype: ext4 }
             exp_annotations:
               summary: "Disk / on n1 has 4% free"
-              runbook_url: https://github.com/nhanlagc60299/sre-starter-kit/wiki/DiskFull
+              runbook_url: https://github.com/nhanlagc60299/sre-starter-kit/blob/main/docs/ALERTS.md#diskfull
   - interval: 1m
     input_series:
       - series: 'node_filesystem_avail_bytes{job="node",instance="n1",mountpoint="/",fstype="ext4"}'
@@ -55,11 +55,11 @@ tests:
           - exp_labels: { severity: critical, module: infra, job: cadvisor, name: api }
             exp_annotations:
               summary: "Container api was OOM killed"
-              runbook_url: https://github.com/nhanlagc60299/sre-starter-kit/wiki/OOMKilled
+              runbook_url: https://github.com/nhanlagc60299/sre-starter-kit/blob/main/docs/ALERTS.md#oomkilled
       - eval_time: 10m
         alertname: ContainerRestartLoop
         exp_alerts:
           - exp_labels: { severity: critical, module: infra, job: cadvisor, name: worker }
             exp_annotations:
               summary: "Container worker restarted >3 times in 15m"
-              runbook_url: https://github.com/nhanlagc60299/sre-starter-kit/wiki/ContainerRestartLoop
+              runbook_url: https://github.com/nhanlagc60299/sre-starter-kit/blob/main/docs/ALERTS.md#containerrestartloop

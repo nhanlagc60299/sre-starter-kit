@@ -21,6 +21,21 @@ for f in files:
                 bad.append(f"{f}:{r['alert']}")
 if bad: print("alerts missing severity/module/runbook_url:", *bad, sep="\n  "); sys.exit(1)
 PY
+# 2b. every runbook_url resolves to a heading in docs/ALERTS.md
+python3 - <<'EOPY' || fail=1
+import yaml,glob,re,sys
+anchors={re.sub(r"[^a-z0-9]+","-",h.lower()).strip("-")
+         for h in re.findall(r"^#+\s+(.*)$", open("docs/ALERTS.md").read(), re.M)}
+missing=[]
+for f in glob.glob("core/prometheus/rules/*.yml")+glob.glob("core/loki/rules/fake/*.yml"):
+    for g in yaml.safe_load(open(f))["groups"]:
+        for r in g["rules"]:
+            if "alert" not in r: continue
+            url=r.get("annotations",{}).get("runbook_url","")
+            frag=url.split("#",1)[1] if "#" in url else ""
+            if frag not in anchors: missing.append(f"{r['alert']}: {url}")
+if missing: print("runbook_url with no matching heading in docs/ALERTS.md:", *missing, sep="\n  "); sys.exit(1)
+EOPY
 # 3. dashboards parse and have uid
 for d in core/grafana/dashboards/*.json; do python3 -c "import json,sys; j=json.load(open('$d')); assert j.get('uid'), 'no uid'" || { echo "bad dashboard $d"; fail=1; }; done
 # 4. rendered configs pass amtool / loki verify (uses .env.example)

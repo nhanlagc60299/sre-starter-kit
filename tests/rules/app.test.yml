@@ -21,28 +21,28 @@ tests:
           - exp_labels: { severity: critical, module: app, job: blackbox-http, service: api, instance: "http://api/health" }
             exp_annotations:
               summary: "Service api is DOWN (http://api/health)"
-              runbook_url: https://github.com/nhanlagc60299/sre-starter-kit/wiki/ServiceDown
+              runbook_url: https://github.com/nhanlagc60299/sre-starter-kit/blob/main/docs/ALERTS.md#servicedown
       - eval_time: 6m
         alertname: BlackboxExporterDown
         exp_alerts:
           - exp_labels: { severity: critical, module: app, job: blackbox-http, instance: "blackbox:9115" }
             exp_annotations:
               summary: "Blackbox exporter is down - service probes are not running"
-              runbook_url: https://github.com/nhanlagc60299/sre-starter-kit/wiki/BlackboxExporterDown
+              runbook_url: https://github.com/nhanlagc60299/sre-starter-kit/blob/main/docs/ALERTS.md#blackboxexporterdown
       - eval_time: 2m
         alertname: CertExpiresIn7d
         exp_alerts:
           - exp_labels: { severity: warning, module: app, job: blackbox-http, service: api, instance: "http://api/health" }
             exp_annotations:
               summary: "TLS cert for api expires in less than 7 days"
-              runbook_url: https://github.com/nhanlagc60299/sre-starter-kit/wiki/CertExpiresIn7d
+              runbook_url: https://github.com/nhanlagc60299/sre-starter-kit/blob/main/docs/ALERTS.md#certexpiresin7d
       - eval_time: 10m
         alertname: HighErrorRate
         exp_alerts:
           - exp_labels: { severity: critical, module: app, service: api }
             exp_annotations:
               summary: "api 5xx rate is 50% over 5m"
-              runbook_url: https://github.com/nhanlagc60299/sre-starter-kit/wiki/HighErrorRate
+              runbook_url: https://github.com/nhanlagc60299/sre-starter-kit/blob/main/docs/ALERTS.md#higherrorrate
 
   - interval: 1m
     input_series:
@@ -80,11 +80,11 @@ tests:
           - exp_labels: { severity: warning, module: app, service: slow }
             exp_annotations:
               summary: "slow 5xx rate is 2.0% over 15m"
-              runbook_url: https://github.com/nhanlagc60299/sre-starter-kit/wiki/ElevatedErrorRate
+              runbook_url: https://github.com/nhanlagc60299/sre-starter-kit/blob/main/docs/ALERTS.md#elevatederrorrate
       - eval_time: 15m
         alertname: HighP95Latency
         exp_alerts:
           - exp_labels: { severity: warning, module: app, service: slow }
             exp_annotations:
               summary: "slow p95 latency is 2.41s"
-              runbook_url: https://github.com/nhanlagc60299/sre-starter-kit/wiki/HighP95Latency
+              runbook_url: https://github.com/nhanlagc60299/sre-starter-kit/blob/main/docs/ALERTS.md#highp95latency
