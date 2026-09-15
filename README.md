@@ -9,7 +9,7 @@ Production-tuned Prometheus + Grafana + Loki stack for small teams on VMs/EC2. O
 Requirements: Docker + Compose v2 (or Podman: `CONTAINER_ENGINE=podman make up`), bash, `envsubst` (`apt install gettext-base` / `brew install gettext`), `python3` (ships with virtually every Linux/macOS; used by the render and validate scripts).
 
 ```bash
-git clone https://gitlab.com/nhanlagc60299/sre-starter-kit && cd sre-starter-kit
+git clone https://github.com/nhanlagc60299/sre-starter-kit && cd sre-starter-kit
 make init      # answers -> .env
 make up        # http://localhost:3000  (admin / your password)
 ```

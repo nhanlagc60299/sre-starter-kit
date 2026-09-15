@@ -1,0 +1,26 @@
+name: CI
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  static:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install build deps
+        run: sudo apt-get update && sudo apt-get install -y gettext-base python3-yaml
+      - run: make validate
+      - run: make test-rules
+      - run: bash tests/test_render.sh
+      - run: bash tests/test_init.sh
+      - run: bash tests/test_env_example.sh
+
+  smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install build deps
+        run: sudo apt-get update && sudo apt-get install -y gettext-base python3-yaml
+      - run: make smoke
