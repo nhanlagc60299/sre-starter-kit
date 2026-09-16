@@ -60,13 +60,35 @@ Warning, after 10m. Host memory stayed above 90% for 10 minutes. Check for a lea
 
 ## Container alerts
 
-### OOMKilled
-Critical, fires immediately. A container was killed by the kernel out-of-memory killer. The limit
-and the workload disagree; find out which one is wrong.
+### ContainerMemoryNearLimit
+Warning, after 10m. A container has held above 80% of its memory limit for ten minutes. The limit
+and the workload disagree; find out which one is wrong, while the container is still up.
 
-### ContainerRestartLoop
-Critical, fires immediately. A container restarted more than three times in 15 minutes. Read the
-logs from the previous run, not the current one.
+Containers started without a memory limit are excluded, not silently included: cAdvisor reports
+their limit as 0, and the rule filters those out rather than dividing by zero.
+
+## What container alerts cannot see
+
+Two alerts were removed in favour of the one above, because neither could ever fire. Both are
+stated here rather than left for you to discover during an outage.
+
+**A container that is OOM-killed is not detected.** cAdvisor only publishes metrics for containers
+that are currently **running**. A container the kernel kills stops running, so it disappears from
+the metrics and its `container_oom_events_total` is never read. Measured on Docker 29.2.1: a
+container killed with exit 137 left every OOM counter on the host reading 0.
+`ContainerMemoryNearLimit` covers the case that can be seen — memory climbing while the container
+is still alive — and it will miss a container that is killed by a sudden allocation between two
+scrapes.
+
+**A container restart loop is not detected.** `container_start_time_seconds` does not change when
+Docker restarts a container: measured across five real restarts of a container restarting every
+30 seconds, the value stayed fixed while Docker's own restart count climbed to 5. Docker restarts
+the same container rather than creating a new one, so nothing in cAdvisor moves. Detecting this
+needs the Docker API, which this kit does not read. If the container serves HTTP, add it to
+`SERVICES` in `.env` and the blackbox probe will catch it going down.
+
+**On Kubernetes both cases are covered** by the Pro Helm chart's `kubernetes` module, which reads
+kube-state-metrics rather than cAdvisor: `KubePodCrashLooping` and `KubeContainerOOMKilled`.
 
 ## Security alerts
 
