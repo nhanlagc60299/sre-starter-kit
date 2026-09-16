@@ -27,6 +27,21 @@ for i in $(seq 1 30); do
   [ -z "$down" ] && break
 done
 [ -z "$down" ] || { echo "FAIL: targets not up: $down"; $COMPOSE ps; exit 1; }
+# A cAdvisor that scrapes UP is not a cAdvisor that sees containers. Given a Docker whose storage
+# driver it cannot read, it registers no container at all and publishes only host cgroups -- the
+# target stays UP, series keep flowing, and every container alert goes quiet with nothing looking
+# broken. Assert it names at least one real container, which is what "UP" failed to mean.
+case ",${SMOKE_SKIP_JOBS:-}," in *,cadvisor,*) ;; *)
+  named=0
+  for i in $(seq 1 15); do
+    named=$(curl -sf $H:9090/api/v1/query --data-urlencode 'query=count(container_memory_working_set_bytes{name!=""})' \
+      | python3 -c 'import sys,json; r=json.load(sys.stdin)["data"]["result"]; print(int(float(r[0]["value"][1])) if r else 0)' 2>/dev/null || echo 0)
+    [ "$named" -gt 0 ] && break
+    sleep 4
+  done
+  [ "$named" -gt 0 ] || { echo "FAIL: cAdvisor target is UP but names no containers; every container alert is blind"; exit 1; }
+  echo "smoke: cAdvisor names $named containers"
+;; esac
 for i in $(seq 1 15); do curl -sf $H:3000/api/health | grep -q '"database": *"ok"' && break; sleep 4; done
 curl -sf $H:3000/api/health | grep -q '"database": *"ok"' || { echo "FAIL: grafana unhealthy after 60s"; exit 1; }
 for i in $(seq 1 15); do curl -sf $H:3100/ready | grep -q ready && break; sleep 4; done

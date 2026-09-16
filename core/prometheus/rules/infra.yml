@@ -49,6 +49,24 @@ groups:
           summary: "Memory on {{ $labels.instance }} above 90% for 10m"
           runbook_url: https://github.com/nhanlagc60299/sre-starter-kit/blob/main/docs/ALERTS.md#highmemory
 
+      # cAdvisor can be up, healthy, scraped, and still know nothing about your containers.
+      # Docker 29 defaults to the containerd image store, which removes the layerdb that older
+      # cAdvisor builds read to identify a container; every container then fails registration and
+      # only host cgroups are reported. The target stays UP and the series keep flowing, so
+      # nothing looks wrong -- measured on Docker 29.2.1, where cAdvisor v0.52.1 produced 1857
+      # container_* series and not one of them named a container.
+      #
+      # `absent()` rather than `count(...) == 0`: an empty selector makes count() return no series
+      # at all, so the comparison would never be true and this alert would never fire.
+      # The `up == 1` guard keeps it quiet for anyone running without the cadvisor profile.
+      - alert: ContainerMetricsMissing
+        expr: up{job="cadvisor"} == 1 and on() absent(container_memory_working_set_bytes{name!=""})
+        for: 5m
+        labels: { severity: critical, module: infra }
+        annotations:
+          summary: "cAdvisor is up but reporting no containers; every container alert is blind"
+          runbook_url: https://github.com/nhanlagc60299/sre-starter-kit/blob/main/docs/ALERTS.md#containermetricsmissing
+
       # Warn before the kernel kills it, not after. cAdvisor only reports containers that are
       # RUNNING, so a container that is OOM-killed leaves the metrics entirely and its
       # container_oom_events_total is never observed -- measured on Docker 29.2.1, where a real
