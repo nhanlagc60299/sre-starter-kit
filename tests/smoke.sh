@@ -42,6 +42,19 @@ case ",${SMOKE_SKIP_JOBS:-}," in *,cadvisor,*) ;; *)
   [ "$named" -gt 0 ] || { echo "FAIL: cAdvisor target is UP but names no containers; every container alert is blind"; exit 1; }
   echo "smoke: cAdvisor names $named containers"
 ;; esac
+
+# BlackboxExporterDown reads up{job="blackbox"}. The "no target is down" loop above passes happily
+# when a job is absent entirely, so a renamed or dropped job would take the alert down in silence --
+# which is exactly how this alert spent its whole life pointed at blackbox-http, a job with no
+# series at all unless SERVICES is set.
+for i in $(seq 1 15); do
+  bb=$(curl -sf $H:9090/api/v1/query --data-urlencode 'query=count(up{job="blackbox"})' \
+    | python3 -c 'import sys,json; r=json.load(sys.stdin)["data"]["result"]; print(int(float(r[0]["value"][1])) if r else 0)' 2>/dev/null || echo 0)
+  [ "$bb" -gt 0 ] && break
+  sleep 4
+done
+[ "$bb" -gt 0 ] || { echo "FAIL: no up{job=\"blackbox\"} series; BlackboxExporterDown cannot fire"; exit 1; }
+echo "smoke: blackbox exporter self-scrape present ($bb series)"
 for i in $(seq 1 15); do curl -sf $H:3000/api/health | grep -q '"database": *"ok"' && break; sleep 4; done
 curl -sf $H:3000/api/health | grep -q '"database": *"ok"' || { echo "FAIL: grafana unhealthy after 60s"; exit 1; }
 for i in $(seq 1 15); do curl -sf $H:3100/ready | grep -q ready && break; sleep 4; done

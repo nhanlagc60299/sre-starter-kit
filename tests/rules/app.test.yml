@@ -6,7 +6,10 @@ tests:
     input_series:
       - series: 'probe_success{job="blackbox-http",service="api",instance="http://api/health"}'
         values: '0x5'
-      - series: 'up{job="blackbox-http",instance="blackbox:9115"}'
+      # job="blackbox" is the exporter's own /metrics. The relabel_configs on blackbox-http
+      # rewrite `instance` to the probed URL, so up{job="blackbox-http",instance="blackbox:9115"}
+      # -- what this fixture used to carry -- is a shape the scrape config cannot produce.
+      - series: 'up{job="blackbox",instance="blackbox:9115"}'
         values: '0x10'
       - series: 'probe_ssl_earliest_cert_expiry{job="blackbox-http",service="api",instance="http://api/health"}'
         values: '500000x5'   # epoch seconds; eval time is ~0 so this is <7d away
@@ -25,7 +28,7 @@ tests:
       - eval_time: 6m
         alertname: BlackboxExporterDown
         exp_alerts:
-          - exp_labels: { severity: critical, module: app, job: blackbox-http, instance: "blackbox:9115" }
+          - exp_labels: { severity: critical, module: app, job: blackbox, instance: "blackbox:9115" }
             exp_annotations:
               summary: "Blackbox exporter is down - service probes are not running"
               runbook_url: https://github.com/nhanlagc60299/sre-starter-kit/blob/main/docs/ALERTS.md#blackboxexporterdown
@@ -88,3 +91,20 @@ tests:
             exp_annotations:
               summary: "slow p95 latency is 2.41s"
               runbook_url: https://github.com/nhanlagc60299/sre-starter-kit/blob/main/docs/ALERTS.md#highp95latency
+
+  # A default install: .env ships SERVICES= empty, so services.json is `[]` and the
+  # blackbox-http job has NO targets and therefore NO `up` series at all. The exporter
+  # still runs, so its own job must still be able to page. This test fails against
+  # `up{job="blackbox-http"} == 0`, which has nothing to read here.
+  - interval: 1m
+    input_series:
+      - series: 'up{job="blackbox",instance="blackbox:9115"}'
+        values: '0x10'
+    alert_rule_test:
+      - eval_time: 6m
+        alertname: BlackboxExporterDown
+        exp_alerts:
+          - exp_labels: { severity: critical, module: app, job: blackbox, instance: "blackbox:9115" }
+            exp_annotations:
+              summary: "Blackbox exporter is down - service probes are not running"
+              runbook_url: https://github.com/nhanlagc60299/sre-starter-kit/blob/main/docs/ALERTS.md#blackboxexporterdown
