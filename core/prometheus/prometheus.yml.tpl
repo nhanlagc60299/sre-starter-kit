@@ -21,8 +21,11 @@ scrape_configs:
     static_configs: [{ targets: ['loki:3100'] }]
   - job_name: alloy
     static_configs: [{ targets: ['alloy:12345'] }]
+  # node-exporter runs in the host network namespace and so has no compose-network DNS name.
+  # NODE_EXPORTER_TARGET is how Prometheus reaches it; the default works on Docker via the
+  # host-gateway alias in compose/docker-compose.yml. See README "Exposure".
   - job_name: node
-    static_configs: [{ targets: ['node-exporter:9100'] }]
+    static_configs: [{ targets: ['${NODE_EXPORTER_TARGET}'] }]
   - job_name: cadvisor
     static_configs: [{ targets: ['cadvisor:8080'] }]
   - job_name: blackbox-http

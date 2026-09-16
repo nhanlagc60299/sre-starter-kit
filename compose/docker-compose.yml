@@ -16,6 +16,10 @@ services:
       - ../build/prometheus:/etc/prometheus:ro
       - prom-data:/prometheus
     ports: ["${BIND_ADDR:-127.0.0.1}:9090:9090"]
+    # node-exporter runs in the host netns and so has no compose-network DNS name. Pointing the
+    # name at the host gateway keeps the scrape target - and the instance label on every existing
+    # series - identical to what it was when node-exporter was an ordinary compose service.
+    extra_hosts: ["node-exporter:host-gateway"]
 
   alertmanager:
     <<: *restart
@@ -30,6 +34,14 @@ services:
     <<: *restart
     image: prom/node-exporter:v1.9.1
     command: [--path.rootfs=/host]
+    # Host network namespace, deliberately. /proc/net resolves through /proc/self/net and is
+    # netns-scoped at read time, so without this every node_network_* series describes this
+    # container's own veth rather than the machine's NICs. Mounting the host / at /host does not
+    # fix it; only sharing the namespace does. The Node dashboard ships a Network Traffic row
+    # built on those counters, so they have to be real.
+    # The cost: 9100 is bound on the host (it can collide with an existing node-exporter) on all
+    # interfaces, ignoring BIND_ADDR - the host netns is the whole point. See README "Exposure".
+    network_mode: host
     pid: host
     volumes: ["/:/host:ro,rslave"]
 

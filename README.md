@@ -18,13 +18,16 @@ Re-run `make init` any time; previous answers are the defaults. A blank answer o
 
 `make up` re-renders `build/` from `.env` and reloads Prometheus, Alertmanager and Alloy in place, so it is also the command to run after any config change.
 
-**Podman hosts:** set `CONTAINER_ENGINE=podman`, point `CONTAINER_SOCK` at your Podman socket, and leave `COMPOSE_PROFILES` empty in `.env` — cAdvisor needs Docker's `/var/lib/docker` and will not start. Its scrape target then shows DOWN in Prometheus; no alert keys on it.
+**Podman hosts:** set `NODE_EXPORTER_TARGET` (see "Exposure" — rootless Podman cannot scrape
+node-exporter at all, and you lose every host metric and infra alert if you skip this), set
+`CONTAINER_ENGINE=podman`, point `CONTAINER_SOCK` at your Podman socket, and leave `COMPOSE_PROFILES` empty in `.env` — cAdvisor needs Docker's `/var/lib/docker` and will not start. Its scrape target then shows DOWN in Prometheus; no alert keys on it.
 
 ## Exposure
 
 Prometheus (9090), Alertmanager (9093) and Loki (3100) have **no authentication** — anyone who can
 reach the port can read your metrics and logs and silence your alerts. Grafana (3000) has a password.
-So everything binds to `127.0.0.1` by default (`BIND_ADDR` in `.env`).
+So every published port binds to `127.0.0.1` by default (`BIND_ADDR` in `.env`) — with one
+exception, node-exporter, below.
 
 To reach Grafana from your laptop, tunnel instead of opening the port:
 
@@ -33,6 +36,26 @@ ssh -L 3000:127.0.0.1:3000 you@your-host   # then http://localhost:3000
 ```
 
 Only set `BIND_ADDR=0.0.0.0` if a reverse proxy in front of the host is doing the authentication.
+
+**node-exporter (9100) is the exception, and it is deliberate.** It runs in the host network
+namespace (`network_mode: host`) because `/proc/net` is namespace-scoped at read time: a
+container-networked node-exporter reports its own veth as `node_network_*`, so the Node dashboard's
+Network Traffic panels would be drawing the container's traffic under the host's name. The cost of
+getting those numbers right is that 9100 binds on every host interface and ignores `BIND_ADDR`. It
+exposes host telemetry (interfaces, filesystems, load) unauthenticated, so firewall it. A host
+already running its own node-exporter on 9100 will collide; stop that one, or drop the host
+networking back out and accept container-scoped network metrics.
+
+Being in the host namespace also takes node-exporter off the compose network, so Prometheus can no
+longer reach it by service name. `NODE_EXPORTER_TARGET` in `.env` is the address it uses instead.
+The default, `node-exporter:9100`, resolves through the `host-gateway` alias on the Prometheus
+service and is correct on Docker. **Under rootless Podman it cannot work at all, and the whole
+`node` job goes down with it — not just the network panels, but every host CPU, memory and disk
+metric and every infra alert built on them.** A rootless container on a bridge network has no route
+into the host network namespace. Rootful Podman works: set `NODE_EXPORTER_TARGET` to the bridge
+gateway (`podman network inspect podman` prints it, commonly `10.88.0.1:9100`). Rootless Podman has
+no fix here; run node-exporter on the host as a systemd unit and point `NODE_EXPORTER_TARGET` at it,
+or accept that host metrics are absent.
 
 ## What you get
 

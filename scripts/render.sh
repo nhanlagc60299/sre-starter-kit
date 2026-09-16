@@ -10,9 +10,16 @@ if [ -f "$ROOT/core/alertmanager/alertmanager.yml.tpl" ] && [ -z "${SLACK_WEBHOO
   echo "ERROR: SLACK_WEBHOOK_URL is empty. Set it in .env (or run 'make init')." >&2
   exit 1
 fi
+# node-exporter runs in the host netns (see compose/docker-compose.yml), so the address Prometheus
+# reaches it on depends on the container engine. This must default here rather than rely on .env: a
+# .env written before this key existed has no such line, and because only keys found in .env are
+# substituted, an unsubstituted ${NODE_EXPORTER_TARGET} would survive into prometheus.yml as a
+# literal and break the scrape.
+: "${NODE_EXPORTER_TARGET:=node-exporter:9100}"
+export NODE_EXPORTER_TARGET
 rm -rf "$ROOT/build"; mkdir -p "$ROOT/build"
 # Only substitute variables that are defined in .env, so Prometheus/Alloy $labels etc. survive.
-VARS=$(grep -oE '^[A-Z_][A-Z0-9_]*=' "$ROOT/.env" | sed 's/=$//' | sed 's/^/\$/' | tr '\n' ' ')
+VARS="$(grep -oE '^[A-Z_][A-Z0-9_]*=' "$ROOT/.env" | sed 's/=$//' | sed 's/^/\$/' | tr '\n' ' ') \$NODE_EXPORTER_TARGET"
 while IFS= read -r -d '' f; do
   rel="${f#$ROOT/core/}"
   out="$ROOT/build/$rel"
