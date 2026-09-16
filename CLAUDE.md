@@ -10,7 +10,9 @@ purpose.
 
 GitHub is the canonical home: https://github.com/nhanlagc60299/sre-starter-kit (remote `github`). A
 private GitLab mirror exists as remote `origin`; push both. CI is GitHub Actions in
-`.github/workflows/ci.yml`; `.gitlab-ci.yml` is kept so the mirror still builds.
+`.github/workflows/ci.yml`. There is no `.gitlab-ci.yml`: GitLab is a mirror, its free-plan compute
+ran out, and a CI config that cannot run is a second definition of "tested" that drifts from the one
+actually enforced. `git log -- .gitlab-ci.yml` has the original if it is ever needed.
 
 There is a paid tier in a separate private repo which merges this one in periodically. Keep changes
 here self-contained and avoid restructuring shared files without reason, or that merge gets painful.
