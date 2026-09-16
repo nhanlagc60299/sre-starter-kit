@@ -60,6 +60,29 @@ Warning, after 10m. Host memory stayed above 90% for 10 minutes. Check for a lea
 
 ## Container alerts
 
+### ContainerMetricsMissing
+Critical, after 5m. cAdvisor is being scraped successfully and is reporting no containers at all.
+Every other alert on this page that names a container is blind while this is firing, which is why
+it pages rather than waits.
+
+The usual cause is a cAdvisor too old for the host's Docker. Docker 29 made the containerd image
+store the default, which removes the layer database older cAdvisor builds read to identify a
+container; cAdvisor then fails to register every container and reports only host cgroups. Nothing
+about this looks broken from outside: the container is healthy, the scrape target is UP, and
+metrics keep flowing. Measured on Docker 29.2.1, cAdvisor v0.52.1 produced 1857 `container_*`
+series and not one of them named a container.
+
+First check which storage driver the host uses and what the cAdvisor log says:
+
+```bash
+docker info --format '{{.Driver}}'
+docker compose --env-file .env -f compose/docker-compose.yml logs cadvisor | grep -i "layer"
+```
+
+A line reading `failed to identify the read-write layer ID` on every container confirms it. This
+kit ships cAdvisor v0.60.5, which handles both the `overlayfs` and `overlay2` drivers; if you
+pinned an older image, that is the fix.
+
 ### ContainerMemoryNearLimit
 Warning, after 10m. A container has held above 80% of its memory limit for ten minutes. The limit
 and the workload disagree; find out which one is wrong, while the container is still up.

@@ -77,3 +77,54 @@ tests:
             exp_annotations:
               summary: "Container hog is at 84.94% of its memory limit"
               runbook_url: https://github.com/nhanlagc60299/sre-starter-kit/blob/main/docs/ALERTS.md#containermemorynearlimit
+  # ContainerMetricsMissing. The failure it exists for is silent: cAdvisor up, target UP, series
+  # flowing, and not one of them naming a container. Three blocks, because the two ways to get
+  # this wrong are opposite -- never firing, and firing at everyone who runs without cAdvisor.
+  #
+  # (a) cAdvisor up, reporting only host cgroups: must fire, but only after `for: 5m`.
+  #     The id-only series are not padding. A broken host emits plenty of container_* series --
+  #     1857 of them, measured -- all of them host cgroups with no name label. An alert selector
+  #     without `name!=""` sees those, concludes all is well, and never fires on the one failure
+  #     it exists for. These two series are what make that mistake turn this test red.
+  - interval: 1m
+    input_series:
+      - series: 'up{job="cadvisor",instance="cadvisor:8080"}'
+        values: '1x10'
+      - series: 'container_memory_working_set_bytes{job="cadvisor",id="/"}'
+        values: '500000000x10'
+      - series: 'container_memory_working_set_bytes{job="cadvisor",id="/system.slice/docker.service"}'
+        values: '17000000x10'
+    alert_rule_test:
+      - eval_time: 3m
+        alertname: ContainerMetricsMissing
+        exp_alerts: []
+      - eval_time: 8m
+        alertname: ContainerMetricsMissing
+        exp_alerts:
+          - exp_labels: { severity: critical, module: infra, job: cadvisor, instance: "cadvisor:8080" }
+            exp_annotations:
+              summary: "cAdvisor is up but reporting no containers; every container alert is blind"
+              runbook_url: https://github.com/nhanlagc60299/sre-starter-kit/blob/main/docs/ALERTS.md#containermetricsmissing
+  # (b) cAdvisor up and reporting a container: must stay quiet. This is the case that fails if
+  #     anyone rewrites absent() into a count() comparison the wrong way round.
+  - interval: 1m
+    input_series:
+      - series: 'up{job="cadvisor",instance="cadvisor:8080"}'
+        values: '1x10'
+      - series: 'container_memory_working_set_bytes{job="cadvisor",name="api"}'
+        values: '1000x10'
+    alert_rule_test:
+      - eval_time: 8m
+        alertname: ContainerMetricsMissing
+        exp_alerts: []
+  # (c) cAdvisor not running at all -- a supported setup, since Podman hosts leave the profile
+  #     empty and the README says no alert keys on it. Must stay quiet, or every Podman user is
+  #     paged for a choice the product told them to make.
+  - interval: 1m
+    input_series:
+      - series: 'up{job="cadvisor",instance="cadvisor:8080"}'
+        values: '0x10'
+    alert_rule_test:
+      - eval_time: 8m
+        alertname: ContainerMetricsMissing
+        exp_alerts: []
