@@ -118,8 +118,8 @@ tests:
         alertname: ContainerMetricsMissing
         exp_alerts: []
   # (c) cAdvisor not running at all -- a supported setup, since Podman hosts leave the profile
-  #     empty and the README says no alert keys on it. Must stay quiet, or every Podman user is
-  #     paged for a choice the product told them to make.
+  #     empty and the README promises they will not be paged for it. Must stay quiet, or every
+  #     Podman user is paged for a choice the product told them to make.
   - interval: 1m
     input_series:
       - series: 'up{job="cadvisor",instance="cadvisor:8080"}'
