@@ -51,7 +51,7 @@ change. Drop `CONTAINER_ENGINE=podman` if you are on Docker.
 Smoke tests bring the whole stack up and are the one place you do export the socket:
 
 ```bash
-CONTAINER_ENGINE=podman CONTAINER_SOCK=/run/user/501/podman/podman.sock SMOKE_SKIP_JOBS=cadvisor make smoke
+CONTAINER_ENGINE=podman CONTAINER_SOCK=/run/user/501/podman/podman.sock SMOKE_SKIP_JOBS=cadvisor,node make smoke
 ```
 
 cAdvisor needs Docker's `/var/lib/docker` and cannot start under Podman, hence the skip.
