@@ -128,3 +128,59 @@ tests:
       - eval_time: 8m
         alertname: ContainerMetricsMissing
         exp_alerts: []
+  # ContainerRestartLoop. `looper` restarts every 3m; `steadyup` starts once and stays up. The
+  # start_time values are what cAdvisor v0.60.5 actually publishes -- v0.52.1 froze this series at
+  # the first start, which is why this rule was removed and why it works again now.
+  - interval: 1m
+    input_series:
+      - series: 'container_start_time_seconds{job="cadvisor",name="looper"}'
+        values: '1000 1000 1000 1180 1180 1180 1360 1360 1360 1540 1540 1540 1720 1720 1720 1720'
+      - series: 'container_start_time_seconds{job="cadvisor",name="steadyup"}'
+        values: '1000x15'
+      # A host cgroup, which cAdvisor publishes with an id and no name. This one moves as often
+      # as `looper` does -- a Docker daemon restarting in a loop does exactly this. Without
+      # `name!=""` the rule fires on it and pages about a container whose name renders empty.
+      - series: 'container_start_time_seconds{job="cadvisor",id="/system.slice/docker.service"}'
+        values: '900 900 900 1080 1080 1080 1260 1260 1260 1440 1440 1440 1620 1620 1620 1620'
+    alert_rule_test:
+      # The threshold, both sides of it, one minute apart. At 11m the window holds exactly three
+      # restarts and >3 must mean it. At 12m the fourth lands and it fires. An assertion that
+      # passes at several thresholds is not testing the threshold.
+      - eval_time: 11m
+        alertname: ContainerRestartLoop
+        exp_alerts: []
+      - eval_time: 12m
+        alertname: ContainerRestartLoop
+        exp_alerts:
+          - exp_labels: { severity: critical, module: infra, job: cadvisor, name: looper }
+            exp_annotations:
+              summary: "Container looper restarted >3 times in 15m"
+              runbook_url: https://github.com/nhanlagc60299/sre-starter-kit/blob/main/docs/ALERTS.md#containerrestartloop
+  # ContainerAtMemoryCeiling. `pinned` hits its limit continuously; `blip` hits it once and stops,
+  # which is the healthy case this must not page for. Counter values, so the series only ever rise.
+  - interval: 1m
+    input_series:
+      - series: 'container_memory_events_max_total{job="cadvisor",name="pinned"}'
+        values: '0+40x30'
+      # A host cgroup under a systemd MemoryMax, published by cAdvisor with an id and no name --
+      # 34 of the 37 series of this metric on a real host carry no name. It presses its ceiling
+      # exactly like `pinned` does, so without `name!=""` this rule pages about a container whose
+      # name renders empty.
+      - series: 'container_memory_events_max_total{job="cadvisor",id="/system.slice/docker.service"}'
+        values: '0+40x30'
+      - series: 'container_memory_events_max_total{job="cadvisor",name="blip"}'
+        values: '0 0 0 12 12 12 12 12 12 12 12 12 12 12 12 12 12 12 12 12 12 12 12 12 12 12 12 12 12 12 12'
+    alert_rule_test:
+      # Inside the pending window nothing fires, which is what makes `for: 15m` real.
+      - eval_time: 10m
+        alertname: ContainerAtMemoryCeiling
+        exp_alerts: []
+      # Past it, only the container that never stopped. blip's rate fell back to zero long before
+      # its pending window could elapse.
+      - eval_time: 25m
+        alertname: ContainerAtMemoryCeiling
+        exp_alerts:
+          - exp_labels: { severity: warning, module: infra, job: cadvisor, name: pinned }
+            exp_annotations:
+              summary: "Container pinned has been hitting its memory limit for 15m"
+              runbook_url: https://github.com/nhanlagc60299/sre-starter-kit/blob/main/docs/ALERTS.md#containeratmemoryceiling

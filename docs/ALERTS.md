@@ -90,28 +90,64 @@ and the workload disagree; find out which one is wrong, while the container is s
 Containers started without a memory limit are excluded, not silently included: cAdvisor reports
 their limit as 0, and the rule filters those out rather than dividing by zero.
 
+### ContainerAtMemoryCeiling
+Warning, after 15m. The kernel has been refusing this container's allocations at its memory limit,
+without pause, for fifteen minutes.
+
+This is not the same thing as `ContainerMemoryNearLimit`, and it catches what that rule cannot.
+Working set counts memory that cannot be reclaimed, so a container whose pressure is page cache
+sits at a *low* working set while hammering its limit continuously: measured at 4% of its limit
+with the kernel refusing 213 allocations at that limit over the same period. The container is not
+dying, but every one of those refusals costs it a reclaim cycle, and it is one workload change
+away from not surviving them.
+
+There is no count threshold on purpose. A container that touches its ceiling once and reclaims is
+healthy, and no number of hits is meaningfully "too many". Fifteen unbroken minutes is the signal.
+
+Requires cgroup v2, since the counter comes from the kernel's `memory.events`. On a cgroup v1 host
+the series does not exist and this alert is silent rather than wrong.
+
+### ContainerRestartLoop
+Critical. A container has restarted more than three times in fifteen minutes. Every restart drops
+in-flight requests, and if other services depend on this one, the failures cascade.
+
+This alert was removed once and restored. On cAdvisor v0.52.1 it could not fire:
+`container_start_time_seconds` was frozen at the container's first start and never moved again.
+Measured side by side on one host, one container, five automatic restarts, v0.52.1 reported the
+same value throughout while v0.60.5 tracked every restart. This kit ships v0.60.5.
+
 ## What container alerts cannot see
 
-Two alerts were removed in favour of the one above, because neither could ever fire. Both are
-stated here rather than left for you to discover during an outage.
+Stated here rather than left for you to discover during an outage.
 
-**A container that is OOM-killed is not detected.** cAdvisor only publishes metrics for containers
-that are currently **running**. A container the kernel kills stops running, so it disappears from
-the metrics and its `container_oom_events_total` is never read. Measured on Docker 29.2.1: a
-container killed with exit 137 left every OOM counter on the host reading 0.
-`ContainerMemoryNearLimit` covers the case that can be seen — memory climbing while the container
-is still alive — and it will miss a container that is killed by a sudden allocation between two
-scrapes.
+**A container that is OOM-killed outright is not detected.** cAdvisor only publishes metrics for
+containers that are currently **running**, so a container the kernel kills disappears from the
+metrics along with the evidence. Measured on Docker 29.2.1: a container that allocated hard and
+was killed with exit 137 showed a memory-events counter of 0 at every scrape while it lived, and
+no series at all one second later. `ContainerAtMemoryCeiling` and `ContainerMemoryNearLimit` both
+cover the approach to that point — memory pressure while the container is still alive — and both
+will miss a container killed by a sudden allocation between two scrapes.
 
-**A container restart loop is not detected.** `container_start_time_seconds` does not change when
-Docker restarts a container: measured across five real restarts of a container restarting every
-30 seconds, the value stayed fixed while Docker's own restart count climbed to 5. Docker restarts
-the same container rather than creating a new one, so nothing in cAdvisor moves. Detecting this
-needs the Docker API, which this kit does not read. If the container serves HTTP, add it to
-`SERVICES` in `.env` and the blackbox probe will catch it going down.
+**A container that dies instantly is not detected either.** Docker backs off exponentially between
+restarts, so a container that exits immediately spends nearly all of its time in `Restarting`,
+where cAdvisor publishes nothing about it. `ContainerRestartLoop` sees a crash loop in proportion
+to how long the container survives each cycle. Measured on cAdvisor v0.60.5, sampling every four
+seconds:
+
+| Lifetime per cycle | Visible to cAdvisor |
+|---|---|
+| 15s | every sample |
+| 5s | 70% of samples |
+| 2s | 20% of samples |
+| exits immediately | never |
+
+A container in the last row restarts endlessly with nothing to show for it. If it serves HTTP, add
+it to `SERVICES` in `.env` and the blackbox probe will catch it going down, which is the coverage
+cAdvisor cannot give you.
 
 **On Kubernetes both cases are covered** by the Pro Helm chart's `kubernetes` module, which reads
 kube-state-metrics rather than cAdvisor: `KubePodCrashLooping` and `KubeContainerOOMKilled`.
+kube-state-metrics reports a pod that is gone, which is the whole difference.
 
 ## Security alerts
 
