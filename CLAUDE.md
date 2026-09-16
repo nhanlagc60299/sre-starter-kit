@@ -8,8 +8,10 @@ off. Customers run it on their own VMs with `docker compose`.
 never add a real webhook, token, hostname or customer name. `.env.example` ships empty placeholders on
 purpose.
 
-GitHub is the canonical home: https://github.com/nhanlagc60299/sre-starter-kit (remote `github`). A
-private GitLab mirror exists as remote `origin`; push both. CI is GitHub Actions in
+GitHub is the canonical home: https://github.com/nhanlagc60299/sre-starter-kit (remote `origin`). A
+private GitLab mirror exists as remote `gitlab`; it gates nothing and nothing depends on it being
+current. The remotes were named the other way round until 2026-09-16, which meant a bare `git push`
+on a new branch went to the mirror instead of the repository people actually read. CI is GitHub Actions in
 `.github/workflows/ci.yml`. There is no `.gitlab-ci.yml`: GitLab is a mirror, its free-plan compute
 ran out, and a CI config that cannot run is a second definition of "tested" that drifts from the one
 actually enforced. `git log -- .gitlab-ci.yml` has the original if it is ever needed.
