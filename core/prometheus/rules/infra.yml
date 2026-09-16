@@ -67,6 +67,44 @@ groups:
           summary: "cAdvisor is up but reporting no containers; every container alert is blind"
           runbook_url: https://github.com/nhanlagc60299/sre-starter-kit/blob/main/docs/ALERTS.md#containermetricsmissing
 
+      # Restored after the cAdvisor upgrade. On v0.52.1 this rule could not fire:
+      # container_start_time_seconds was frozen at the container's first start and never moved
+      # again. Measured side by side on one host, one container, five automatic restarts --
+      # v0.52.1 reported the same value throughout while v0.60.5 tracked every restart.
+      #
+      # What it still cannot see is a container that dies instantly. Docker then backs off
+      # exponentially and the container is in Restarting state at almost every scrape, and
+      # cAdvisor publishes nothing for a container that is not running. Measured on v0.60.5,
+      # sampling every 4s: a container living 15s per cycle was visible in every sample, 5s in
+      # 70% of them, 2s in 20%, and one exiting immediately in none at all.
+      - alert: ContainerRestartLoop
+        expr: changes(container_start_time_seconds{name!=""}[15m]) > 3
+        labels: { severity: critical, module: infra }
+        annotations:
+          summary: "Container {{ $labels.name }} restarted >3 times in 15m"
+          runbook_url: https://github.com/nhanlagc60299/sre-starter-kit/blob/main/docs/ALERTS.md#containerrestartloop
+
+      # The ceiling a container lives at, which is not the same as the memory it is using.
+      # container_memory_working_set_bytes counts what cannot be reclaimed, so a container whose
+      # pressure is page cache sits at a low working set while hammering its limit: measured at
+      # 4% of its limit with the kernel refusing 213 allocations at that limit.
+      # ContainerMemoryNearLimit is blind to exactly that, which is why this is an addition to it
+      # rather than a replacement.
+      #
+      # rate() over a sustained window rather than a count threshold: a container that touches
+      # its ceiling once and reclaims is healthy, and no number of hits is meaningfully "too
+      # many". Fifteen unbroken minutes of hitting it is the signal, and it needs no magic number.
+      #
+      # Requires cgroup v2 -- the counter comes from the kernel's memory.events. On a cgroup v1
+      # host the series does not exist and this rule is silent rather than wrong.
+      - alert: ContainerAtMemoryCeiling
+        expr: rate(container_memory_events_max_total{name!=""}[5m]) > 0
+        for: 15m
+        labels: { severity: warning, module: infra }
+        annotations:
+          summary: "Container {{ $labels.name }} has been hitting its memory limit for 15m"
+          runbook_url: https://github.com/nhanlagc60299/sre-starter-kit/blob/main/docs/ALERTS.md#containeratmemoryceiling
+
       # Warn before the kernel kills it, not after. cAdvisor only reports containers that are
       # RUNNING, so a container that is OOM-killed leaves the metrics entirely and its
       # container_oom_events_total is never observed -- measured on Docker 29.2.1, where a real
