@@ -38,28 +38,42 @@ tests:
       - eval_time: 5m
         alertname: DiskLow
         exp_alerts: []
+  # ContainerMemoryNearLimit. Four containers, one per case:
+  #   hog      - 85% of a real limit, must fire
+  #   steady   - 50% of a real limit, must not
+  #   nolimit  - real usage but a limit of 0, which is what cAdvisor reports for a container
+  #              started without --memory. Dividing by it yields +Inf, so without the `> 0`
+  #              filter this container fires for ever. Measured on Docker 29.2.1.
+  #   spike    - crosses the threshold briefly, then falls back. `for: 10m` must swallow it.
   - interval: 1m
     input_series:
-      - series: 'container_oom_events_total{job="cadvisor",name="api"}'
-        values: '0 0 1 1 1 1 1 1 1 1 1'
-      - series: 'container_oom_events_total{job="cadvisor",name="web"}'
-        values: '0x10'
-      - series: 'container_start_time_seconds{job="cadvisor",name="worker"}'
-        values: '100 100 200 200 300 300 400 400 500 500 500'
-      - series: 'container_start_time_seconds{job="cadvisor",name="web"}'
-        values: '100x10'
+      - series: 'container_memory_working_set_bytes{job="cadvisor",name="hog"}'
+        values: '57000000x20'
+      - series: 'container_spec_memory_limit_bytes{job="cadvisor",name="hog"}'
+        values: '67108864x20'
+      - series: 'container_memory_working_set_bytes{job="cadvisor",name="steady"}'
+        values: '33000000x20'
+      - series: 'container_spec_memory_limit_bytes{job="cadvisor",name="steady"}'
+        values: '67108864x20'
+      - series: 'container_memory_working_set_bytes{job="cadvisor",name="nolimit"}'
+        values: '900000000x20'
+      - series: 'container_spec_memory_limit_bytes{job="cadvisor",name="nolimit"}'
+        values: '0x20'
+      - series: 'container_memory_working_set_bytes{job="cadvisor",name="spike"}'
+        values: '33000000 33000000 57000000 57000000 33000000x16'
+      - series: 'container_spec_memory_limit_bytes{job="cadvisor",name="spike"}'
+        values: '67108864x20'
     alert_rule_test:
+      # Inside the 10m pending window: nothing may fire yet, which is what proves `for:` is real.
       - eval_time: 5m
-        alertname: OOMKilled
+        alertname: ContainerMemoryNearLimit
+        exp_alerts: []
+      # Past it: only hog. steady is under the threshold, nolimit is filtered by `> 0`, and
+      # spike fell back long before its pending window elapsed.
+      - eval_time: 15m
+        alertname: ContainerMemoryNearLimit
         exp_alerts:
-          - exp_labels: { severity: critical, module: infra, job: cadvisor, name: api }
+          - exp_labels: { severity: warning, module: infra, job: cadvisor, name: hog }
             exp_annotations:
-              summary: "Container api was OOM killed"
-              runbook_url: https://github.com/nhanlagc60299/sre-starter-kit/blob/main/docs/ALERTS.md#oomkilled
-      - eval_time: 10m
-        alertname: ContainerRestartLoop
-        exp_alerts:
-          - exp_labels: { severity: critical, module: infra, job: cadvisor, name: worker }
-            exp_annotations:
-              summary: "Container worker restarted >3 times in 15m"
-              runbook_url: https://github.com/nhanlagc60299/sre-starter-kit/blob/main/docs/ALERTS.md#containerrestartloop
+              summary: "Container hog is at 84.94% of its memory limit"
+              runbook_url: https://github.com/nhanlagc60299/sre-starter-kit/blob/main/docs/ALERTS.md#containermemorynearlimit

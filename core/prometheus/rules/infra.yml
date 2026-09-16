@@ -49,16 +49,19 @@ groups:
           summary: "Memory on {{ $labels.instance }} above 90% for 10m"
           runbook_url: https://github.com/nhanlagc60299/sre-starter-kit/blob/main/docs/ALERTS.md#highmemory
 
-      - alert: OOMKilled
-        expr: increase(container_oom_events_total[10m]) > 0
-        labels: { severity: critical, module: infra }
+      # Warn before the kernel kills it, not after. cAdvisor only reports containers that are
+      # RUNNING, so a container that is OOM-killed leaves the metrics entirely and its
+      # container_oom_events_total is never observed -- measured on Docker 29.2.1, where a real
+      # OOM kill left every oom counter at 0. Memory approaching the limit is visible while the
+      # container is still alive, which is also while it can still be fixed.
+      #
+      # The `> 0` on the limit is load-bearing: a container started without --memory reports a
+      # limit of 0, and dividing by it yields +Inf, which would fire for every unlimited
+      # container on the host. Filtering first means those series are simply absent.
+      - alert: ContainerMemoryNearLimit
+        expr: container_memory_working_set_bytes{name!=""} / (container_spec_memory_limit_bytes{name!=""} > 0) > 0.8
+        for: 10m
+        labels: { severity: warning, module: infra }
         annotations:
-          summary: "Container {{ $labels.name }} was OOM killed"
-          runbook_url: https://github.com/nhanlagc60299/sre-starter-kit/blob/main/docs/ALERTS.md#oomkilled
-
-      - alert: ContainerRestartLoop
-        expr: changes(container_start_time_seconds{name!=""}[15m]) > 3
-        labels: { severity: critical, module: infra }
-        annotations:
-          summary: "Container {{ $labels.name }} restarted >3 times in 15m"
-          runbook_url: https://github.com/nhanlagc60299/sre-starter-kit/blob/main/docs/ALERTS.md#containerrestartloop
+          summary: "Container {{ $labels.name }} is at {{ $value | humanizePercentage }} of its memory limit"
+          runbook_url: https://github.com/nhanlagc60299/sre-starter-kit/blob/main/docs/ALERTS.md#containermemorynearlimit
