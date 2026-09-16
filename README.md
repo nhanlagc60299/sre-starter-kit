@@ -20,7 +20,7 @@ Re-run `make init` any time; previous answers are the defaults. A blank answer o
 
 **Podman hosts:** set `NODE_EXPORTER_TARGET` (see "Exposure" — rootless Podman cannot scrape
 node-exporter at all, and you lose every host metric and infra alert if you skip this), set
-`CONTAINER_ENGINE=podman`, point `CONTAINER_SOCK` at your Podman socket, and leave `COMPOSE_PROFILES` empty in `.env` — cAdvisor needs Docker's `/var/lib/docker` and will not start. Its scrape target then shows DOWN in Prometheus; no alert keys on it.
+`CONTAINER_ENGINE=podman`, point `CONTAINER_SOCK` at your Podman socket, and leave `COMPOSE_PROFILES` empty in `.env` — cAdvisor needs Docker's `/var/lib/docker` and will not start. Its scrape target then shows DOWN in Prometheus and stays quiet: `ContainerMetricsMissing` only fires when cAdvisor is up and reporting nothing, so running without it is a supported choice rather than a permanent page. You get no container metrics, and the alerts built on them never fire.
 
 ## Exposure
 
@@ -117,11 +117,14 @@ is serving production traffic.
 
 ## Pro
 
-AWS CloudWatch alerts (RDS/ELB/EC2), an Airflow module (scheduler health, DAG failures, run
-duration against a 7-day baseline, queue backlog), SLO burn-rate alerts, backup dead-man's switch,
-monitoring watchdog, deploy markers on every dashboard, and a written runbook for all 39 alerts
-(37 from Prometheus metrics, 2 from Loki logs).
-A Helm chart for EKS is on the roadmap, not in the current release.
+AWS CloudWatch alerts (RDS/ELB/EC2), a Kubernetes module (node, pod and job health from
+kube-state-metrics), an Airflow module (scheduler health, DAG failures, run duration against a
+7-day baseline, queue backlog), SLO burn-rate alerts, backup dead-man's switch, monitoring
+watchdog, deploy markers on every dashboard, and a written runbook for all 51 alerts (49 from
+Prometheus metrics, 2 from Loki logs).
+
+Both flavours ship: `docker compose` for VMs, and a Helm chart for Kubernetes.
+
 To buy Pro or ask what it covers, email **nhanlagc60299@gmail.com**.
 
 ## License
