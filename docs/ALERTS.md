@@ -18,6 +18,11 @@ Check whether the service is actually down or only unreachable from the monitori
 Critical, after 5m. The blackbox exporter itself is not scrapeable, so no probe is running and
 `ServiceDown` cannot fire. Check the `blackbox` container before trusting any probe result.
 
+Reads `up{job="blackbox"}` -- the exporter's own `/metrics`, which is scraped whether or not
+`SERVICES` lists anything. Do not point it at `job="blackbox-http"`: that job has one series per
+probe target, so on a stack with `SERVICES` empty it has none, and an alert reading it can never
+fire. It did read that until 2026-09-17.
+
 ### CertExpiresIn7d
 Warning, after 1m. The TLS certificate served by a probed HTTPS endpoint expires within 7 days.
 Renew it, then confirm the new certificate is the one actually being served.

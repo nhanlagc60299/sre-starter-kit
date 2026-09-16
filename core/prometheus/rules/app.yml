@@ -9,8 +9,11 @@ groups:
           summary: "Service {{ $labels.service }} is DOWN ({{ $labels.instance }})"
           runbook_url: https://github.com/nhanlagc60299/sre-starter-kit/blob/main/docs/ALERTS.md#servicedown
 
+      # Reads the `blackbox` job (the exporter's own /metrics), NOT `blackbox-http`.
+      # blackbox-http has one `up` series per probe target, so with no services configured --
+      # the shipped default -- it has no series at all and this alert could never fire.
       - alert: BlackboxExporterDown
-        expr: up{job="blackbox-http"} == 0
+        expr: up{job="blackbox"} == 0
         for: 5m
         labels: { severity: critical, module: app }
         annotations:

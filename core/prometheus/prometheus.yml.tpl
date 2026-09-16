@@ -28,6 +28,12 @@ scrape_configs:
     static_configs: [{ targets: ['${NODE_EXPORTER_TARGET}'] }]
   - job_name: cadvisor
     static_configs: [{ targets: ['cadvisor:8080'] }]
+  # The exporter's OWN /metrics, which exists whether or not SERVICES lists anything.
+  # BlackboxExporterDown reads this job, not blackbox-http: blackbox-http has one `up` series
+  # per probe target, so with SERVICES empty -- the shipped default -- it has none at all and
+  # an alert on it can never fire.
+  - job_name: blackbox
+    static_configs: [{ targets: ['blackbox:9115'] }]
   - job_name: blackbox-http
     metrics_path: /probe
     params: { module: [http_2xx] }

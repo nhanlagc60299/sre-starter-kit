@@ -18,10 +18,15 @@ up: render       ## start the stack (re-renders build/ and reloads the running c
 	@$(MAKE) --no-print-directory reload
 
 reload:          ## make Prometheus/Alertmanager/Alloy re-read build/ (compose does not watch bind mounts)
-	@r() { n=$$1; shift; for i in $$(seq 10); do if "$$@" >/dev/null 2>&1; then echo "reloaded $$n"; return 0; fi; sleep 3; done; \
+	@# The ports bind to ${BIND_ADDR:-127.0.0.1}, so a non-default BIND_ADDR is the only address
+	@# they answer on and a hardcoded 127.0.0.1 here would just time out into the WARN below.
+	@# 0.0.0.0 is a bind wildcard, not a destination: reach it on the loopback.
+	@a=$$(sed -n 's/^BIND_ADDR=//p' .env 2>/dev/null | tail -1 | tr -d '"'"'"'"'); \
+	 a=$${a:-127.0.0.1}; [ "$$a" = "0.0.0.0" ] && a=127.0.0.1; \
+	 r() { n=$$1; shift; for i in $$(seq 10); do if "$$@" >/dev/null 2>&1; then echo "reloaded $$n"; return 0; fi; sleep 3; done; \
 	       echo "WARN: could not reload $$n after 30s - if it was still starting, run 'make reload'"; }; \
-	 r prometheus   curl -fsS -XPOST http://127.0.0.1:9090/-/reload; \
-	 r alertmanager curl -fsS -XPOST http://127.0.0.1:9093/-/reload; \
+	 r prometheus   curl -fsS -XPOST http://$$a:9090/-/reload; \
+	 r alertmanager curl -fsS -XPOST http://$$a:9093/-/reload; \
 	 r alloy        $(COMPOSE) kill -s HUP alloy
 
 down:
