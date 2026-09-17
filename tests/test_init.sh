@@ -71,4 +71,51 @@ grep -qxF "TEAMS_WEBHOOK_URL='https://example.invalid/hook'" "$tmp/.env"
 ( cd "$tmp" && bash scripts/render.sh >/dev/null )
 [ "$(grep -c msteamsv2_configs "$tmp/build/alertmanager/alertmanager.yml")" = 2 ] || { echo "FAIL: teams receiver not in both receivers"; exit 1; }
 ${CONTAINER_ENGINE:-docker} run --rm -v "$tmp/build/alertmanager:/c" --entrypoint amtool prom/alertmanager:v0.28.1 check-config /c/alertmanager.yml >/dev/null
+
+# --- re-run 7: Discord + email with NO Slack. Fresh dir: the shared tmp already holds a Slack URL and a blank
+#     answer keeps it. 14 free answers (security n, so no auth-log question), then discord, email, smtp host,
+#     from, user, password.
+tmp7=$(mktemp -d); trap 'rm -rf "$tmp" "$tmp7" "${tmp8:-}"' EXIT
+cp -r core scripts .env.example "$tmp7/"
+printf 'acme\n\n\n\n\n\n\n\n\n\ns3cret\nn\n\nn\nhttps://discord.com/api/webhooks/1/x\nops@example.invalid,dev@example.invalid\nsmtp.example.invalid:587\nalerts@example.invalid\nalerts@example.invalid\nsmtp-pw\n' \
+  | ( cd "$tmp7" && bash scripts/init.sh >/dev/null )
+grep -qxF "SLACK_WEBHOOK_URL=''" "$tmp7/.env"
+grep -qxF "DISCORD_WEBHOOK_URL='https://discord.com/api/webhooks/1/x'" "$tmp7/.env"
+grep -qxF "ALERT_EMAIL_TO='ops@example.invalid,dev@example.invalid'" "$tmp7/.env"
+grep -qxF "SMTP_HOST='smtp.example.invalid:587'" "$tmp7/.env"
+grep -qxF "SMTP_PASSWORD='smtp-pw'" "$tmp7/.env"
+( cd "$tmp7" && bash scripts/render.sh >/dev/null )
+AM7="$tmp7/build/alertmanager/alertmanager.yml"
+! grep -q slack_configs "$AM7" || { echo "FAIL: slack_configs rendered with an empty SLACK_WEBHOOK_URL"; exit 1; }
+[ "$(grep -c discord_configs "$AM7")" = 2 ] || { echo "FAIL: discord receiver not in both receivers"; exit 1; }
+[ "$(grep -c email_configs "$AM7")" = 2 ] || { echo "FAIL: email receiver not in both receivers"; exit 1; }
+grep -q 'smarthost: smtp.example.invalid:587' "$AM7" || { echo "FAIL: smarthost not rendered"; exit 1; }
+grep -q 'auth_username: alerts@example.invalid' "$AM7" || { echo "FAIL: auth_username not rendered"; exit 1; }
+${CONTAINER_ENGINE:-docker} run --rm -v "$tmp7/build/alertmanager:/c" --entrypoint amtool prom/alertmanager:v0.28.1 check-config /c/alertmanager.yml >/dev/null
+# routing still works with slack gone: critical reaches critical+webhook-triage
+${CONTAINER_ENGINE:-docker} run --rm -v "$tmp7/build/alertmanager:/c" --entrypoint amtool prom/alertmanager:v0.28.1 config routes test --config.file=/c/alertmanager.yml --verify.receivers=critical,webhook-triage severity=critical alertname=X >/dev/null
+
+# --- re-run 8: email without SMTP_USER renders no auth lines; a Slack-only re-run keeps working (regression) ---
+printf '\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n' | ( cd "$tmp7" && bash scripts/init.sh >/dev/null )   # 14 free + discord + email + host + from + user(blank keeps) ... blank keeps everything
+grep -qxF "SMTP_USER='alerts@example.invalid'" "$tmp7/.env"
+sed -i.bak "s/^SMTP_USER=.*/SMTP_USER=''/; s/^SMTP_PASSWORD=.*/SMTP_PASSWORD=''/" "$tmp7/.env" && rm -f "$tmp7/.env.bak"
+( cd "$tmp7" && bash scripts/render.sh >/dev/null )
+! grep -q auth_username "$AM7" || { echo "FAIL: auth_username rendered with an empty SMTP_USER"; exit 1; }
+${CONTAINER_ENGINE:-docker} run --rm -v "$tmp7/build/alertmanager:/c" --entrypoint amtool prom/alertmanager:v0.28.1 check-config /c/alertmanager.yml >/dev/null
+
+# --- re-run 9: no receiver at all is refused by the wizard ---
+tmp8=$(mktemp -d)
+cp -r core scripts .env.example "$tmp8/"
+if printf 'acme\n\n\n\n\n\n\n\n\n\ns3cret\nn\n\nn\n\n\n' | ( cd "$tmp8" && bash scripts/init.sh >/dev/null 2>&1 ); then
+  echo "FAIL: wizard accepted a config with no receiver"; exit 1
+fi
+[ ! -e "$tmp8/.env" ] || { echo "FAIL: wizard wrote .env with no receiver"; exit 1; }
+
+# --- old answer files stop early: the new trailing questions must take defaults at EOF, not abort ---
+tmp9=$(mktemp -d); trap 'rm -rf "$tmp" "$tmp7" "$tmp8" "$tmp9"' EXIT
+cp -r core scripts .env.example "$tmp9/"
+printf 'acme\nhttp://localhost:9/\n\n\n\n\n\n\n\n\n\nn\n\nn\n' | ( cd "$tmp9" && bash scripts/init.sh >/dev/null )
+grep -qxF "DISCORD_WEBHOOK_URL=''" "$tmp9/.env"
+grep -qxF "ALERT_EMAIL_TO=''" "$tmp9/.env"
+
 echo "test_init OK"

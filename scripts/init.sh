@@ -6,8 +6,15 @@ ROOT="$(pwd)"
 [ -f "$ROOT/.env" ] && { set -a; . "$ROOT/.env"; set +a; }
 ask() { # var prompt default
   local v="$1" p="$2" d="${!1:-$3}"
-  read -r -p "$p [${d}]: " a
+  read -r -p "$p [${d}]: " a || a=
   printf -v "$v" '%s' "${a:-$d}"
+}
+ask_secret() { # var prompt -- input hidden; empty answer keeps the current value
+  local v="$1" p="$2" cur="${!1:-}" shown
+  [ -n "$cur" ] && shown="[unchanged]" || shown="[empty]"
+  read -rs -p "$p $shown: " a || a=
+  echo
+  printf -v "$v" '%s' "${a:-$cur}"
 }
 ask_pct() { # var prompt default -- integer 1-99
   while true; do
@@ -19,7 +26,7 @@ ask_pct() { # var prompt default -- integer 1-99
 q() { printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"; }  # shell-quote a value for .env
 echo "== SRE Starter Kit setup =="
 ask PROJECT_NAME "Project name" "myproject"
-ask SLACK_WEBHOOK_URL "Slack webhook URL (required)" ""
+ask SLACK_WEBHOOK_URL "Slack webhook URL (optional if you set another receiver below)" ""
 ask TELEGRAM_BOT_TOKEN "Telegram bot token (optional)" ""
 ask TELEGRAM_CHAT_ID "Telegram chat id (optional)" ""
 ask TEAMS_WEBHOOK_URL "MS Teams Workflows webhook URL (optional)" ""
@@ -51,7 +58,15 @@ case "$CADVISOR_ANS" in y|Y|yes|YES) COMPOSE_PROFILES=cadvisor ;; *) COMPOSE_PRO
 if [ "$MODULE_SECURITY" = true ]; then
   ask AUTH_LOG_PATH "Auth log path (RHEL/Amazon Linux: /var/log/secure)" "/var/log/auth.log"
 fi
-[ -z "$SLACK_WEBHOOK_URL" ] && { echo "ERROR: Slack webhook is required in the free tier." >&2; exit 1; }
+ask DISCORD_WEBHOOK_URL "Discord webhook URL (optional)" ""
+ask ALERT_EMAIL_TO "Email address(es) for alerts, comma-separated (optional)" ""
+if [ -n "$ALERT_EMAIL_TO" ]; then
+  ask SMTP_HOST "SMTP host:port (STARTTLS)" "smtp.gmail.com:587"
+  ask SMTP_FROM "From address" "${ALERT_EMAIL_TO%%,*}"
+  ask SMTP_USER "SMTP username (empty = no auth)" "$SMTP_FROM"
+  [ -n "$SMTP_USER" ] && ask_secret SMTP_PASSWORD "SMTP password"
+fi
+[ -z "${SLACK_WEBHOOK_URL}${DISCORD_WEBHOOK_URL}${ALERT_EMAIL_TO}${TELEGRAM_BOT_TOKEN}${TEAMS_WEBHOOK_URL}" ] && { echo "ERROR: configure at least one receiver (Slack, Discord, email, Telegram or Teams)." >&2; exit 1; }
 
 cat > "$ROOT/.env" <<ENV
 PROJECT_NAME=$(q "$PROJECT_NAME")
@@ -60,6 +75,12 @@ SLACK_WEBHOOK_URL=$(q "$SLACK_WEBHOOK_URL")
 TELEGRAM_BOT_TOKEN=$(q "$TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID=$(q "$TELEGRAM_CHAT_ID")
 TEAMS_WEBHOOK_URL=$(q "$TEAMS_WEBHOOK_URL")
+DISCORD_WEBHOOK_URL=$(q "${DISCORD_WEBHOOK_URL:-}")
+ALERT_EMAIL_TO=$(q "${ALERT_EMAIL_TO:-}")
+SMTP_HOST=$(q "${SMTP_HOST:-}")
+SMTP_FROM=$(q "${SMTP_FROM:-}")
+SMTP_USER=$(q "${SMTP_USER:-}")
+SMTP_PASSWORD=$(q "${SMTP_PASSWORD:-}")
 TRIAGE_WEBHOOK_URL=$(q "${TRIAGE_WEBHOOK_URL:-http://localhost:9/}")
 SERVICES=$(q "${SERVICES:-}")
 DISK_WARN_PCT=$(q "$DISK_WARN_PCT")
