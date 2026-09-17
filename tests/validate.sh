@@ -50,6 +50,6 @@ ${CONTAINER_ENGINE:-docker} run --rm -v "$tmp/build/alertmanager:/c" --entrypoin
 for rb in ServiceDown DiskWillFillIn24h; do
   f="docs/runbooks/$rb.md"
   [ -f "$f" ] && [ "$(head -1 "$f")" = "# $rb" ] && [ "$(wc -l < "$f")" -le 60 ] || { echo "sample runbook $f missing or malformed"; fail=1; }
-  grep -q "docs/runbooks/$rb.md" docs/ALERTS.md || { echo "docs/ALERTS.md does not link $f"; fail=1; }
+  grep -qF "](runbooks/$rb.md)" docs/ALERTS.md || { echo "docs/ALERTS.md does not link $f"; fail=1; }
 done
 [ $fail -eq 0 ] && echo "validate OK" || { echo "validate FAILED"; exit 1; }
