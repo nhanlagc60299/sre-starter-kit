@@ -45,7 +45,8 @@ exprs=dict(re.findall(r'- alert: (\w+)\n\s*expr: (.*)', rules))
 assert exprs["DiskFull"].endswith("* 100 < 15"), exprs["DiskFull"]
 assert exprs["DiskLow"].endswith("* 100 < 30"), exprs["DiskLow"]
 PY
-[ -e "$tmp/build/loki/rules" ] && { echo "FAIL: security rules kept when module off"; exit 1; }
+[ -e "$tmp/build/loki/rules/fake/security.yml" ] && { echo "FAIL: security rules kept when module off"; exit 1; }
+[ -e "$tmp/build/loki/rules/fake/logs.yml" ] || { echo "FAIL: log alerts dropped when the security module is off"; exit 1; }
 
 # --- re-run 3: blank security answer keeps it off ---
 printf '\n\n\n\n\n\n\n\n\n\n\n\n\n\n' | ( cd "$tmp" && bash scripts/init.sh >/dev/null )

@@ -63,13 +63,14 @@ or accept that host metrics are absent.
 |---|---|
 | Metrics | node_exporter, cAdvisor, blackbox HTTP probes for every service you list |
 | Logs | Loki + Grafana Alloy (Promtail is EOL — this kit does not use it) |
-| Alerts | critical → Slack now, repeats hourly. warning → batched every 30 min. NodeDown silences the other infra alerts on that node; DiskFull silences DiskLow, HighErrorRate silences ElevatedErrorRate. |
+| Alerts | critical → Slack now, repeats hourly. warning → batched every 30 min. NodeDown silences the other infra alerts on that node; DiskFull silences DiskLow, HighErrorRate silences ElevatedErrorRate. Two log-based alerts (error bursts, HTTP 5xx in access logs) cover services that expose no metrics. |
 | Receivers | Slack, Discord, email (SMTP), Telegram, MS Teams. Any one is enough. |
 | Dashboards | Overview (is anything wrong?), Node, App |
 | Early warning | SSH failed-login bursts, root logins. **Not a security control.** |
 
-Full alert list: [core/prometheus/rules](core/prometheus/rules) (infra + app) and
-[core/loki/rules/fake/security.yml](core/loki/rules/fake/security.yml) (SSH early warning).
+Full alert list: [core/prometheus/rules](core/prometheus/rules) (infra + app),
+[core/loki/rules/fake/security.yml](core/loki/rules/fake/security.yml) (SSH early warning) and
+[core/loki/rules/fake/logs.yml](core/loki/rules/fake/logs.yml) (log-based).
 Every alert carries a `runbook_url` annotation pointing at its entry in [docs/ALERTS.md](docs/ALERTS.md), which says what makes the alert fire and where to look first. Full runbooks with usual causes, mitigation and the root-cause fix are a Pro feature, see below. To use your own documentation instead, edit the `runbook_url` lines under `core/`.
 
 ## App metrics (optional)
