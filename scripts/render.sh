@@ -113,9 +113,12 @@ if [ -f "$AM" ] && [ -n "${DISCORD_WEBHOOK_URL:-}" ]; then
 fi
 if [ -f "$AM" ] && [ -n "${ALERT_EMAIL_TO:-}" ]; then
   auth=""
+  # YAML single-quoted scalars escape ' by doubling it ('' ); backslash is not special there, so it
+  # needs no escaping. Without this a password containing a quote breaks the YAML parse (amtool/Alertmanager).
+  pw_esc=$(printf '%s' "${SMTP_PASSWORD:-}" | sed "s/'/''/g")
   [ -n "${SMTP_USER:-}" ] && auth="
         auth_username: ${SMTP_USER}
-        auth_password: '${SMTP_PASSWORD:-}'"
+        auth_password: '${pw_esc}'"
   for m in RECEIVERS_CRITICAL_EXTRA RECEIVERS_WARNING_EXTRA; do
     add "$m" "    email_configs:
       - to: ${ALERT_EMAIL_TO}

@@ -104,6 +104,18 @@ sed -i.bak "s/^SMTP_USER=.*/SMTP_USER=''/; s/^SMTP_PASSWORD=.*/SMTP_PASSWORD=''/
 ! grep -q auth_username "$AM7" || { echo "FAIL: auth_username rendered with an empty SMTP_USER"; exit 1; }
 ${CONTAINER_ENGINE:-docker} run --rm -v "$tmp7/build/alertmanager:/c" --entrypoint amtool prom/alertmanager:v0.28.1 check-config /c/alertmanager.yml >/dev/null
 
+# --- re-run 10: an SMTP password containing a single quote and a backslash must survive as a valid
+#     single-quoted YAML scalar (a raw quote would close the scalar early and break the parse) ---
+sed -i.bak "s/^SMTP_USER=.*/SMTP_USER='alerts@example.invalid'/; s/^SMTP_PASSWORD=.*/SMTP_PASSWORD='pa'\\\\''ss\\\\x'/" "$tmp7/.env" && rm -f "$tmp7/.env.bak"
+( cd "$tmp7" && bash scripts/render.sh >/dev/null )
+${CONTAINER_ENGINE:-docker} run --rm -v "$tmp7/build/alertmanager:/c" --entrypoint amtool prom/alertmanager:v0.28.1 check-config /c/alertmanager.yml >/dev/null
+python3 - "$AM7" <<'PY'
+import sys, yaml
+c = yaml.safe_load(open(sys.argv[1]))
+pw = c["receivers"][0]["email_configs"][0]["auth_password"]
+assert pw == "pa'ss\\x", pw
+PY
+
 # --- re-run 9: no receiver at all is refused by the wizard ---
 tmp8=$(mktemp -d)
 cp -r core scripts .env.example "$tmp8/"
