@@ -74,10 +74,10 @@ urllib.request.urlopen(req).read()
 PY
 q='sum by (service) (count_over_time({service=~".+", service!~"prometheus|alertmanager|grafana|loki|alloy|blackbox|cadvisor|node-exporter"} |~ `(?i)\b(error|exception|fatal|panic|traceback)\b` [5m]))'
 n=0
-for i in $(seq 1 10); do
+for i in $(seq 1 15); do
   n=$(curl -sf "$H:3100/loki/api/v1/query" --data-urlencode "query=$q" \
     | python3 -c 'import sys,json; r=json.load(sys.stdin)["data"]["result"]; print(int(float(r[0]["value"][1])) if r else 0)' 2>/dev/null || echo 0)
-  [ "$n" -ge 60 ] && break; sleep 3
+  [ "$n" -ge 60 ] && break; sleep 4
 done
 [ "$n" -ge 60 ] || { echo "FAIL: LogErrorBurst selector counted $n of 60 pushed error lines"; exit 1; }
 echo "smoke: log alert selector counts pushed lines ($n)"

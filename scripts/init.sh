@@ -66,7 +66,10 @@ if [ -n "$ALERT_EMAIL_TO" ]; then
   ask SMTP_USER "SMTP username (empty = no auth)" "$SMTP_FROM"
   [ -n "$SMTP_USER" ] && ask_secret SMTP_PASSWORD "SMTP password"
 fi
-[ -z "${SLACK_WEBHOOK_URL}${DISCORD_WEBHOOK_URL}${ALERT_EMAIL_TO}${TELEGRAM_BOT_TOKEN}${TEAMS_WEBHOOK_URL}" ] && { echo "ERROR: configure at least one receiver (Slack, Discord, email, Telegram or Teams)." >&2; exit 1; }
+# Telegram needs both the bot token and the chat id to actually notify anyone; the token alone
+# is not a usable receiver, so it does not count towards "at least one" below.
+tg=""; [ -n "${TELEGRAM_BOT_TOKEN:-}" ] && [ -n "${TELEGRAM_CHAT_ID:-}" ] && tg=1
+[ -z "${SLACK_WEBHOOK_URL}${DISCORD_WEBHOOK_URL}${ALERT_EMAIL_TO}${tg}${TEAMS_WEBHOOK_URL}" ] && { echo "ERROR: configure at least one receiver (Slack, Discord, email, Telegram or Teams)." >&2; exit 1; }
 
 cat > "$ROOT/.env" <<ENV
 PROJECT_NAME=$(q "$PROJECT_NAME")

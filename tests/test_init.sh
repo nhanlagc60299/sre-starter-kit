@@ -124,8 +124,16 @@ if printf 'acme\n\n\n\n\n\n\n\n\n\ns3cret\nn\n\nn\n\n\n' | ( cd "$tmp8" && bash 
 fi
 [ ! -e "$tmp8/.env" ] || { echo "FAIL: wizard wrote .env with no receiver"; exit 1; }
 
+# --- re-run 9b: a Telegram bot token with no chat id is not a usable receiver either ---
+tmp8b=$(mktemp -d); trap 'rm -rf "$tmp" "$tmp7" "$tmp8" "$tmp8b"' EXIT
+cp -r core scripts .env.example "$tmp8b/"
+if printf 'acme\n\n123456:ABCDEF\n\n\n\n\n\n\n\ns3cret\nn\n\nn\n\n\n' | ( cd "$tmp8b" && bash scripts/init.sh >/dev/null 2>&1 ); then
+  echo "FAIL: wizard accepted a Telegram token with no chat id and no other receiver"; exit 1
+fi
+[ ! -e "$tmp8b/.env" ] || { echo "FAIL: wizard wrote .env with a Telegram token but no chat id"; exit 1; }
+
 # --- old answer files stop early: the new trailing questions must take defaults at EOF, not abort ---
-tmp9=$(mktemp -d); trap 'rm -rf "$tmp" "$tmp7" "$tmp8" "$tmp9"' EXIT
+tmp9=$(mktemp -d); trap 'rm -rf "$tmp" "$tmp7" "$tmp8" "$tmp8b" "$tmp9"' EXIT
 cp -r core scripts .env.example "$tmp9/"
 printf 'acme\nhttp://localhost:9/\n\n\n\n\n\n\n\n\n\nn\n\nn\n' | ( cd "$tmp9" && bash scripts/init.sh >/dev/null )
 grep -qxF "DISCORD_WEBHOOK_URL=''" "$tmp9/.env"
