@@ -14,7 +14,7 @@ are part of the Pro tier. Two of those runbooks are included here unchanged so y
 Critical, after 2m. A blackbox HTTP probe of a service in `SERVICES` has failed for two minutes.
 Check whether the service is actually down or only unreachable from the monitoring host.
 
-Full Pro runbook, included as a sample: [docs/runbooks/ServiceDown.md](runbooks/ServiceDown.md).
+Full Pro runbook, included as a sample: [ServiceDown](runbooks/ServiceDown.md).
 
 ### BlackboxExporterDown
 Critical, after 5m. The blackbox exporter itself is not scrapeable, so no probe is running and
@@ -76,7 +76,7 @@ Warning, after 10m. Free space fell below `DISK_WARN_PCT`. This is the one you a
 Warning, after 30m. Linear prediction from recent usage says the mount fills within 24 hours.
 It fires while free space still looks comfortable, which is the point.
 
-Full Pro runbook, included as a sample: [docs/runbooks/DiskWillFillIn24h.md](runbooks/DiskWillFillIn24h.md).
+Full Pro runbook, included as a sample: [DiskWillFillIn24h](runbooks/DiskWillFillIn24h.md).
 
 ### HighCPU
 Warning, after 15m. Host CPU stayed above 85% for 15 minutes. Sustained saturation, not a spike.
