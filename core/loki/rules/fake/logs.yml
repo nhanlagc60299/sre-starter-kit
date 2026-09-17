@@ -1,0 +1,32 @@
+# Error signals for services that expose no metrics: count log lines instead. The kit's own containers are
+# excluded by compose service name so Grafana or Loki chatter never pages you. `service` is the compose
+# service label Alloy attaches (README "App metrics"); a container started outside compose has none and is
+# not watched. Thresholds are per 5 minutes; change them here and run `make up`.
+groups:
+  - name: logs
+    rules:
+      - alert: LogErrorBurst
+        expr: |
+          sum by (service) (
+            count_over_time({service=~".+", service!~"prometheus|alertmanager|grafana|loki|alloy|blackbox|cadvisor|node-exporter"}
+              |~ `(?i)\b(error|exception|fatal|panic|traceback)\b` [5m])
+          ) > 50
+        for: 5m
+        labels: { severity: warning, module: app }
+        annotations:
+          summary: "{{ $labels.service }} logged {{ $value | printf \"%.0f\" }} error lines in 5m"
+          runbook_url: https://github.com/nhanlagc60299/sre-starter-kit/blob/main/docs/ALERTS.md#logerrorburst
+
+      # Matches the status code of a common-log-format access line ("GET /x HTTP/1.1" 502 ...), which is what
+      # nginx, Apache, gunicorn and most reverse proxies write by default. JSON access logs do not match.
+      - alert: Http5xxInLogs
+        expr: |
+          sum by (service) (
+            count_over_time({service=~".+", service!~"prometheus|alertmanager|grafana|loki|alloy|blackbox|cadvisor|node-exporter"}
+              |~ `" 5[0-9][0-9] ` [5m])
+          ) > 20
+        for: 5m
+        labels: { severity: warning, module: app }
+        annotations:
+          summary: "{{ $labels.service }} logged {{ $value | printf \"%.0f\" }} HTTP 5xx responses in 5m"
+          runbook_url: https://github.com/nhanlagc60299/sre-starter-kit/blob/main/docs/ALERTS.md#http5xxinlogs

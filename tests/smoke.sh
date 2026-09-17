@@ -61,4 +61,24 @@ for i in $(seq 1 15); do curl -sf $H:3100/ready | grep -q ready && break; sleep 
 curl -sf $H:3100/ready | grep -q ready || { echo "FAIL: loki not ready after 60s"; exit 1; }
 rules=$(curl -sf $H:3100/loki/api/v1/rules 2>/dev/null || true)
 echo "$rules" | grep -q SSHFailedLoginBurst && echo "$rules" | grep -q RootLoginDetected || { echo "FAIL: loki ruler did not load security rules"; exit 1; }
+echo "$rules" | grep -q LogErrorBurst && echo "$rules" | grep -q Http5xxInLogs || { echo "FAIL: loki ruler did not load the log alerts"; exit 1; }
+# Prove the LogQL the alerts use actually counts lines: push 60 error lines for a fake service and evaluate
+# the LogErrorBurst selector against them. A rule the ruler *loads* can still be one that never matches.
+python3 - "$H" <<'PY'
+import json,sys,time,urllib.request
+now=time.time_ns()
+lines=[[str(now+i), "2026-09-17T00:00:00Z ERROR boom %d" % i] for i in range(60)]
+body=json.dumps({"streams":[{"stream":{"service":"smoke-app","container":"smoke-app"},"values":lines}]}).encode()
+req=urllib.request.Request("http://%s:3100/loki/api/v1/push" % sys.argv[1], data=body, headers={"Content-Type":"application/json"})
+urllib.request.urlopen(req).read()
+PY
+q='sum by (service) (count_over_time({service=~".+", service!~"prometheus|alertmanager|grafana|loki|alloy|blackbox|cadvisor|node-exporter"} |~ `(?i)\b(error|exception|fatal|panic|traceback)\b` [5m]))'
+n=0
+for i in $(seq 1 10); do
+  n=$(curl -sf "$H:3100/loki/api/v1/query" --data-urlencode "query=$q" \
+    | python3 -c 'import sys,json; r=json.load(sys.stdin)["data"]["result"]; print(int(float(r[0]["value"][1])) if r else 0)' 2>/dev/null || echo 0)
+  [ "$n" -ge 60 ] && break; sleep 3
+done
+[ "$n" -ge 60 ] || { echo "FAIL: LogErrorBurst selector counted $n of 60 pushed error lines"; exit 1; }
+echo "smoke: log alert selector counts pushed lines ($n)"
 echo "smoke OK: all targets up"

@@ -4,8 +4,8 @@ Every alert in this kit sets a `runbook_url` annotation pointing at its section 
 in Slack, Telegram or Teams always resolves to something.
 
 Each entry states what makes the alert fire and the first thing worth looking at. Full runbooks —
-usual causes, mitigation, and the root-cause fix for all 32 alerts across the free and Pro rule
-sets — are part of the Pro tier. To point these links at your own documentation instead, edit the
+usual causes, mitigation, and the root-cause fix for every alert in the free and Pro rule sets —
+are part of the Pro tier. To point these links at your own documentation instead, edit the
 `runbook_url` lines under `core/prometheus/rules/` and `core/loki/rules/`.
 
 ## Service and probe alerts
@@ -38,6 +38,23 @@ Warning, after 15m. A lower 5xx rate sustained over 15 minutes. This catches a s
 ### HighP95Latency
 Warning, after 10m. The service's 95th-percentile request latency stayed above the threshold.
 Compare against deploy times and downstream dependency latency.
+
+## Log alerts
+
+Both read Loki, not Prometheus, and both count lines per compose `service` over five minutes. They exist for
+services that expose no metrics: the error-rate alerts above need `http_requests_total`, which most small
+apps do not emit, and these two need only stdout. The kit's own containers are excluded by name.
+
+### LogErrorBurst
+Warning, after 5m. More than 50 lines in 5 minutes matched `error`, `exception`, `fatal`, `panic` or
+`traceback` (case-insensitive, whole word). Open the Logs panel on the App dashboard for that service and
+read the first error of the burst, not the last.
+
+### Http5xxInLogs
+Warning, after 5m. More than 20 access-log lines in 5 minutes carried a 5xx status in common log format
+(`"GET /path HTTP/1.1" 502`). JSON access logs do not match this pattern; edit the regex in
+`core/loki/rules/fake/logs.yml` if yours are JSON. Check whether the 5xx come from the app or from the proxy
+in front of it: a proxy 502 with a quiet app means the app is not answering.
 
 ## Host alerts
 

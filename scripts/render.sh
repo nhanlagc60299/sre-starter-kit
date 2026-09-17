@@ -125,7 +125,7 @@ if [ -f "$AM" ] && [ -n "${ALERT_EMAIL_TO:-}" ]; then
         headers: { Subject: '[${PROJECT_NAME:-}] {{ .CommonLabels.alertname }} ({{ .Status }})' }"
   done
 fi
-# 4. security module off -> drop the loki rules
-[ "${MODULE_SECURITY:-true}" = true ] || rm -rf "$ROOT/build/loki/rules"
+# 4. security module off -> drop only its rules; the log alerts in logs.yml are not part of the module
+[ "${MODULE_SECURITY:-true}" = true ] || rm -f "$ROOT/build/loki/rules/fake/security.yml"
 
 echo "rendered to build/"
