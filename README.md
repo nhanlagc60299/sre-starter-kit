@@ -128,7 +128,7 @@ Both flavours ship: `docker compose` for VMs, and a Helm chart for Kubernetes.
 
 **[Pro is $199, one payment](https://lagcian.gumroad.com/l/sre-starter-kit-pro)** -- a perpetual
 licence for your organisation on any number of hosts, source included, 12 months of updates.
-Support is not included; that is why every alert ships with a runbook.
+Support is not included; that is why every alert ships with a runbook. Two of those runbooks are in this repo unchanged, [ServiceDown](docs/runbooks/ServiceDown.md) and [DiskWillFillIn24h](docs/runbooks/DiskWillFillIn24h.md), so you can see what you are paying for.
 
 Install this free tier first. It is the same stack without the modules above, so it is the honest
 way to judge the code before paying for more of it. Questions: **nhanlagc60299@gmail.com**.
