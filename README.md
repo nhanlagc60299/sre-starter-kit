@@ -125,9 +125,12 @@ Prometheus metrics, 2 from Loki logs).
 
 Both flavours ship: `docker compose` for VMs, and a Helm chart for Kubernetes.
 
-What it covers, and why each alert exists: **[the Pro overview page](https://claude.ai/artifact/Q3kTsw1qdxHAN9PZBshaGd)**.
+**[Pro is $199, one payment](https://lagcian.gumroad.com/l/sre-starter-kit-pro)** -- a perpetual
+licence for your organisation on any number of hosts, source included, 12 months of updates.
+Support is not included; that is why every alert ships with a runbook.
 
-To buy Pro or ask what it covers, email **nhanlagc60299@gmail.com**.
+Install this free tier first. It is the same stack without the modules above, so it is the honest
+way to judge the code before paying for more of it. Questions: **nhanlagc60299@gmail.com**.
 
 ## License
 
