@@ -120,9 +120,10 @@ is serving production traffic.
 
 AWS CloudWatch alerts (RDS/ELB/EC2), a Kubernetes module (node, pod and job health from
 kube-state-metrics), an Airflow module (scheduler health, DAG failures, run duration against a
-7-day baseline, queue backlog), SLO burn-rate alerts, backup dead-man's switch, monitoring
-watchdog, deploy markers on every dashboard, and a written runbook for all 53 alerts (51 from
-Prometheus metrics, 2 from Loki logs).
+7-day baseline, queue backlog), a Postgres module (connections, replica lag, idle transactions,
+deadlocks, dead tuples), SLO burn-rate alerts, backup dead-man's switch, monitoring watchdog,
+deploy markers on every dashboard, and a written runbook for all 62 alerts (58 from Prometheus
+metrics, 4 from Loki logs).
 
 Both flavours ship: `docker compose` for VMs, and a Helm chart for Kubernetes.
 
