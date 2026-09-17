@@ -125,6 +125,8 @@ Prometheus metrics, 2 from Loki logs).
 
 Both flavours ship: `docker compose` for VMs, and a Helm chart for Kubernetes.
 
+What it covers, and why each alert exists: **[the Pro overview page](https://claude.ai/artifact/Q3kTsw1qdxHAN9PZBshaGd)**.
+
 To buy Pro or ask what it covers, email **nhanlagc60299@gmail.com**.
 
 ## License
