@@ -1,0 +1,256 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>The alert that never fired</title>
+<meta name="description" content="Most teams think their monitoring problem is noise. The research says the more expensive problem is silence - and the two have the same root cause.">
+<link rel="canonical" href="https://nhanlagc60299.github.io/sre-starter-kit/alert-that-never-fired.html">
+<meta property="og:title" content="The alert that never fired">
+<meta property="og:description" content="78% of organisations had an incident where no alert fired at all. Here is how to find the rules in your own config that cannot fire.">
+<meta property="og:type" content="article">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wght@600;800&family=Source+Sans+3:ital,wght@0,400;0,600;1,400&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<style>
+  :root {
+    --ground:#f7f6f3; --panel:#ffffff; --ink:#16181d; --ink-soft:#4d5460;
+    --ink-faint:#838b98; --rule:#dfdcd5; --rule-soft:#ebe8e2;
+    --critical:#b4232a; --critical-bg:#fbeeee; --shade:#f1efe9;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --ground:#14151a; --panel:#1b1d23; --ink:#eceef2; --ink-soft:#a7aeba;
+      --ink-faint:#757d8b; --rule:#2e323b; --rule-soft:#24272e;
+      --critical:#ff8a86; --critical-bg:#2c1b1c; --shade:#1f222a;
+    }
+  }
+  :root[data-theme="dark"] {
+    --ground:#14151a; --panel:#1b1d23; --ink:#eceef2; --ink-soft:#a7aeba;
+    --ink-faint:#757d8b; --rule:#2e323b; --rule-soft:#24272e;
+    --critical:#ff8a86; --critical-bg:#2c1b1c; --shade:#1f222a;
+  }
+
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--ground); color: var(--ink);
+    font-family: "Source Sans 3", ui-sans-serif, system-ui, sans-serif;
+    font-size: 18px; line-height: 1.65; -webkit-font-smoothing: antialiased;
+  }
+  .wrap { max-width: 720px; margin: 0 auto; padding-inline: 24px; }
+  code { font-family: "IBM Plex Mono", ui-monospace, monospace; font-size: .88em;
+         background: var(--shade); padding: 1px 5px; border-radius: 2px; }
+  img { max-width: 100%; }
+
+  header.site { border-bottom: 1px solid var(--rule); background: var(--panel); }
+  header.site .bar { display:flex; flex-wrap:wrap; gap:8px 18px; align-items:baseline;
+                     justify-content:space-between; padding-block: 16px; }
+  header.site a.home { font-family: Archivo, sans-serif; font-weight: 800; font-size: 17px;
+                       letter-spacing:-.02em; color: var(--ink); text-decoration: none; }
+  header.site .meta { font-family:"IBM Plex Mono", monospace; font-size:12px; color: var(--ink-faint); }
+
+  article { padding-block: 48px 8px; }
+  h1 { font-family: Archivo, sans-serif; font-weight: 800; letter-spacing: -.032em;
+       font-size: clamp(32px, 6vw, 50px); line-height: 1.06; margin: 0; text-wrap: balance; }
+  .standfirst { margin-top: 20px; font-size: clamp(18px,2.4vw,21px); color: var(--ink-soft);
+                font-style: italic; }
+  .byline { margin-top: 18px; font-family:"IBM Plex Mono", monospace; font-size: 12.5px;
+            color: var(--ink-faint); }
+  hr { border: 0; border-top: 1px solid var(--rule); margin-block: 38px; }
+
+  h2 { font-family: Archivo, sans-serif; font-weight: 800; letter-spacing:-.024em;
+       font-size: clamp(23px,3.2vw,29px); line-height:1.2; margin: 44px 0 0; text-wrap: balance; }
+  h3 { font-family: Archivo, sans-serif; font-weight: 600; font-size: 19px;
+       margin: 34px 0 0; letter-spacing:-.01em; }
+  p { margin: 16px 0 0; }
+  strong { font-weight: 600; }
+
+  blockquote {
+    margin: 26px 0 0; padding: 18px 22px; background: var(--panel);
+    border-left: 3px solid var(--critical); border-radius: 0 3px 3px 0;
+  }
+  blockquote p { margin: 0; }
+  blockquote p + p { margin-top: 10px; }
+  blockquote .n { font-family: Archivo, sans-serif; font-weight: 800; color: var(--critical); }
+  blockquote cite { display:block; margin-top: 10px; font-style: normal;
+                    font-family:"IBM Plex Mono", monospace; font-size: 12px; color: var(--ink-faint); }
+
+  .tablewrap { overflow-x: auto; margin-top: 26px; border: 1px solid var(--rule);
+               border-radius: 4px; background: var(--panel); }
+  table { border-collapse: collapse; width: 100%; min-width: 520px; }
+  th { text-align: left; font-family:"IBM Plex Mono", monospace; font-size: 11px;
+       letter-spacing:.09em; text-transform: uppercase; color: var(--ink-faint);
+       font-weight: 500; padding: 11px 16px; border-bottom: 1px solid var(--rule);
+       background: var(--shade); }
+  td { padding: 11px 16px; border-bottom: 1px solid var(--rule-soft); font-size: 16px;
+       vertical-align: top; }
+  tr:last-child td { border-bottom: 0; }
+  td.fig { font-family: Archivo, sans-serif; font-weight: 800; font-variant-numeric: tabular-nums;
+           white-space: nowrap; }
+
+  ol.checks { margin: 22px 0 0; padding: 0; list-style: none; counter-reset: c; display:grid; gap: 18px; }
+  ol.checks li { counter-increment: c; position: relative; padding-left: 46px; }
+  ol.checks li::before {
+    content: counter(c); position: absolute; left: 0; top: 1px;
+    width: 30px; height: 30px; display: grid; place-items: center;
+    font-family: Archivo, sans-serif; font-weight: 800; font-size: 14px;
+    color: var(--critical); background: var(--critical-bg); border-radius: 50%;
+  }
+  ol.checks li p { margin: 0; }
+  ol.checks li p + p { margin-top: 8px; }
+
+  .caveat { margin-top: 30px; background: var(--shade); border: 1px solid var(--rule);
+            border-radius: 4px; padding: 20px 24px; }
+  .caveat h3 { margin-top: 0; }
+  .caveat p { font-size: 16.5px; color: var(--ink-soft); }
+
+  .disclosure { margin-top: 34px; padding: 16px 20px; border: 1px dashed var(--rule);
+                border-radius: 4px; font-size: 15.5px; color: var(--ink-soft); }
+  .disclosure p { margin: 0; }
+
+  ol.sources { margin: 18px 0 0; padding-left: 22px; font-size: 16px; color: var(--ink-soft); }
+  ol.sources li { margin-bottom: 9px; }
+
+  a { color: var(--ink); text-underline-offset: 3px; }
+  a:focus-visible { outline: 2px solid var(--critical); outline-offset: 3px; }
+
+  footer.site { border-top: 1px solid var(--rule); background: var(--panel);
+                margin-top: 54px; padding-block: 26px; }
+  footer.site p { margin: 0; font-size: 14.5px; color: var(--ink-faint); }
+</style>
+</head>
+<body>
+
+<header class="site">
+  <div class="wrap bar">
+    <a class="home" href="./">SRE Starter Kit</a>
+    <span class="meta">self-hosted &middot; Prometheus &middot; Grafana &middot; Loki</span>
+  </div>
+</header>
+
+<div class="wrap">
+<article>
+  <h1>The alert that never fired</h1>
+  <p class="standfirst">Most teams think their monitoring problem is noise. The research says the more expensive problem is silence &mdash; and the two have the same root cause.</p>
+  <p class="byline">An analysis of three 2026 sources on alerting practice. Every figure is cited.</p>
+
+  <hr>
+
+  <p>Ask an on-call engineer what is wrong with their monitoring and you will hear about noise. Too many pages. Too much Slack. A channel nobody opens any more.</p>
+
+  <p>That is real, and it is measurable. But it is the visible half of the problem. The half that actually causes the outage is the alert that stayed quiet.</p>
+
+  <blockquote>
+    <p><span class="n">78%</span> of organisations had at least one incident where <strong>no alert fired at all</strong>.</p>
+    <cite>NeuBird, 2026 State of Production Reliability &amp; AI Adoption &middot; Feb 2026 &middot; n=1,039</cite>
+  </blockquote>
+
+  <p>Not an alert that fired late. Not one that fired to a muted channel. No alert. The system was broken, the monitoring was up, the dashboards were green, and nothing said anything.</p>
+
+  <p>In the same survey, <strong>44%</strong> reported an outage tied specifically to an alert that had been suppressed or ignored. Put those together and a shape appears: the noise and the silence are not two problems. Noise is how silence gets manufactured.</p>
+
+  <h2>How a monitoring stack teaches people to stop looking</h2>
+
+  <p>The sequence is boringly consistent, and the numbers mark each step.</p>
+
+  <div class="tablewrap">
+    <table>
+      <thead><tr><th scope="col">Stage</th><th scope="col">Figure</th><th scope="col">What it measures</th></tr></thead>
+      <tbody>
+        <tr><td>Volume arrives</td><td class="fig">77%</td><td>receive ten or more alerts every day</td></tr>
+        <tr><td>Signal thins out</td><td class="fig">57%</td><td>say fewer than 30% of their alerts are actionable</td></tr>
+        <tr><td>People adapt</td><td class="fig">83%</td><td>admit to ignoring or dismissing alerts</td></tr>
+        <tr><td>It costs something</td><td class="fig">44%</td><td>had an outage tied to a suppressed or ignored alert</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p>Nobody in that chain behaved unreasonably. An engineer who learns that seven of every ten pages need no action is not being careless when they stop reading the eighth &mdash; they are responding correctly to the evidence in front of them. The alerting system taught them that.</p>
+
+  <p>Google's SRE book named this two decades of practice ago, and the wording has not needed updating:</p>
+
+  <blockquote>
+    <p>Pages with rote, algorithmic responses should be a red flag.</p>
+    <cite>Google, Site Reliability Engineering, "Monitoring Distributed Systems"</cite>
+  </blockquote>
+
+  <p>The same chapter is blunt about the human ceiling: a person can react with urgency only a few times a day before fatigue sets in. That is the real budget. Not disk space, not retention &mdash; attention. Every alert that does not deserve a human spends some of it, and the account is drawn down long before the night it matters.</p>
+
+  <h2>Why small teams get hit hardest</h2>
+
+  <p>A company with a platform team can afford to tune this. Someone owns the alert rules, prunes them quarterly, and knows which ones lie. A team of five developers running a dozen hosts has no such person, and their monitoring is assembled from whatever was quickest to install.</p>
+
+  <p>The 2026 CNCF observability survey shows how that assembly turns out.</p>
+
+  <blockquote>
+    <p><span class="n">46.7%</span> run <strong>two to three observability tools in parallel</strong>. Only 7.4% have a single unified experience.</p>
+    <cite>CNCF observability survey &middot; Feb 2026 &middot; n=407</cite>
+  </blockquote>
+
+  <p>And when asked where the friction actually is, respondents did not point at storage, query languages or cost. They pointed at the part nobody enjoys:</p>
+
+  <blockquote>
+    <p><span class="n">54%</span> named <strong>dashboard and alert configuration</strong> as their number-one setup challenge &mdash; ahead of integration complexity at 46.4%.</p>
+    <cite>CNCF observability survey &middot; Feb 2026 &middot; n=407</cite>
+  </blockquote>
+
+  <p>This is the gap that produces the 78%. Installing Prometheus is an afternoon. Deciding <em>what should wake someone up</em>, writing the rule so it fires on the real failure and not on a proxy for it, and proving it can fire at all &mdash; that is the work, it is nobody's job, and it silently does not happen.</p>
+
+  <p>What gets installed instead is a default rule set: thresholds someone else chose, for a workload that is not yours. Some of them are noise from the first day. Some of them describe a metric your setup never publishes, so they are decorative &mdash; present in the config, green on the dashboard, incapable of firing. Nothing tells you which is which.</p>
+
+  <h2>How to find the rules that cannot fire</h2>
+
+  <p>This is the part that addresses the 78% directly, and you can do it yourself this afternoon.</p>
+
+  <p>An alert rule can be valid YAML, load cleanly, show green in every check, and still be incapable of firing &mdash; because it reads a metric this version of the exporter stopped publishing, or joins two series that are never present at the same moment, or filters on a label the real system leaves empty.</p>
+
+  <p>Reading the rule does not reveal any of that. Three checks do.</p>
+
+  <ol class="checks">
+    <li>
+      <p><strong>Ask whether the series exists at all.</strong> Take each alert's expression, strip the comparison, and run just the selector against your own Prometheus. If it returns nothing, the alert cannot fire today. That single query finds more dead rules than any amount of review.</p>
+    </li>
+    <li>
+      <p><strong>Check the shape on a default install, not your install.</strong> A rule that reads a job fed by a config variable has no series when that variable is empty &mdash; which is how a fresh install ships. The rule looks fine in a fully configured environment and is inert everywhere else.</p>
+    </li>
+    <li>
+      <p><strong>Break the rule on purpose and see whether your test notices.</strong> If a rule has a unit test, change the threshold or the label so the alert must not fire, and run the test. If it still passes, the test was never checking what you thought.</p>
+      <p>This is the one that catches the rest, because a fixture is written by the same person who wrote the rule, from the same wrong mental model &mdash; so it cannot contradict it.</p>
+    </li>
+  </ol>
+
+  <p>That third check is uncomfortable, and it is the one that pays. Every dead rule I have found came from a fixture carrying a shape the real system never produces: a series with a label that reality always sets, an instance name the scrape config rewrites, a metric the exporter drops when a feature is off.</p>
+
+  <p>Where a metric genuinely cannot be collected, write that down in the runbook's first paragraph rather than leaving an alert in place implying coverage. A documented blind spot is worth more than a silent one.</p>
+
+  <div class="caveat">
+    <h3>Where this data is weak</h3>
+    <p>The reliability figures come from research published by a vendor that sells incident tooling, and its respondents work at organisations with 100 or more employees &mdash; larger than most teams reading this. Treat them as directional, not as a measurement of your situation.</p>
+    <p>The CNCF survey is smaller (n=407) and self-selected toward cloud-native practitioners. Neither dataset is a substitute for looking at your own alert history. If you want one number to take away, take the 78% &mdash; and go ask when your monitoring last stayed silent through something real.</p>
+  </div>
+
+  <h2>The question worth asking</h2>
+
+  <p>Most monitoring reviews ask which alerts fired too often. The more useful question is the inverse, and almost nobody asks it: <strong>when did something break without an alert, and is that rule still in the config today, still green, still unable to fire?</strong></p>
+
+  <p>You can answer that for your own stack in an afternoon, with the three checks above.</p>
+
+  <div class="disclosure">
+    <p>Disclosure: I build <a href="https://github.com/nhanlagc60299/sre-starter-kit">SRE Starter Kit</a>, a self-hosted Prometheus/Grafana/Loki stack. The free tier is MIT licensed. The three checks above are what I run against my own rules; they found five alerts that could not fire.</p>
+  </div>
+
+  <h2>Sources</h2>
+  <ol class="sources">
+    <li>NeuBird, <em>2026 State of Production Reliability and AI Adoption Report</em>, February 2026, n=1,039 at organisations with 100+ employees. Reported by <a href="https://www.carriermanagement.com/news/2026/04/08/286535.htm">Carrier Management</a>.</li>
+    <li>Cloud Native Computing Foundation, observability survey, February 2026, n=407. <a href="https://www.cncf.io/blog/2026/05/06/the-tools-are-ready-so-why-are-most-cloud-native-teams-still-running-three-observability-stacks/">The tools are ready. So why are most cloud native teams still running three observability stacks?</a></li>
+    <li>Beyer, Jones, Petoff and Murphy (eds.), <em>Site Reliability Engineering</em>, O'Reilly / Google. <a href="https://sre.google/sre-book/monitoring-distributed-systems/">Monitoring Distributed Systems</a>.</li>
+  </ol>
+</article>
+</div>
+
+<footer class="site">
+  <div class="wrap">
+    <p>Written by the author of <a href="./">SRE Starter Kit</a>. Free tier on <a href="https://github.com/nhanlagc60299/sre-starter-kit">GitHub</a>, MIT licensed.</p>
+  </div>
+</footer>
+
+</body>
+</html>

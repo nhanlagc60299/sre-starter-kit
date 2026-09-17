@@ -1,0 +1,478 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="description" content="Self-hosted Prometheus, Grafana and Loki for teams of 3-20 with no dedicated SRE. 53 alerts, 53 runbooks, Docker Compose and Helm.">
+<link rel="canonical" href="https://nhanlagc60299.github.io/sre-starter-kit/">
+<meta property="og:title" content="SRE Starter Kit">
+<meta property="og:description" content="Most monitoring problems are noise. The expensive one is silence.">
+<meta property="og:type" content="website">
+<style>*{box-sizing:border-box}body{margin:0}img{max-width:100%}[hidden]{display:none!important}</style>
+<title>SRE Starter Kit</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wght@500;600;800&family=Source+Sans+3:ital,wght@0,400;0,600;1,400&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<style>
+  :root {
+    --ground:      #f7f6f3;
+    --panel:       #ffffff;
+    --ink:         #16181d;
+    --ink-soft:    #4d5460;
+    --ink-faint:   #838b98;
+    --rule:        #dfdcd5;
+    --rule-soft:   #ebe8e2;
+    --critical:    #b4232a;
+    --critical-bg: #fbeeee;
+    --warning:     #8a5a07;
+    --warning-bg:  #fdf3e2;
+    --ok:          #1f6b4d;
+    --ok-bg:       #e9f3ee;
+    --shade:       #f1efe9;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --ground:      #14151a;
+      --panel:       #1b1d23;
+      --ink:         #eceef2;
+      --ink-soft:    #a7aeba;
+      --ink-faint:   #757d8b;
+      --rule:        #2e323b;
+      --rule-soft:   #24272e;
+      --critical:    #ff8a86;
+      --critical-bg: #2c1b1c;
+      --warning:     #e8b458;
+      --warning-bg:  #2a2216;
+      --ok:          #7fd1ab;
+      --ok-bg:       #16271f;
+      --shade:       #1f222a;
+    }
+  }
+  :root[data-theme="dark"] {
+    --ground:      #14151a;
+    --panel:       #1b1d23;
+    --ink:         #eceef2;
+    --ink-soft:    #a7aeba;
+    --ink-faint:   #757d8b;
+    --rule:        #2e323b;
+    --rule-soft:   #24272e;
+    --critical:    #ff8a86;
+    --critical-bg: #2c1b1c;
+    --warning:     #e8b458;
+    --warning-bg:  #2a2216;
+    --ok:          #7fd1ab;
+    --ok-bg:       #16271f;
+    --shade:       #1f222a;
+  }
+
+  * { box-sizing: border-box; }
+
+  body {
+    background: var(--ground);
+    color: var(--ink);
+    font-family: "Source Sans 3", ui-sans-serif, system-ui, sans-serif;
+    font-size: 17px;
+    line-height: 1.6;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  .wrap {
+    max-width: 960px;
+    margin: 0 auto;
+    padding-inline: 24px;
+    padding-block: 0;
+  }
+
+  code, .mono { font-family: "IBM Plex Mono", ui-monospace, SFMono-Regular, monospace; }
+
+  h1, h2, h3 {
+    font-family: Archivo, ui-sans-serif, system-ui, sans-serif;
+    text-wrap: balance;
+    margin: 0;
+  }
+
+  .eyebrow {
+    font-family: "IBM Plex Mono", monospace;
+    font-size: 12px;
+    letter-spacing: .13em;
+    text-transform: uppercase;
+    color: var(--ink-faint);
+  }
+
+  /* ---------- masthead ---------- */
+  header {
+    border-bottom: 1px solid var(--rule);
+    background: var(--panel);
+  }
+  .masthead {
+    display: flex; flex-wrap: wrap; gap: 12px 20px;
+    align-items: baseline; justify-content: space-between;
+    padding-block: 18px;
+  }
+  .wordmark {
+    font-family: Archivo, sans-serif; font-weight: 800;
+    font-size: 19px; letter-spacing: -.02em;
+  }
+  .masthead .meta { font-family: "IBM Plex Mono", monospace; font-size: 12.5px; color: var(--ink-faint); }
+
+  /* ---------- hero ---------- */
+  .hero { padding-block: 56px 44px; }
+  .hero h1 {
+    font-size: clamp(34px, 6.2vw, 58px);
+    font-weight: 800;
+    letter-spacing: -.033em;
+    line-height: 1.04;
+    max-width: 17ch;
+  }
+  .hero h1 .quiet { color: var(--critical); }
+  .hero .lede {
+    margin-top: 22px;
+    font-size: clamp(17px, 2.2vw, 20px);
+    color: var(--ink-soft);
+    max-width: 60ch;
+  }
+  .hero .lede strong { color: var(--ink); font-weight: 600; }
+
+  .cta-row { display: flex; flex-wrap: wrap; gap: 12px; margin-top: 30px; align-items: center; }
+  .btn {
+    display: inline-block; text-decoration: none;
+    font-family: Archivo, sans-serif; font-weight: 600; font-size: 15px;
+    padding: 11px 20px; border-radius: 3px;
+    border: 1px solid var(--ink);
+    background: var(--ink); color: var(--ground);
+  }
+  .btn.ghost { background: transparent; color: var(--ink); }
+  .btn:focus-visible, a:focus-visible { outline: 2px solid var(--critical); outline-offset: 3px; }
+  .cta-note { font-size: 14px; color: var(--ink-faint); }
+
+  /* ---------- evidence strip ---------- */
+  .evidence {
+    border-block: 1px solid var(--rule);
+    background: var(--panel);
+    padding-block: 26px;
+  }
+  .ev-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 24px 32px; }
+  .ev .n {
+    font-family: Archivo, sans-serif; font-weight: 800;
+    font-size: 30px; letter-spacing: -.02em;
+    font-variant-numeric: tabular-nums;
+    line-height: 1.1;
+  }
+  .ev .n.bad { color: var(--critical); }
+  .ev p { margin: 5px 0 0; font-size: 14.5px; color: var(--ink-soft); line-height: 1.45; }
+  .ev cite { display: block; margin-top: 7px; font-family: "IBM Plex Mono", monospace; font-size: 11px; font-style: normal; color: var(--ink-faint); }
+
+  /* ---------- sections ---------- */
+  section { padding-block: 52px; }
+  section > .wrap > h2 {
+    font-size: clamp(24px, 3.4vw, 32px);
+    font-weight: 800; letter-spacing: -.025em;
+    margin-top: 8px; max-width: 24ch;
+  }
+  .section-intro { margin-top: 14px; color: var(--ink-soft); max-width: 62ch; }
+
+  /* ---------- fear table ---------- */
+  .tablewrap { overflow-x: auto; margin-top: 28px; border: 1px solid var(--rule); border-radius: 4px; background: var(--panel); }
+  table { border-collapse: collapse; width: 100%; min-width: 620px; }
+  thead th {
+    text-align: left; font-family: "IBM Plex Mono", monospace;
+    font-size: 11px; letter-spacing: .1em; text-transform: uppercase;
+    color: var(--ink-faint); font-weight: 500;
+    padding: 12px 18px; border-bottom: 1px solid var(--rule);
+    background: var(--shade);
+  }
+  tbody td { padding: 13px 18px; border-bottom: 1px solid var(--rule-soft); vertical-align: top; font-size: 15.5px; }
+  tbody tr:last-child td { border-bottom: 0; }
+  td.fear { font-weight: 600; width: 38%; }
+  td.feat { color: var(--ink-soft); }
+  td.feat .mono { font-size: 13.5px; color: var(--ink); }
+  td.tier { width: 92px; white-space: nowrap; }
+
+  .chip {
+    display: inline-block; font-family: "IBM Plex Mono", monospace;
+    font-size: 11px; letter-spacing: .05em; text-transform: uppercase;
+    padding: 3px 8px; border-radius: 2px; font-weight: 500;
+  }
+  .chip.free { background: var(--ok-bg); color: var(--ok); }
+  .chip.pro  { background: var(--critical-bg); color: var(--critical); }
+  .chip.both { background: var(--warning-bg); color: var(--warning); }
+
+  /* ---------- proof ---------- */
+  .proof-list { margin-top: 26px; display: grid; gap: 1px; background: var(--rule); border: 1px solid var(--rule); border-radius: 4px; overflow: hidden; }
+  .proof { background: var(--panel); padding: 20px 22px; }
+  .proof h3 { font-size: 17px; font-weight: 600; letter-spacing: -.01em; }
+  .proof p { margin: 7px 0 0; color: var(--ink-soft); font-size: 15.5px; }
+  .proof pre {
+    margin: 13px 0 0; padding: 12px 14px; background: var(--shade);
+    border-left: 2px solid var(--critical);
+    font-family: "IBM Plex Mono", monospace; font-size: 12.5px; line-height: 1.55;
+    overflow-x: auto; color: var(--ink);
+  }
+
+  /* ---------- tiers ---------- */
+  .tiers { display: grid; grid-template-columns: repeat(auto-fit, minmax(270px, 1fr)); gap: 18px; margin-top: 28px; }
+  .tier-card { border: 1px solid var(--rule); border-radius: 4px; background: var(--panel); padding: 24px; }
+  .tier-card.focus { border-color: var(--ink); }
+  .tier-card h3 { font-size: 20px; font-weight: 800; letter-spacing: -.02em; }
+  .tier-card .price { margin-top: 6px; font-family: "IBM Plex Mono", monospace; font-size: 13px; color: var(--ink-faint); }
+  .tier-card ul { margin: 16px 0 0; padding-left: 0; list-style: none; display: grid; gap: 9px; }
+  .tier-card li { font-size: 15px; color: var(--ink-soft); padding-left: 19px; position: relative; line-height: 1.45; }
+  /* CSS escape, not a literal em dash: a literal one mojibakes to "â€" wherever the
+     document is served without a charset declaration. */
+  .tier-card li::before { content: "\2014"; position: absolute; left: 0; color: var(--ink-faint); }
+  .tier-card .btn { margin-top: 20px; }
+
+  /* ---------- honesty ---------- */
+  .caveat { background: var(--shade); border: 1px solid var(--rule); border-radius: 4px; padding: 22px 24px; margin-top: 28px; }
+  .caveat h3 { font-size: 16px; font-weight: 600; }
+  .caveat p { margin: 9px 0 0; font-size: 15px; color: var(--ink-soft); max-width: 72ch; }
+
+  footer { border-top: 1px solid var(--rule); background: var(--panel); padding-block: 30px; margin-top: 20px; }
+  footer p { margin: 0; font-size: 14px; color: var(--ink-faint); }
+  footer a { color: var(--ink-soft); }
+
+  a.inline { color: var(--ink); text-underline-offset: 3px; }
+
+  @media (max-width: 560px) {
+    td.fear { width: auto; }
+    .hero { padding-block: 40px 32px; }
+  }
+</style>
+</head>
+<body>
+
+
+<header>
+  <div class="wrap masthead">
+    <div class="wordmark">SRE Starter Kit</div>
+    <div class="meta"><a href="alert-that-never-fired.html" style="color:inherit">Read: the alert that never fired</a> &middot; self-hosted</div>
+  </div>
+</header>
+
+<div class="wrap hero">
+  <p class="eyebrow">For teams of 3&ndash;20 with no dedicated SRE</p>
+  <h1>Most monitoring problems are noise. <span class="quiet">The expensive one is silence.</span></h1>
+  <p class="lede">
+    A monitoring stack where every alert has a written runbook, and every alert rule has been
+    checked against the series your system actually produces &mdash; because
+    <strong>a rule can be valid, load cleanly, look green, and still be incapable of firing.</strong>
+  </p>
+  <div class="cta-row">
+    <a class="btn" href="https://lagcian.gumroad.com/l/sre-starter-kit-pro">Buy Pro &mdash; $199</a>
+    <a class="btn ghost" href="https://github.com/nhanlagc60299/sre-starter-kit">Free tier on GitHub</a>
+    <span class="cta-note">One payment, perpetual licence, source included. Free tier is MIT &mdash; install it first and judge the code.</span>
+  </div>
+</div>
+
+<div class="evidence">
+  <div class="wrap ev-grid">
+    <div class="ev">
+      <div class="n bad">78%</div>
+      <p>of organisations had at least one incident where <strong>no alert fired at all</strong>.</p>
+      <cite>NeuBird, Feb 2026 &middot; n=1,039</cite>
+    </div>
+    <div class="ev">
+      <div class="n">57%</div>
+      <p>say fewer than 30% of the alerts they receive are actionable.</p>
+      <cite>NeuBird, Feb 2026 &middot; n=1,039</cite>
+    </div>
+    <div class="ev">
+      <div class="n">54%</div>
+      <p>name dashboard and alert configuration as their number-one setup challenge.</p>
+      <cite>CNCF, Feb 2026 &middot; n=407</cite>
+    </div>
+    <div class="ev">
+      <div class="n">46.7%</div>
+      <p>run two to three observability tools in parallel. Only 7.4% have one unified view.</p>
+      <cite>CNCF, Feb 2026 &middot; n=407</cite>
+    </div>
+  </div>
+</div>
+
+<section>
+  <div class="wrap">
+    <p class="eyebrow">What it covers</p>
+    <h2>Start from the thing you are actually afraid of</h2>
+    <p class="section-intro">
+      Not a feature list. Each row is a failure that costs a small team a bad night, and the rule
+      that is supposed to catch it.
+    </p>
+
+    <div class="tablewrap">
+      <table>
+        <thead>
+          <tr><th scope="col">The fear</th><th scope="col">What watches for it</th><th scope="col">Tier</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td class="fear">Is the backup actually running?</td>
+            <td class="feat"><span class="mono">BackupMissing</span>, <span class="mono">RDSSnapshotStale</span> &mdash; a dead man's switch, so silence is the alarm</td>
+            <td class="tier"><span class="chip pro">Pro</span></td>
+          </tr>
+          <tr>
+            <td class="fear">If the monitoring dies, who tells me?</td>
+            <td class="feat"><span class="mono">Watchdog</span> pings healthchecks.io on a schedule; the miss is the page</td>
+            <td class="tier"><span class="chip pro">Pro</span></td>
+          </tr>
+          <tr>
+            <td class="fear">Customers notice the outage before I do</td>
+            <td class="feat"><span class="mono">ServiceDown</span>, <span class="mono">HighErrorRate</span>, <span class="mono">HighP95Latency</span></td>
+            <td class="tier"><span class="chip free">Free</span></td>
+          </tr>
+          <tr>
+            <td class="fear">Paged at 2am with no idea what to do</td>
+            <td class="feat">A written runbook for every one of the 53 alerts, linked from the notification itself</td>
+            <td class="tier"><span class="chip pro">Pro</span></td>
+          </tr>
+          <tr>
+            <td class="fear">The pipeline died and tomorrow's report is wrong</td>
+            <td class="feat">Airflow module: scheduler health, DAG failures, run duration against a 7-day baseline, queue backlog</td>
+            <td class="tier"><span class="chip pro">Pro</span></td>
+          </tr>
+          <tr>
+            <td class="fear">Out of disk, database full, data lost</td>
+            <td class="feat"><span class="mono">DiskWillFillIn24h</span> (trend, not threshold), <span class="mono">DiskFull</span>, <span class="mono">RDSStorageFull</span></td>
+            <td class="tier"><span class="chip both">Free / Pro</span></td>
+          </tr>
+          <tr>
+            <td class="fear">Alerts got so noisy everyone muted the channel</td>
+            <td class="feat">Two severities only &mdash; no <span class="mono">info</span> tier. Warnings batch separately from criticals; inhibition stops one failure paging five times</td>
+            <td class="tier"><span class="chip both">Free / Pro</span></td>
+          </tr>
+          <tr>
+            <td class="fear">Did that deploy make things slower?</td>
+            <td class="feat">Deploy markers drawn on every dashboard, from one script in your pipeline</td>
+            <td class="tier"><span class="chip pro">Pro</span></td>
+          </tr>
+          <tr>
+            <td class="fear">The AWS bill explodes at month end</td>
+            <td class="feat"><span class="mono">AWSBillingOverThreshold</span>, plus RDS, ALB and EC2 alerts from CloudWatch</td>
+            <td class="tier"><span class="chip pro">Pro</span></td>
+          </tr>
+          <tr>
+            <td class="fear">A certificate quietly expires</td>
+            <td class="feat"><span class="mono">CertExpiresIn7d</span> on every probed HTTPS endpoint</td>
+            <td class="tier"><span class="chip free">Free</span></td>
+          </tr>
+          <tr>
+            <td class="fear">Someone SSHs in at midnight</td>
+            <td class="feat"><span class="mono">SSHFailedLoginBurst</span>, <span class="mono">RootLoginDetected</span> &mdash; from logs, via Loki</td>
+            <td class="tier"><span class="chip free">Free</span></td>
+          </tr>
+          <tr>
+            <td class="fear">Getting locked into a vendor</td>
+            <td class="feat">Open components, self-hosted, config lives in your repo. Nothing phones home</td>
+            <td class="tier"><span class="chip free">Free</span></td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+</section>
+
+<section style="background: var(--shade); border-block: 1px solid var(--rule);">
+  <div class="wrap">
+    <p class="eyebrow">The part that is hard to copy</p>
+    <h2>Every alert has been watched failing</h2>
+    <p class="section-intro">
+      An alert rule that cannot fire looks exactly like one that has nothing to report. Reading it
+      does not tell you which you have. So these rules are broken on purpose, and the test has to
+      notice. Three real examples, all found that way, all fixed &mdash; and
+      <a href="alert-that-never-fired.html">the three checks that find them in your own config</a>:
+    </p>
+
+    <div class="proof-list">
+      <div class="proof">
+        <h3>An alert that read a label AWS never leaves empty</h3>
+        <p>
+          CloudWatch publishes unhealthy-host counts once per availability zone <em>and</em> once as a
+          zone-less rollup. The rule matched both, so one unhealthy target paged three times. Its test
+          passed because the fixture held a single series with no zone label at all &mdash; a shape AWS
+          does not emit.
+        </p>
+      </div>
+      <div class="proof">
+        <h3>An alert that could not fire on a fresh install</h3>
+        <p>
+          The blackbox-exporter alarm read the probe job, which has one series per configured service.
+          The shipped default configures none, so on a new install there was no series to read and the
+          rule evaluated to nothing. Running the corrected test against the old rule says it plainly:
+        </p>
+        <pre>FAILED: alertname: BlackboxExporterDown, time: 6m,  got:[]</pre>
+      </div>
+      <div class="proof">
+        <h3>A critical alert that went blind when its feeder died</h3>
+        <p>
+          The backup dead man's switch reads a metric pushed through a gateway. If the gateway itself
+          died, the switch could not fire &mdash; the one failure mode it existed to catch. It now has
+          its own alert behind it.
+        </p>
+      </div>
+    </div>
+
+    <div class="caveat">
+      <h3>What this does not claim</h3>
+      <p>
+        It does not mean nothing will ever slip through. It means the rules were checked against what
+        the real exporters emit rather than against a fixture someone wrote from memory, and that where
+        a metric genuinely cannot be collected, the runbook says so in its first paragraph instead of
+        implying coverage that is not there. A documented blind spot is worth more than a silent one.
+      </p>
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <p class="eyebrow">Two tiers</p>
+    <h2>Install the free one first</h2>
+    <p class="section-intro">
+      Pro is the same stack with the modules a team on AWS ends up needing. Both install with one
+      command and run entirely on your own machines. The free tier is the trial: read the code,
+      run it, then decide.
+    </p>
+
+    <div class="tiers">
+      <div class="tier-card">
+        <h3>Free</h3>
+        <div class="price">MIT licensed &middot; public repository</div>
+        <ul>
+          <li>18 alerts: host, container, service, certificate, SSH</li>
+          <li>Prometheus, Alertmanager, Grafana, Loki, Alloy &mdash; already wired together</li>
+          <li>Three dashboards: Overview, Node, App</li>
+          <li>Slack, Telegram or Teams routing with severity separation</li>
+          <li>Interactive setup wizard writes your config</li>
+          <li>Docker Compose</li>
+        </ul>
+        <a class="btn ghost" href="https://github.com/nhanlagc60299/sre-starter-kit">Get it on GitHub</a>
+      </div>
+
+      <div class="tier-card focus">
+        <h3>Pro</h3>
+        <div class="price">$199 once &middot; perpetual licence &middot; 12 months of updates</div>
+        <ul>
+          <li>53 alerts and 53 runbooks, one-to-one, enforced by a test</li>
+          <li>AWS CloudWatch: RDS, ALB and EC2 status checks</li>
+          <li>Ops module: backup dead man's switch, snapshot age, watchdog, billing threshold</li>
+          <li>Airflow and Kubernetes modules</li>
+          <li>SLO burn-rate alerts and deploy markers on every dashboard</li>
+          <li>Nine dashboards</li>
+          <li>Docker Compose <em>and</em> a Helm chart, both installed on real clusters</li>
+          <li>No support included &mdash; which is why all 53 alerts ship with a runbook</li>
+        </ul>
+        <a class="btn" href="https://lagcian.gumroad.com/l/sre-starter-kit-pro">Buy for $199</a>
+      </div>
+    </div>
+  </div>
+</section>
+
+<footer>
+  <div class="wrap">
+    <p>
+      Self-hosted. Your metrics stay on your machines.
+      Free tier: <a class="inline" href="https://github.com/nhanlagc60299/sre-starter-kit">github.com/nhanlagc60299/sre-starter-kit</a>.
+      Pro: <a class="inline" href="https://lagcian.gumroad.com/l/sre-starter-kit-pro">$199, one payment</a>. Questions: <a class="inline" href="mailto:nhanlagc60299@gmail.com">nhanlagc60299@gmail.com</a>.
+    </p>
+  </div>
+</footer>
+
+</body>
+</html>
