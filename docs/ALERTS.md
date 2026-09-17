@@ -5,7 +5,7 @@ in Slack, Telegram or Teams always resolves to something.
 
 Each entry states what makes the alert fire and the first thing worth looking at. Full runbooks —
 usual causes, mitigation, and the root-cause fix for every alert in the free and Pro rule sets —
-are part of the Pro tier. To point these links at your own documentation instead, edit the
+are part of the Pro tier. Two of those runbooks are included here unchanged so you can judge the format before paying: [ServiceDown](runbooks/ServiceDown.md) and [DiskWillFillIn24h](runbooks/DiskWillFillIn24h.md). To point these links at your own documentation instead, edit the
 `runbook_url` lines under `core/prometheus/rules/` and `core/loki/rules/`.
 
 ## Service and probe alerts
@@ -13,6 +13,8 @@ are part of the Pro tier. To point these links at your own documentation instead
 ### ServiceDown
 Critical, after 2m. A blackbox HTTP probe of a service in `SERVICES` has failed for two minutes.
 Check whether the service is actually down or only unreachable from the monitoring host.
+
+Full Pro runbook, included as a sample: [docs/runbooks/ServiceDown.md](runbooks/ServiceDown.md).
 
 ### BlackboxExporterDown
 Critical, after 5m. The blackbox exporter itself is not scrapeable, so no probe is running and
@@ -73,6 +75,8 @@ Warning, after 10m. Free space fell below `DISK_WARN_PCT`. This is the one you a
 ### DiskWillFillIn24h
 Warning, after 30m. Linear prediction from recent usage says the mount fills within 24 hours.
 It fires while free space still looks comfortable, which is the point.
+
+Full Pro runbook, included as a sample: [docs/runbooks/DiskWillFillIn24h.md](runbooks/DiskWillFillIn24h.md).
 
 ### HighCPU
 Warning, after 15m. Host CPU stayed above 85% for 15 minutes. Sustained saturation, not a spike.
