@@ -64,6 +64,9 @@ echo "$rules" | grep -q SSHFailedLoginBurst && echo "$rules" | grep -q RootLogin
 echo "$rules" | grep -q LogErrorBurst && echo "$rules" | grep -q Http5xxInLogs || { echo "FAIL: loki ruler did not load the log alerts"; exit 1; }
 # Prove the LogQL the alerts use actually counts lines: push 60 error lines for a fake service and evaluate
 # the LogErrorBurst selector against them. A rule the ruler *loads* can still be one that never matches.
+# The selector stays verbatim (it is the alert's own, exclusion list included), so it also matches any
+# other service Alloy happens to be tailing, not just smoke-app. The count below therefore picks the
+# smoke-app stream by name rather than the first row of the result, which is in no defined order.
 python3 - "$H" <<'PY'
 import json,sys,time,urllib.request
 now=time.time_ns()
@@ -76,7 +79,9 @@ q='sum by (service) (count_over_time({service=~".+", service!~"prometheus|alertm
 n=0
 for i in $(seq 1 15); do
   n=$(curl -sf "$H:3100/loki/api/v1/query" --data-urlencode "query=$q" \
-    | python3 -c 'import sys,json; r=json.load(sys.stdin)["data"]["result"]; print(int(float(r[0]["value"][1])) if r else 0)' 2>/dev/null || echo 0)
+    | python3 -c 'import sys,json
+r=[x for x in json.load(sys.stdin)["data"]["result"] if x["metric"].get("service")=="smoke-app"]
+print(int(float(r[0]["value"][1])) if r else 0)' 2>/dev/null || echo 0)
   [ "$n" -ge 60 ] && break; sleep 4
 done
 [ "$n" -ge 60 ] || { echo "FAIL: LogErrorBurst selector counted $n of 60 pushed error lines"; exit 1; }
