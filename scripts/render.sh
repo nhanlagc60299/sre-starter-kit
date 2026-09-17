@@ -4,11 +4,18 @@ set -euo pipefail
 ROOT="$(pwd)"
 [ -f "$ROOT/.env" ] || { echo "ERROR: .env not found. Run 'make init' first." >&2; exit 1; }
 set -a; . "$ROOT/.env"; set +a
-# Alertmanager silently crash-loops on an empty slack api_url, so refuse to render one.
+# Alertmanager crash-loops on an empty slack api_url. Slack is optional now: with no URL the slack_configs
+# blocks are stripped below, but SOME receiver has to exist or every alert is dropped on the floor.
 # Guarded on the template so the minimal render fixture in tests/ is unaffected.
-if [ -f "$ROOT/core/alertmanager/alertmanager.yml.tpl" ] && [ -z "${SLACK_WEBHOOK_URL:-}" ]; then
-  echo "ERROR: SLACK_WEBHOOK_URL is empty. Set it in .env (or run 'make init')." >&2
-  exit 1
+if [ -f "$ROOT/core/alertmanager/alertmanager.yml.tpl" ]; then
+  if [ -z "${SLACK_WEBHOOK_URL:-}${DISCORD_WEBHOOK_URL:-}${ALERT_EMAIL_TO:-}${TELEGRAM_BOT_TOKEN:-}${TEAMS_WEBHOOK_URL:-}" ]; then
+    echo "ERROR: no alert receiver configured. Set at least one of SLACK_WEBHOOK_URL, DISCORD_WEBHOOK_URL, ALERT_EMAIL_TO, TELEGRAM_BOT_TOKEN or TEAMS_WEBHOOK_URL in .env (or run 'make init')." >&2
+    exit 1
+  fi
+  if [ -n "${ALERT_EMAIL_TO:-}" ] && { [ -z "${SMTP_HOST:-}" ] || [ -z "${SMTP_FROM:-}" ]; }; then
+    echo "ERROR: ALERT_EMAIL_TO is set but SMTP_HOST or SMTP_FROM is empty." >&2
+    exit 1
+  fi
 fi
 # node-exporter runs in the host netns (see compose/docker-compose.yml), so the address Prometheus
 # reaches it on depends on the container engine. This must default here rather than rely on .env: a
@@ -64,6 +71,18 @@ if "    # "+marker not in s:
 open(p,"w").write(s.replace("    # "+marker, block+"\n    # "+marker))
 PY
 }
+# Slack optional: drop the slack_configs block from both receivers when the URL is empty. Runs BEFORE the
+# optional blocks are added, since it removes every line indented deeper than 4 spaces after slack_configs.
+if [ -f "$AM" ] && [ -z "${SLACK_WEBHOOK_URL:-}" ]; then
+  python3 - "$AM" <<'PY'
+import re,sys
+p=sys.argv[1]; s=open(p).read()
+s2=re.sub(r"^    slack_configs:\n(?:^ {5,}.*\n)*", "", s, flags=re.M)
+if s2.count("slack_configs") or s2==s:
+    sys.exit("ERROR: could not strip slack_configs from %s - core/alertmanager/alertmanager.yml.tpl changed shape" % p)
+open(p,"w").write(s2)
+PY
+fi
 if [ -f "$AM" ] && [ -n "${TELEGRAM_BOT_TOKEN:-}" ]; then
   for m in RECEIVERS_CRITICAL_EXTRA RECEIVERS_WARNING_EXTRA; do
     add "$m" "    telegram_configs:
@@ -81,6 +100,29 @@ if [ -f "$AM" ] && [ -n "${TEAMS_WEBHOOK_URL:-}" ]; then
         send_resolved: true
         title: '[${PROJECT_NAME:-}] {{ .CommonLabels.alertname }}'
         text: '{{ range .Alerts }}{{ .Annotations.summary }} {{ end }}'"
+  done
+fi
+if [ -f "$AM" ] && [ -n "${DISCORD_WEBHOOK_URL:-}" ]; then
+  for m in RECEIVERS_CRITICAL_EXTRA RECEIVERS_WARNING_EXTRA; do
+    add "$m" "    discord_configs:
+      - webhook_url: ${DISCORD_WEBHOOK_URL:-}
+        send_resolved: true
+        title: '[${PROJECT_NAME:-}] {{ .CommonLabels.alertname }}'
+        message: '{{ range .Alerts }}{{ .Annotations.summary }} {{ .Annotations.runbook_url }} {{ end }}'"
+  done
+fi
+if [ -f "$AM" ] && [ -n "${ALERT_EMAIL_TO:-}" ]; then
+  auth=""
+  [ -n "${SMTP_USER:-}" ] && auth="
+        auth_username: ${SMTP_USER}
+        auth_password: '${SMTP_PASSWORD:-}'"
+  for m in RECEIVERS_CRITICAL_EXTRA RECEIVERS_WARNING_EXTRA; do
+    add "$m" "    email_configs:
+      - to: ${ALERT_EMAIL_TO}
+        from: ${SMTP_FROM:-}
+        smarthost: ${SMTP_HOST:-}${auth}
+        send_resolved: true
+        headers: { Subject: '[${PROJECT_NAME:-}] {{ .CommonLabels.alertname }} ({{ .Status }})' }"
   done
 fi
 # 4. security module off -> drop the loki rules

@@ -30,6 +30,10 @@ re-running it offers previous answers as defaults.
 A new `.env` key must appear in both `.env.example` and the wizard, and be referenced from a `.tpl`
 file to have any effect.
 
+Slack is optional since 1.1: `render.sh` strips the `slack_configs` blocks when `SLACK_WEBHOOK_URL` is
+empty and refuses to render when no receiver at all is set. The Pro Helm chart still requires Slack;
+that is a known gap, not a rule.
+
 ## Alert and runbook rules, enforced by tests
 
 Every alert carries `severity` (`critical` or `warning`, never `info`), `module`, and a `runbook_url`

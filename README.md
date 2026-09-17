@@ -64,7 +64,7 @@ or accept that host metrics are absent.
 | Metrics | node_exporter, cAdvisor, blackbox HTTP probes for every service you list |
 | Logs | Loki + Grafana Alloy (Promtail is EOL — this kit does not use it) |
 | Alerts | critical → Slack now, repeats hourly. warning → batched every 30 min. NodeDown silences the other infra alerts on that node; DiskFull silences DiskLow, HighErrorRate silences ElevatedErrorRate. |
-| Receivers | Slack (required), Telegram, MS Teams |
+| Receivers | Slack, Discord, email (SMTP), Telegram, MS Teams. Any one is enough. |
 | Dashboards | Overview (is anything wrong?), Node, App |
 | Early warning | SSH failed-login bursts, root logins. **Not a security control.** |
 

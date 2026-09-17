@@ -6,9 +6,9 @@ tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
 cp -r core scripts .env.example "$tmp/"
 cp .env.example "$tmp/.env"          # unmodified, exactly what a copy-paste install gives you
 
-out=$( cd "$tmp" && bash scripts/render.sh 2>&1 ) && { echo "FAIL: render succeeded with an empty SLACK_WEBHOOK_URL"; exit 1; }
+out=$( cd "$tmp" && bash scripts/render.sh 2>&1 ) && { echo "FAIL: render succeeded with no receiver configured"; exit 1; }
 case "$out" in
-  *"ERROR: SLACK_WEBHOOK_URL is empty. Set it in .env (or run 'make init')."*) ;;
+  *"ERROR: no alert receiver configured."*) ;;
   *) echo "FAIL: wrong error message: $out"; exit 1 ;;
 esac
 
