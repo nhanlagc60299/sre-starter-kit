@@ -8,7 +8,14 @@ set -a; . "$ROOT/.env"; set +a
 # blocks are stripped below, but SOME receiver has to exist or every alert is dropped on the floor.
 # Guarded on the template so the minimal render fixture in tests/ is unaffected.
 if [ -f "$ROOT/core/alertmanager/alertmanager.yml.tpl" ]; then
-  if [ -z "${SLACK_WEBHOOK_URL:-}${DISCORD_WEBHOOK_URL:-}${ALERT_EMAIL_TO:-}${TELEGRAM_BOT_TOKEN:-}${TEAMS_WEBHOOK_URL:-}" ]; then
+  if [ -n "${TELEGRAM_BOT_TOKEN:-}" ] && [ -z "${TELEGRAM_CHAT_ID:-}" ]; then
+    echo "ERROR: TELEGRAM_BOT_TOKEN is set but TELEGRAM_CHAT_ID is empty." >&2
+    exit 1
+  fi
+  # Telegram needs both the bot token and the chat id to actually notify anyone; the token alone
+  # is not a usable receiver, so it does not count towards "at least one" below.
+  tg=""; [ -n "${TELEGRAM_BOT_TOKEN:-}" ] && [ -n "${TELEGRAM_CHAT_ID:-}" ] && tg=1
+  if [ -z "${SLACK_WEBHOOK_URL:-}${DISCORD_WEBHOOK_URL:-}${ALERT_EMAIL_TO:-}${tg}${TEAMS_WEBHOOK_URL:-}" ]; then
     echo "ERROR: no alert receiver configured. Set at least one of SLACK_WEBHOOK_URL, DISCORD_WEBHOOK_URL, ALERT_EMAIL_TO, TELEGRAM_BOT_TOKEN or TEAMS_WEBHOOK_URL in .env (or run 'make init')." >&2
     exit 1
   fi
@@ -113,9 +120,12 @@ if [ -f "$AM" ] && [ -n "${DISCORD_WEBHOOK_URL:-}" ]; then
 fi
 if [ -f "$AM" ] && [ -n "${ALERT_EMAIL_TO:-}" ]; then
   auth=""
+  # YAML single-quoted scalars escape ' by doubling it ('' ); backslash is not special there, so it
+  # needs no escaping. Without this a password containing a quote breaks the YAML parse (amtool/Alertmanager).
+  pw_esc=$(printf '%s' "${SMTP_PASSWORD:-}" | sed "s/'/''/g")
   [ -n "${SMTP_USER:-}" ] && auth="
         auth_username: ${SMTP_USER}
-        auth_password: '${SMTP_PASSWORD:-}'"
+        auth_password: '${pw_esc}'"
   for m in RECEIVERS_CRITICAL_EXTRA RECEIVERS_WARNING_EXTRA; do
     add "$m" "    email_configs:
       - to: ${ALERT_EMAIL_TO}
