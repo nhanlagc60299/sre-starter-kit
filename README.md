@@ -63,7 +63,7 @@ or accept that host metrics are absent.
 |---|---|
 | Metrics | node_exporter, cAdvisor, blackbox HTTP probes for every service you list |
 | Logs | Loki + Grafana Alloy (Promtail is EOL — this kit does not use it) |
-| Alerts | critical → Slack now, repeats hourly. warning → batched every 30 min. NodeDown silences the other infra alerts on that node; DiskFull silences DiskLow, HighErrorRate silences ElevatedErrorRate. Two log-based alerts (error bursts, HTTP 5xx in access logs) cover services that expose no metrics. |
+| Alerts | critical → your receiver now, repeats hourly. warning → batched every 30 min. NodeDown silences the other infra alerts on that node; DiskFull silences DiskLow, HighErrorRate silences ElevatedErrorRate. Two log-based alerts (error bursts, HTTP 5xx in access logs) cover services that expose no metrics. |
 | Receivers | Slack, Discord, email (SMTP), Telegram, MS Teams. Any one is enough. |
 | Dashboards | Overview (is anything wrong?), Node, App |
 | Early warning | SSH failed-login bursts, root logins. **Not a security control.** |
@@ -84,8 +84,8 @@ Name each probe after its compose service name (`api=http://...` for compose ser
 metrics line up in the dashboards: `service` is the probe name in Prometheus but the container's compose
 service name in Loki, so the App and Overview log panels stay empty when the two differ.
 
-`build/` contains rendered secrets (Slack/Telegram/Teams webhooks) readable by other local users — run
-the kit on a host you control.
+`build/` contains rendered secrets (Slack/Discord/Teams webhooks, the Telegram bot token, the SMTP
+password) readable by other local users — run the kit on a host you control.
 
 ## Sizing
 

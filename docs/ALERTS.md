@@ -1,7 +1,7 @@
 # Alert reference
 
 Every alert in this kit sets a `runbook_url` annotation pointing at its section below, so the link
-in Slack, Telegram or Teams always resolves to something.
+in your receiver always resolves to something.
 
 Each entry states what makes the alert fire and the first thing worth looking at. Full runbooks —
 usual causes, mitigation, and the root-cause fix for every alert in the free and Pro rule sets —
