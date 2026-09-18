@@ -28,7 +28,10 @@ import re
 with open(".env") as f:
     text = f.read()
 def add_triage(m):
-    p = m.group(1)
+    # .env.example's own COMPOSE_PROFILES line carries a long inline comment (only stripped above
+    # when SMOKE_SKIP_JOBS includes cadvisor); split on the first whitespace-then-# so the comment
+    # text itself is never mistaken for part of the profiles list.
+    p = re.split(r"\s+#", m.group(1), maxsplit=1)[0].strip()
     return "COMPOSE_PROFILES=" + (p + ",triage" if p else "triage")
 text = re.sub(r"^COMPOSE_PROFILES=(.*)$", add_triage, text, flags=re.M)
 with open(".env", "w") as f:
