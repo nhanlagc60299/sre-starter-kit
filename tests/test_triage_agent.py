@@ -184,6 +184,22 @@ class PackTests(unittest.TestCase):
         for s in safe:
             self.assertEqual(self.agent.redact(s), s, s)
 
+    def test_keyword_concatenated_onto_a_field_name_is_still_redacted(self):
+        # a real secret whose field name has the keyword glued onto a prefix with no separator of its
+        # own (oldpassword, apitoken, ...) must still redact - only the trailing-separator requirement
+        # decides this, not any assumption about what comes before the keyword.
+        cases = {
+            "oldpassword=hunter2": "oldpassword=[redacted]",
+            "newpassword=abc123": "newpassword=[redacted]",
+            "userpassword=abc123": "userpassword=[redacted]",
+            "dbpassword=abc123": "dbpassword=[redacted]",
+            "apitoken=abc123": "apitoken=[redacted]",
+            "mytoken=abc123": "mytoken=[redacted]",
+        }
+        for original, expected in cases.items():
+            got = self.agent.redact(original)
+            self.assertEqual(got, expected, original)
+
     def test_slack_webhook_url_is_redacted(self):
         s = self.agent.redact("post to https://hooks.slack.com/services/T000/B000/XXXX now")
         self.assertNotIn("T000/B000/XXXX", s)

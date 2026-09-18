@@ -20,16 +20,21 @@ ENV = os.environ.get
 # quoted JSON value or a comma-separated field instead of swallowing whatever follows.
 _REDACT_VALUE = r'[^\s"\',;)]+'
 DEFAULT_REDACT = [
-    # The keyword must directly precede the separator, with a non-alnum (or start-of-string) boundary
-    # before it. That is what makes AWS_SECRET_ACCESS_KEY= (via the "access_key" alternative) and
-    # "password":"..." (quoted JSON) redact, while max_tokens=, token_count=, secretary_id=,
-    # passwordless_login= and pwd_check_interval= - keyword as a mid-identifier substring, not the
-    # part immediately before the separator - pass through untouched. A round-1 version wrapped the
-    # keyword in [\w.-]* on both sides, which caught AWS_SECRET_ACCESS_KEY= via "secret" but also
-    # destroyed every ordinary field with "token"/"secret"/"password" as a substring; fixed here by
-    # requiring the keyword end the identifier and adding the specific extra keywords that need it
-    # (access_key, private_key, client_secret) instead of matching a keyword anywhere in the word.
-    (r'(?i)(?<![A-Za-z0-9])((?:password|passwd|pwd|secret|token|api[_-]?key|access[_-]?key|private[_-]?key|client[_-]?secret))(["\']?\s*[:=]\s*["\']?)' + _REDACT_VALUE,
+    # The keyword must directly precede the separator - that trailing requirement alone is what
+    # separates "safe" from "secret": max_tokens=, token_count=, tokenizer_latency=, secretary_id=,
+    # passwordless_login= and pwd_check_interval= all have the keyword followed by more identifier
+    # characters before any separator, so none of them match; oldpassword=, apitoken=, mytoken=,
+    # AWS_SECRET_ACCESS_KEY= (via "access_key") and "password":"..." (quoted JSON) all have the
+    # keyword immediately before the separator, so all of them do.
+    #
+    # There is deliberately no boundary check on what comes BEFORE the keyword (no [\w.-]* wrap, no
+    # negative lookbehind). A round-1 version wrapped the keyword in [\w.-]* on both sides, which
+    # caught AWS_SECRET_ACCESS_KEY= via "secret" but destroyed every ordinary field with "token"/
+    # "secret"/"password" as a substring. A round-2 fix added a (?<![A-Za-z0-9]) lookbehind before the
+    # keyword to stop that - which fixed the false positives but then missed real secrets whose field
+    # name is glued onto the keyword with no boundary at all (oldpassword=, apitoken=, mytoken=). The
+    # trailing-separator requirement turned out to be the only check that needed to exist.
+    (r'(?i)((?:password|passwd|pwd|secret|token|api[_-]?key|access[_-]?key|private[_-]?key|client[_-]?secret))(["\']?\s*[:=]\s*["\']?)' + _REDACT_VALUE,
      r"\1\2[redacted]"),
     (r"(?i)bearer\s+\S+", "Bearer [redacted]"),
     (r"(?i)(?<![A-Za-z0-9])authorization:\s*\S+\s+\S+", "Authorization: [redacted]"),
