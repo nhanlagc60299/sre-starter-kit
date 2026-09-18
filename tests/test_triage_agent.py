@@ -244,6 +244,15 @@ class PackTests(unittest.TestCase):
             self.agent.MAX_BYTES = 40000
             os.remove(os.path.join(self.tmp, "runbooks", "ServiceDown.md"))
 
+    def test_combine_reports_unreachable_over_a_partial_ok(self):
+        # a single logical endpoint (e.g. /api/v1/query, hit once for rule_now and once for up) must
+        # not read "ok" when one of the two calls actually failed - that would hide a partial failure.
+        self.assertEqual(self.agent.combine("ok", "unreachable"), "unreachable")
+        self.assertEqual(self.agent.combine("unreachable", "ok"), "unreachable")
+        self.assertEqual(self.agent.combine("ok", "empty"), "ok")
+        self.assertEqual(self.agent.combine("empty", "skipped"), "empty")
+        self.assertEqual(self.agent.combine(), "skipped")
+
     def test_dedup_within_an_hour(self):
         d = self.agent.Dedup(seconds=3600)
         self.assertFalse(d.seen("k")); self.assertTrue(d.seen("k"))

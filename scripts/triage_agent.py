@@ -55,9 +55,11 @@ def fetch_json(budget, url, headers=None):
 
 
 def combine(*statuses):
-    """Merge the statuses of every call made against one logical endpoint (e.g. two /api/v1/query calls)."""
+    """Merge the statuses of every call made against one logical endpoint (e.g. two /api/v1/query calls).
+    'unreachable' wins even if another call to the same endpoint succeeded: a partial failure must not
+    be reported as a clean "ok", or a consumer trusting sources[...] == "ok" would miss it."""
     statuses = [s for s in statuses if s]
-    for pref in ("ok", "empty", "unreachable"):
+    for pref in ("unreachable", "ok", "empty"):
         if pref in statuses:
             return pref
     return "skipped"
@@ -245,15 +247,19 @@ def build_pack(payload):
 
 
 class Dedup:
-    def __init__(self, seconds=DEDUP_SECONDS): self.seconds, self.stamp = seconds, {}
+    """process() runs on a fresh thread per webhook POST, so seen() needs its own lock: without it,
+    two concurrent requests for the same group can both read an empty/stale self.stamp and both
+    proceed, defeating the dedup."""
+    def __init__(self, seconds=DEDUP_SECONDS): self.seconds, self.stamp, self.lock = seconds, {}, threading.Lock()
 
     def seen(self, key):
         now = time.time()
-        self.stamp = {k: t for k, t in self.stamp.items() if now - t < self.seconds}
-        if key in self.stamp:
-            return True
-        self.stamp[key] = now
-        return False
+        with self.lock:
+            self.stamp = {k: t for k, t in self.stamp.items() if now - t < self.seconds}
+            if key in self.stamp:
+                return True
+            self.stamp[key] = now
+            return False
 
 
 DEDUP = Dedup()
