@@ -93,4 +93,31 @@ services:
       - grafana-data:/var/lib/grafana
     ports: ["${BIND_ADDR:-127.0.0.1}:3000:3000"]
 
+  triage-agent:
+    <<: *restart
+    image: python:3.12-alpine
+    profiles: [triage]
+    command: ["python3", "-u", "/app/triage_agent.py"]
+    volumes:
+      - ../scripts/triage_agent.py:/app/triage_agent.py:ro
+      - ../docs/ALERTS.md:/docs/ALERTS.md:ro
+    environment:
+      PROJECT_NAME: "${PROJECT_NAME:-}"
+      TRIAGE_DRY_RUN: "${TRIAGE_DRY_RUN:-true}"
+      TRIAGE_LICENSE_KEY: "${TRIAGE_LICENSE_KEY:-}"
+      TRIAGE_API_URL: "${TRIAGE_API_URL:-}"
+      TRIAGE_REDACT: "${TRIAGE_REDACT:-}"
+      GRAFANA_ADMIN_PASSWORD: "${GRAFANA_ADMIN_PASSWORD:-}"
+      SLACK_WEBHOOK_URL: "${SLACK_WEBHOOK_URL:-}"
+      DISCORD_WEBHOOK_URL: "${DISCORD_WEBHOOK_URL:-}"
+      TELEGRAM_BOT_TOKEN: "${TELEGRAM_BOT_TOKEN:-}"
+      TELEGRAM_CHAT_ID: "${TELEGRAM_CHAT_ID:-}"
+      TEAMS_WEBHOOK_URL: "${TEAMS_WEBHOOK_URL:-}"
+      ALERT_EMAIL_TO: "${ALERT_EMAIL_TO:-}"
+      SMTP_HOST: "${SMTP_HOST:-}"
+      SMTP_FROM: "${SMTP_FROM:-}"
+      SMTP_USER: "${SMTP_USER:-}"
+      SMTP_PASSWORD: "${SMTP_PASSWORD:-}"
+    # No port published: Alertmanager reaches it at triage-agent:9096 inside the compose network.
+
 volumes: { prom-data: {}, am-data: {}, loki-data: {}, alloy-data: {}, grafana-data: {} }

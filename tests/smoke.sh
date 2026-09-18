@@ -18,6 +18,22 @@ sed 's/^GRAFANA_ADMIN_PASSWORD=.*/GRAFANA_ADMIN_PASSWORD=smoke/; s#^SLACK_WEBHOO
 sed -i.bak "s/^BIND_ADDR=.*/BIND_ADDR=${SMOKE_BIND_ADDR:-127.0.0.1}/" .env && rm -f .env.bak
 case ",${SMOKE_SKIP_JOBS:-}," in *,cadvisor,*) sed -i.bak 's/^COMPOSE_PROFILES=.*/COMPOSE_PROFILES=/' .env && rm -f .env.bak ;; esac
 [ -n "${CONTAINER_SOCK:-}" ] && sed -i.bak "s#^CONTAINER_SOCK=.*#CONTAINER_SOCK=${CONTAINER_SOCK}#" .env && rm -f .env.bak
+# The triage agent runs in every smoke: dry run, so nothing leaves the machine, and it is the one
+# place the pack's fixture shapes (tests/test_triage_agent.py) meet the real services. Rewrite with
+# python rather than sed: .env's COMPOSE_PROFILES value can itself hold whatever SMOKE_SKIP_JOBS
+# left behind, and feeding that text into a sed s/// pattern is exactly how a stray "/" breaks it.
+sed -i.bak 's#^TRIAGE_WEBHOOK_URL=.*#TRIAGE_WEBHOOK_URL=http://triage-agent:9096/alert#' .env && rm -f .env.bak
+python3 - <<'PY'
+import re
+with open(".env") as f:
+    text = f.read()
+def add_triage(m):
+    p = m.group(1)
+    return "COMPOSE_PROFILES=" + (p + ",triage" if p else "triage")
+text = re.sub(r"^COMPOSE_PROFILES=(.*)$", add_triage, text, flags=re.M)
+with open(".env", "w") as f:
+    f.write(text)
+PY
 bash scripts/render.sh
 echo '[{"targets":["http://prometheus:9090/-/healthy"],"labels":{"service":"prometheus-self"}}]' > build/prometheus/targets/services.json
 $COMPOSE up -d
@@ -86,4 +102,42 @@ print(int(float(r[0]["value"][1])) if r else 0)' 2>/dev/null || echo 0)
 done
 [ "$n" -ge 60 ] || { echo "FAIL: LogErrorBurst selector counted $n of 60 pushed error lines"; exit 1; }
 echo "smoke: log alert selector counts pushed lines ($n)"
+
+# Fire one synthetic critical alert straight into Alertmanager; the critical route copies it to
+# webhook-triage; the agent must log a dry-run pack whose sources are all reachable. Written outside
+# build/ (SMOKE_PACK_OUT), because cleanup() above deletes build/ on every exit, including success.
+PACK_OUT="${SMOKE_PACK_OUT:-${TMPDIR:-/tmp}/triage-sample-pack.json}"
+curl -sf -XPOST $H:9093/api/v2/alerts -H 'Content-Type: application/json' -d '[{"labels":{"alertname":"ServiceDown","severity":"critical","module":"app","service":"prometheus-self","instance":"http://prometheus:9090/-/healthy","job":"blackbox-http"},"annotations":{"summary":"smoke: synthetic ServiceDown","runbook_url":"https://github.com/nhanlagc60299/sre-starter-kit/blob/main/docs/ALERTS.md#servicedown"}}]'
+pack=""
+for i in $(seq 1 20); do
+  pack=$($COMPOSE logs --no-log-prefix triage-agent 2>/dev/null | grep '^{' | tail -1 || true)
+  [ -n "$pack" ] && break; sleep 4
+done
+[ -n "$pack" ] || { echo "FAIL: triage agent logged no pack within 80s"; $COMPOSE logs triage-agent | tail -20; exit 1; }
+printf '%s\n' "$pack" > "$PACK_OUT"
+python3 - "$PACK_OUT" <<'PY'
+import json,sys
+p=json.load(open(sys.argv[1]))
+assert p["schema_version"]==1, p.get("schema_version")
+assert p["alerts"][0]["labels"]["alertname"]=="ServiceDown", p["alerts"][0]
+for s in ("rules", "query", "alertmanager", "runbook"):
+    assert p["sources"][s]=="ok", (s, p["sources"])
+# no service logs for prometheus-self is fine (no Loki stream to match); unreachable is not
+assert p["sources"]["loki"] in ("ok","empty"), p["sources"]
+# a fresh Grafana has no deploy annotations yet; empty is fine, unreachable is not
+assert p["sources"]["grafana"] in ("ok","empty"), p["sources"]
+# the synthetic alert CLAIMS ServiceDown, but the probed target (Prometheus's own /-/healthy) is
+# actually healthy, so the real rule expression (probe_success{job="blackbox-http"} == 0) matches no
+# series over the last 30m; empty is the honest answer here, not a broken source. "query" above stays
+# "ok" only because the separate up{instance=...} query folded into the same source does return one.
+assert p["sources"]["query_range"] in ("ok","empty"), p["sources"]
+assert p["rule"] and "probe_success" in p["rule"]["query"], p["rule"]   # the real ServiceDown rule was found
+assert p["runbook"]["text"].strip(), "ALERTS.md section for ServiceDown is empty"
+assert any(a["labels"]["alertname"]=="ServiceDown" for a in p["firing"]), "firing list misses the synthetic alert"
+# up{instance=<probed url>} is Prometheus's own per-target series (job=blackbox-http relabels
+# instance to the probed URL), independent of the rule's own probe_success reading - report what
+# the real stack actually returns for it rather than assume.
+print("smoke: up{instance=<probe url>} = %r" % (p["up"],))
+print("smoke: triage pack ok, %d bytes, sources %s" % (len(open(sys.argv[1]).read()), p["sources"]))
+PY
 echo "smoke OK: all targets up"
