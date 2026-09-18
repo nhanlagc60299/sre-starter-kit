@@ -48,3 +48,4 @@ test: validate test-rules
 	@bash tests/test_render.sh
 	@bash tests/test_init.sh
 	@bash tests/test_env_example.sh
+	@bash tests/test_triage_agent.sh

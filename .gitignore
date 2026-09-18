@@ -4,3 +4,4 @@ build/
 .superpowers/
 *.tmp
 tmp.*
+__pycache__/
