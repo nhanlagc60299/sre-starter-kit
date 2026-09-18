@@ -2,8 +2,9 @@
 """Unit tests for scripts/triage_agent.py against fake Prometheus/Loki/Alertmanager/Grafana servers.
 Every fixture below is the JSON shape the real service returns (verified live by tests/smoke.sh);
 if a live shape ever differs, fix the fixture here, never the agent to match the fixture."""
-import importlib.util, json, os, tempfile, threading, time, unittest, urllib.parse, urllib.request
+import importlib.util, json, os, smtplib, tempfile, threading, time, unittest, urllib.parse, urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from unittest import mock
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -477,12 +478,23 @@ class PackTests(unittest.TestCase):
             srv.shutdown()
 
 
+FENCE_OPEN, FENCE_CLOSE = "```\n", "\n```"
+
+
+def _unfenced(s):
+    """Strip the ```...``` code fence post_note() wraps every chunk in, for asserting on the
+    original note text a test posted."""
+    assert s.startswith(FENCE_OPEN) and s.endswith(FENCE_CLOSE), s
+    return s[len(FENCE_OPEN):-len(FENCE_CLOSE)]
+
+
 class Sink(BaseHTTPRequestHandler):
     """Fake cloud service + fake receivers (Slack/Discord/Telegram/email-via-webhook all just POST
     somewhere) on one server. Response bodies match the real /v1/triage contract exactly (PR #4 in
     the sre-triage repo): 200 {id,text,url,tier,used,limit}; 401 {"error":"unauthorized"};
     429 {"error":"quota","resets_on"}; 422 {"error":"schema"} or {"error":"refused","category"};
-    502 {"error":"model","kind"}; 413 with no body at all."""
+    502 {"error":"model","kind"}; 413 {"error":"too_large"}. The /text-* paths are still a clean 200
+    but with a "text" field of the wrong shape, to drive send_to_cloud()'s own response validation."""
     posts = []
 
     def do_POST(self):
@@ -502,10 +514,20 @@ class Sink(BaseHTTPRequestHandler):
         if self.path == "/model/v1/triage":
             self._json(502, {"error": "model", "kind": "upstream-timeout"}); return
         if self.path == "/big/v1/triage":
-            self.send_response(413); self.end_headers(); return
+            self._json(413, {"error": "too_large"}); return
         if self.path == "/garbage/v1/triage":
             body = b"not json"; self.send_response(200); self.send_header("Content-Length", str(len(body)))
             self.end_headers(); self.wfile.write(body); return
+        if self.path == "/text-int/v1/triage":
+            self._json(200, {"id": "x", "text": 12345, "url": "u"}); return
+        if self.path == "/text-dict/v1/triage":
+            self._json(200, {"id": "x", "text": {"a": 1}, "url": "u"}); return
+        if self.path == "/text-list/v1/triage":
+            self._json(200, {"id": "x", "text": ["a", "b"], "url": "u"}); return
+        if self.path == "/text-blank/v1/triage":
+            self._json(200, {"id": "x", "text": "   \n\t  ", "url": "u"}); return
+        if self.path == "/text-noprefix/v1/triage":
+            self._json(200, {"id": "x", "text": "not a triage note", "url": "u"}); return
         if self.path == "/v1/triage":
             self._json(200, {"id": "abc", "text": "Triage: ServiceDown on api\nProbable cause\n  1. x",
                               "url": "https://t/abc", "tier": "free", "used": 1, "limit": 50}); return
@@ -540,8 +562,11 @@ class CloudTests(unittest.TestCase):
         self.agent.post_note(note["text"])
         paths = [p for p, _ in Sink.posts]
         self.assertIn("/slack", paths); self.assertIn("/discord", paths)
-        slack = json.loads(next(b for p, b in Sink.posts if p == "/slack")); self.assertTrue(slack["text"].startswith("Triage:"))
-        discord = json.loads(next(b for p, b in Sink.posts if p == "/discord")); self.assertIn("content", discord)
+        slack = json.loads(next(b for p, b in Sink.posts if p == "/slack"))
+        self.assertEqual(_unfenced(slack["text"]), note["text"])
+        discord = json.loads(next(b for p, b in Sink.posts if p == "/discord"))
+        self.assertEqual(_unfenced(discord["content"]), note["text"])
+        self.assertEqual(discord["allowed_mentions"], {"parse": []})
 
     def test_bad_key_and_quota_are_logged_not_posted(self):
         os.environ["TRIAGE_LICENSE_KEY"] = "wrong"
@@ -561,12 +586,41 @@ class CloudTests(unittest.TestCase):
                 os.environ["TRIAGE_API_URL"] = self.base
         self.assertEqual([p for p, _ in Sink.posts if p in ("/slack", "/discord")], [])
 
+    def test_a_clean_200_with_a_malformed_text_field_returns_none(self):
+        # a "text" that isn't a string, or is blank, or doesn't even look like a triage note (real
+        # notes always start "Triage:" - see engine.render on the cloud side) must not be treated as
+        # a usable note, even though the response is a clean 200.
+        for suffix in ("/text-int", "/text-dict", "/text-list", "/text-blank", "/text-noprefix"):
+            os.environ["TRIAGE_API_URL"] = self.base + suffix
+            try:
+                self.assertIsNone(self.agent.send_to_cloud({"schema_version": 1, "alerts": []}), suffix)
+            finally:
+                os.environ["TRIAGE_API_URL"] = self.base
+        self.assertEqual([p for p, _ in Sink.posts if p in ("/slack", "/discord")], [])
+
     def test_telegram_when_configured(self):
         os.environ.update({"TELEGRAM_BOT_TOKEN": "t0k", "TELEGRAM_CHAT_ID": "-100"})
         try:
             self.agent.post_note("Triage: x")
             tg = next((p, b) for p, b in Sink.posts if p.startswith("/tg/"))
-            self.assertEqual(tg[0], "/tg/bott0k/sendMessage"); self.assertEqual(json.loads(tg[1])["chat_id"], "-100")
+            self.assertEqual(tg[0], "/tg/bott0k/sendMessage")
+            body = json.loads(tg[1])
+            self.assertEqual(body["chat_id"], "-100")
+            self.assertEqual(_unfenced(body["text"]), "Triage: x")
+            self.assertNotIn("parse_mode", body)
+        finally: os.environ.update({"TELEGRAM_BOT_TOKEN": "", "TELEGRAM_CHAT_ID": ""})
+
+    def test_telegram_splits_a_note_over_4096_chars(self):
+        os.environ.update({"TELEGRAM_BOT_TOKEN": "t0k", "TELEGRAM_CHAT_ID": "-100"})
+        try:
+            long_text = "Triage: " + ("y" * 4992)  # 5000 chars total
+            self.agent.post_note(long_text)
+            tg_posts = [b for p, b in Sink.posts if p.startswith("/tg/")]
+            self.assertEqual(len(tg_posts), 2)
+            for b in tg_posts:
+                self.assertLessEqual(len(json.loads(b)["text"]), 4096)
+            rebuilt = "".join(_unfenced(json.loads(b)["text"]) for b in tg_posts)
+            self.assertEqual(rebuilt, long_text)
         finally: os.environ.update({"TELEGRAM_BOT_TOKEN": "", "TELEGRAM_CHAT_ID": ""})
 
     def test_email_receiver_failure_does_not_raise(self):
@@ -577,6 +631,34 @@ class CloudTests(unittest.TestCase):
             self.agent.post_note("Triage: x")  # must not raise
         finally:
             os.environ.update({"ALERT_EMAIL_TO": "", "SMTP_HOST": ""})
+
+    def test_starttls_unsupported_without_credentials_still_sends(self):
+        # .env.example documents an unauthenticated relay as a valid setup, and those commonly have
+        # no STARTTLS at all - with nothing to protect, sending unencrypted must still work.
+        os.environ.update({"ALERT_EMAIL_TO": "ops@example.com", "SMTP_HOST": "smtp.example.test:25", "SMTP_USER": ""})
+        try:
+            with mock.patch("smtplib.SMTP") as MockSMTP:
+                conn = MockSMTP.return_value.__enter__.return_value
+                conn.starttls.side_effect = smtplib.SMTPNotSupportedError("no STARTTLS")
+                self.agent.post_note("Triage: x")
+                conn.send_message.assert_called_once()
+                conn.login.assert_not_called()
+        finally:
+            os.environ.update({"ALERT_EMAIL_TO": "", "SMTP_HOST": "", "SMTP_USER": ""})
+
+    def test_starttls_unsupported_with_credentials_refuses_to_send(self):
+        # a login must never go out over a connection that turned out to be plaintext.
+        os.environ.update({"ALERT_EMAIL_TO": "ops@example.com", "SMTP_HOST": "smtp.example.test:25",
+                           "SMTP_USER": "bob", "SMTP_PASSWORD": "secret"})
+        try:
+            with mock.patch("smtplib.SMTP") as MockSMTP:
+                conn = MockSMTP.return_value.__enter__.return_value
+                conn.starttls.side_effect = smtplib.SMTPNotSupportedError("no STARTTLS")
+                self.agent.post_note("Triage: x")  # must not raise out of post_note
+                conn.login.assert_not_called()
+                conn.send_message.assert_not_called()
+        finally:
+            os.environ.update({"ALERT_EMAIL_TO": "", "SMTP_HOST": "", "SMTP_USER": "", "SMTP_PASSWORD": ""})
 
     def test_slack_failure_does_not_stop_discord(self):
         # a receiver failing must not abort the loop - point Slack at a path that 500s and confirm
@@ -595,8 +677,9 @@ class CloudTests(unittest.TestCase):
         discord_posts = [b for p, b in Sink.posts if p == "/discord"]
         self.assertEqual(len(discord_posts), 2)
         for b in discord_posts:
-            self.assertLessEqual(len(json.loads(b)["content"]), 2000)
-        rebuilt = "".join(json.loads(b)["content"] for b in discord_posts)
+            content = json.loads(b)["content"]
+            self.assertLessEqual(len(content), 2000)
+        rebuilt = "".join(_unfenced(json.loads(b)["content"]) for b in discord_posts)
         self.assertEqual(rebuilt, long_text)
 
     def test_end_to_end_cloud_errors_never_post_to_a_receiver(self):
@@ -621,10 +704,13 @@ class CloudTests(unittest.TestCase):
 
     def test_budget_floor_caps_the_cloud_timeout_so_process_returns_promptly(self):
         # sources taking ~1s, then a sink that sleeps well past the remaining budget: process() must
-        # still return in bounded time (not hang for the sink's full sleep) and post nothing.
+        # still return in bounded time (not hang for the sink's full sleep) and post nothing. The
+        # bound is expressed against the *scaled* budget used in this test, not a literal "45" -
+        # a hardcoded 45s ceiling would pass even if the timeout math stopped bounding anything.
         real_total, real_floor = self.agent.TOTAL_TRIAGE_BUDGET, self.agent.CLOUD_TIMEOUT_FLOOR
         real_build_pack = self.agent.build_pack
-        self.agent.TOTAL_TRIAGE_BUDGET, self.agent.CLOUD_TIMEOUT_FLOOR = 2, 0.5
+        scaled_budget = 2
+        self.agent.TOTAL_TRIAGE_BUDGET, self.agent.CLOUD_TIMEOUT_FLOOR = scaled_budget, 0.5
 
         def slow_build_pack(payload):
             time.sleep(1)
@@ -635,13 +721,25 @@ class CloudTests(unittest.TestCase):
             start = time.monotonic()
             self.agent.process({"groupKey": "budget-floor-test"})
             elapsed = time.monotonic() - start
-            self.assertLess(elapsed, 45, "process() must never run out to the full 45s triage budget in this test")
-            self.assertLess(elapsed, 4, "the cloud call must be bounded by what's left of the budget, not the sink's sleep")
+            self.assertLess(elapsed, scaled_budget + 1.5,
+                             "process() must never run out past its own (scaled) total triage budget")
             self.assertEqual([p for p, _ in Sink.posts if p in ("/slack", "/discord")], [])
         finally:
             self.agent.TOTAL_TRIAGE_BUDGET, self.agent.CLOUD_TIMEOUT_FLOOR = real_total, real_floor
             self.agent.build_pack = real_build_pack
             os.environ["TRIAGE_API_URL"] = self.base
+
+    def test_budget_exhausted_before_the_floor_skips_the_cloud_call_entirely(self):
+        # once less than CLOUD_TIMEOUT_FLOOR remains, process() must not extend the budget to give
+        # the cloud call a fairer chance - it must skip the call outright.
+        real_total, real_floor = self.agent.TOTAL_TRIAGE_BUDGET, self.agent.CLOUD_TIMEOUT_FLOOR
+        self.agent.TOTAL_TRIAGE_BUDGET, self.agent.CLOUD_TIMEOUT_FLOOR = 5, 10  # floor exceeds the whole budget
+        try:
+            self.agent.process({"groupKey": "budget-exhausted-test"})
+            self.assertEqual([p for p, _ in Sink.posts if p == "/v1/triage"], [],
+                              "the cloud must not be called once too little budget remains to bother")
+        finally:
+            self.agent.TOTAL_TRIAGE_BUDGET, self.agent.CLOUD_TIMEOUT_FLOOR = real_total, real_floor
 
 
 if __name__ == "__main__":

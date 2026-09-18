@@ -108,11 +108,14 @@ sent.
 
 Set `TRIAGE_LICENSE_KEY` and `TRIAGE_API_URL` (from your Gumroad purchase) and `TRIAGE_DRY_RUN=false`
 to turn cloud delivery on. The agent POSTs the same redacted pack you'd otherwise see in dry-run's log
-to `TRIAGE_API_URL`, and posts the note that comes back -- a probable cause and next steps, ending
-with a link to say whether it helped -- to whichever of Slack, Discord, Telegram and email you have
-configured (same receiver env vars Alertmanager itself uses). Any failure -- a rejected licence key, a
-quota limit, a pack the model refuses, an unreachable service, a timeout -- is logged and nothing is
-posted to your alert channel; a wrong or missing note there would be worse than a missing one. Teams
+to `TRIAGE_API_URL`, and posts the note that comes back -- a probable cause and next steps in a
+fixed-width code block, ending with a link to say whether it helped -- to whichever of Slack, Discord,
+Telegram and email you have configured (same receiver env vars Alertmanager itself uses). Any failure
+-- a rejected licence key, a quota limit, a pack the model refuses, an unreachable service, a timeout,
+or a malformed response -- is logged and nothing is posted to your alert channel; a wrong or missing
+note there would be worse than a missing one. Either way, that alert group is already marked triaged
+for an hour (the same dedup window a successful triage uses), so a cloud failure doesn't retry into
+the same failure on every Alertmanager repeat -- the next repeat past that window re-triages it. Teams
 is not posted to yet.
 
 ## Sizing
