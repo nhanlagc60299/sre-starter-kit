@@ -10,9 +10,13 @@ SCHEMA_VERSION = 1
 MAX_BYTES = 40000          # ~12k tokens; see trim() for what goes first (test code may lower this)
 HARD_CAP_BYTES = 40000     # fixed final safety net, independent of MAX_BYTES; see trim()
 SOURCE_TIMEOUT = 5         # seconds per upstream call
-TOTAL_DEADLINE = 30        # seconds for the whole build_pack, across every upstream call
 TOTAL_TRIAGE_BUDGET = 45   # seconds, end to end: build_pack + the cloud call. Hard "never exceed" -
                            # the cloud call's timeout is exactly what's left of this, never more.
+# Derived from the total rather than pinned: sources are capped at 30s, but never allowed to eat so
+# much of the budget that the cloud call - the part actually worth the wait - is left with under
+# 25s. That matters most exactly when sources are degraded (several dead upstreams each burning
+# their own timeout) and a model call still needs a fair shot at succeeding.
+TOTAL_DEADLINE = min(30, TOTAL_TRIAGE_BUDGET - 25)   # seconds for the whole build_pack
 CLOUD_TIMEOUT_FLOOR = 10   # seconds; below this much remaining budget, skip the cloud call entirely
                            # (log and return) rather than make a call so short it can't succeed
 DEDUP_SECONDS = 3600       # the webhook-triage route has no repeat_interval of its own and inherits
@@ -21,12 +25,15 @@ DEDUP_SECONDS = 3600       # the webhook-triage route has no repeat_interval of 
                            # (a group whose cloud call fails or times out stays deduped for this long too -
                            # the next Alertmanager repeat re-triages it rather than retrying immediately)
 RUNBOOK_MAX_LINES = 60
-DISCORD_CHUNK_BYTES = 2000   # Discord's own hard limit on message content length
-TELEGRAM_CHUNK_BYTES = 4096  # Telegram's own hard limit on sendMessage's text length
-FENCE_OPEN, FENCE_CLOSE = "```\n", "\n```"   # wraps the note so Slack/Discord/Telegram render it in a
+DISCORD_CHUNK_CHARS = 2000   # Discord's own hard limit on message content length, in characters
+TELEGRAM_CHUNK_CHARS = 4096  # Telegram's own hard limit on sendMessage's text length, in characters
+FENCE_OPEN, FENCE_CLOSE = "```\n", "\n```"   # wraps the note so Slack/Discord render it in a
                                               # fixed-width font - the numbered steps and PromQL in a
-                                              # triage note are unreadable reflowed by a proportional font
-FENCE_BYTES = len(FENCE_OPEN) + len(FENCE_CLOSE)
+                                              # triage note are unreadable reflowed by a proportional
+                                              # font. Telegram gets no parse_mode, so a fence would
+                                              # render as three literal backtick lines instead of a
+                                              # code block there - see post_note()'s telegram().
+FENCE_CHARS = len(FENCE_OPEN) + len(FENCE_CLOSE)
 ENV = os.environ.get
 TELEGRAM_API = "https://api.telegram.org/bot%s/sendMessage"
 # Value matcher excludes whitespace/quote/comma/semicolon/close-paren so it stops at the end of a
@@ -349,10 +356,20 @@ def send_to_cloud(pack, timeout=45):
         if e.code == 413:
             log("triage service: pack too large"); return None
         try:
-            err = json.loads(e.read().decode("utf-8", "replace")).get("error", "unknown")
+            err_body = json.loads(e.read().decode("utf-8", "replace"))
         except Exception:  # noqa: BLE001 - an error body that isn't even JSON is still just a failure
-            err = "unknown"
-        log("triage service: HTTP %d error=%s" % (e.code, err)); return None
+            err_body = {}
+        if not isinstance(err_body, dict):
+            err_body = {}
+        err = err_body.get("error", "unknown")
+        # 429's body carries resets_on (an ISO timestamp) - log it so an exhausted quota is legible
+        # without going to the cloud dashboard; every other status has nothing extra worth logging.
+        resets_on = err_body.get("resets_on") if e.code == 429 else None
+        if resets_on:
+            log("triage service: HTTP %d error=%s resets_on=%s" % (e.code, err, resets_on))
+        else:
+            log("triage service: HTTP %d error=%s" % (e.code, err))
+        return None
     except Exception as e:  # noqa: BLE001 - timeout, connection refused, etc.
         log("triage service unreachable: %s" % e.__class__.__name__); return None
     if status != 200:
@@ -379,10 +396,9 @@ def _chunks(text, size):
 
 
 def _fenced(chunk):
-    """Wrap a chunk in a code fence so Slack/Discord/Telegram render the note in a fixed-width font;
-    the numbered steps and PromQL expressions in a triage note are unreadable reflowed by a
-    proportional one. Telegram gets no parse_mode, so the fence renders as literal ``` characters
-    exactly like Slack's mrkdwn and Discord's markdown do - one representation, three receivers."""
+    """Wrap a chunk in a code fence so Slack/Discord render the note in a fixed-width font; the
+    numbered steps and PromQL expressions in a triage note are unreadable reflowed by a
+    proportional one. Not used for Telegram - see telegram() below."""
     return FENCE_OPEN + chunk + FENCE_CLOSE
 
 
@@ -400,15 +416,19 @@ def post_note(text):
             # each chunk is fenced on its own, so a message stays a well-formed code block even when
             # the note is split; if a chunk's POST fails, the loop stops there and attempt() logs it -
             # whatever already sent stays sent (a half note beats none), nothing further is attempted.
-            for chunk in _chunks(text, DISCORD_CHUNK_BYTES - FENCE_BYTES):
+            for chunk in _chunks(text, DISCORD_CHUNK_CHARS - FENCE_CHARS):
                 post_json(ENV("DISCORD_WEBHOOK_URL"),
                           {"content": _fenced(chunk), "allowed_mentions": {"parse": []}}, timeout=10)
         attempt("discord", discord)
     if ENV("TELEGRAM_BOT_TOKEN") and ENV("TELEGRAM_CHAT_ID"):
         def telegram():
-            for chunk in _chunks(text, TELEGRAM_CHUNK_BYTES - FENCE_BYTES):
+            # no fence and no parse_mode: unfenced because Telegram would render the fence as three
+            # literal backtick lines instead of a code block, and parse_mode is deliberately not
+            # used - an unescaped "_"/"*" in model text would make Telegram 400 the whole request
+            # and lose the note entirely, which is worse than plain text.
+            for chunk in _chunks(text, TELEGRAM_CHUNK_CHARS):
                 post_json(TELEGRAM_API % ENV("TELEGRAM_BOT_TOKEN"),
-                          {"chat_id": ENV("TELEGRAM_CHAT_ID"), "text": _fenced(chunk)}, timeout=10)
+                          {"chat_id": ENV("TELEGRAM_CHAT_ID"), "text": chunk}, timeout=10)
         attempt("telegram", telegram)
     if ENV("ALERT_EMAIL_TO") and ENV("SMTP_HOST"):
         def mail():
