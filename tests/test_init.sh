@@ -172,4 +172,23 @@ printf '\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\nn\n' | ( cd "$tmp10" && bash scripts/i
 grep -qxF "COMPOSE_PROFILES='cadvisor'" "$tmp10/.env"
 grep -qxF "TRIAGE_WEBHOOK_URL='http://localhost:9/'" "$tmp10/.env"
 
+# --- triage: a licence key alone must not turn dry run off; TRIAGE_API_URL is required too (I1) ---
+tmp11=$(mktemp -d); trap 'rm -rf "$tmp" "$tmp7" "$tmp8" "$tmp8b" "$tmp9" "$tmp10" "$tmp11"' EXIT
+cp -r core scripts .env.example "$tmp11/"
+# 19 answers: project, slack, 9 blanks (telegram token/chat id/teams/services-end/disk warn/disk
+# crit/prom ret/loki ret/grafana pw), security n (no auth-log question), container sock blank,
+# cadvisor n, discord blank, email blank, triage y, licence key, API URL blank
+printf 'acme\nhttp://localhost:9/\n\n\n\n\n\n\n\n\n\nn\n\nn\n\n\ny\nlic-key-1\n\n' \
+  | ( cd "$tmp11" && bash scripts/init.sh >/dev/null )
+grep -qxF "TRIAGE_LICENSE_KEY='lic-key-1'" "$tmp11/.env"
+grep -qxF "TRIAGE_API_URL=''" "$tmp11/.env"
+grep -qxF "TRIAGE_DRY_RUN='true'" "$tmp11/.env"   # key without URL -> dry run stays on
+
+# re-run: blank keeps the licence key, and supplying the URL this time turns dry run off
+printf '\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\nhttps://triage.example.invalid\n' \
+  | ( cd "$tmp11" && bash scripts/init.sh >/dev/null )
+grep -qxF "TRIAGE_LICENSE_KEY='lic-key-1'" "$tmp11/.env"
+grep -qxF "TRIAGE_API_URL='https://triage.example.invalid'" "$tmp11/.env"
+grep -qxF "TRIAGE_DRY_RUN='false'" "$tmp11/.env"   # key + URL -> dry run off
+
 echo "test_init OK"

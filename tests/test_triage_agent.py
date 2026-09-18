@@ -449,6 +449,14 @@ class PackTests(unittest.TestCase):
         d.stamp["k"] -= 3601
         self.assertFalse(d.seen("k"))
 
+    def test_source_deadline_always_leaves_at_least_25s_for_the_cloud_call(self):
+        # TOTAL_DEADLINE is derived from TOTAL_TRIAGE_BUDGET (I3), not pinned, precisely so a
+        # degraded stack (several dead sources, each burning its own timeout) can never eat so much
+        # of the budget that the cloud call - the part actually worth the wait - is starved below a
+        # timeout short enough to guarantee failure.
+        self.assertLessEqual(self.agent.TOTAL_DEADLINE, 30)
+        self.assertGreaterEqual(self.agent.TOTAL_TRIAGE_BUDGET - self.agent.TOTAL_DEADLINE, 25)
+
     def test_trimmed_pack_fits_under_the_64kb_cloud_request_limit(self):
         # the triage service rejects request bodies over 64KB (413); trim()'s own HARD_CAP_BYTES
         # (40000) is supposed to keep every pack well clear of that, even a maximally-grouped one.
@@ -571,11 +579,18 @@ class CloudTests(unittest.TestCase):
         self.assertEqual(discord["allowed_mentions"], {"parse": []})
 
     def test_bad_key_and_quota_are_logged_not_posted(self):
+        import io, contextlib
         os.environ["TRIAGE_LICENSE_KEY"] = "wrong"
         try: self.assertIsNone(self.agent.send_to_cloud({"schema_version": 1, "alerts": []}))
         finally: os.environ["TRIAGE_LICENSE_KEY"] = "key-1"
         os.environ["TRIAGE_API_URL"] = self.base + "/quota"
-        try: self.assertIsNone(self.agent.send_to_cloud({"schema_version": 1, "alerts": []}))
+        try:
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                self.assertIsNone(self.agent.send_to_cloud({"schema_version": 1, "alerts": []}))
+            # Sink's /quota route returns {"error": "quota", "resets_on": "2026-10-01"} - the 429
+            # log line must surface resets_on so an exhausted quota is legible without a dashboard.
+            self.assertIn("error=quota resets_on=2026-10-01", buf.getvalue())
         finally: os.environ["TRIAGE_API_URL"] = self.base
         self.assertEqual([p for p, _ in Sink.posts if p in ("/slack", "/discord")], [])
 
@@ -601,6 +616,8 @@ class CloudTests(unittest.TestCase):
         self.assertEqual([p for p, _ in Sink.posts if p in ("/slack", "/discord")], [])
 
     def test_telegram_when_configured(self):
+        # Telegram gets no fence (M7): no parse_mode is set, so a fence would render as three
+        # literal backtick lines instead of a code block - the raw text goes out unwrapped.
         os.environ.update({"TELEGRAM_BOT_TOKEN": "t0k", "TELEGRAM_CHAT_ID": "-100"})
         try:
             self.agent.post_note("Triage: x")
@@ -608,7 +625,7 @@ class CloudTests(unittest.TestCase):
             self.assertEqual(tg[0], "/tg/bott0k/sendMessage")
             body = json.loads(tg[1])
             self.assertEqual(body["chat_id"], "-100")
-            self.assertEqual(_unfenced(body["text"]), "Triage: x")
+            self.assertEqual(body["text"], "Triage: x")
             self.assertNotIn("parse_mode", body)
         finally: os.environ.update({"TELEGRAM_BOT_TOKEN": "", "TELEGRAM_CHAT_ID": ""})
 
@@ -621,7 +638,7 @@ class CloudTests(unittest.TestCase):
             self.assertEqual(len(tg_posts), 2)
             for b in tg_posts:
                 self.assertLessEqual(len(json.loads(b)["text"]), 4096)
-            rebuilt = "".join(_unfenced(json.loads(b)["text"]) for b in tg_posts)
+            rebuilt = "".join(json.loads(b)["text"] for b in tg_posts)
             self.assertEqual(rebuilt, long_text)
         finally: os.environ.update({"TELEGRAM_BOT_TOKEN": "", "TELEGRAM_CHAT_ID": ""})
 
@@ -742,6 +759,21 @@ class CloudTests(unittest.TestCase):
                               "the cloud must not be called once too little budget remains to bother")
         finally:
             self.agent.TOTAL_TRIAGE_BUDGET, self.agent.CLOUD_TIMEOUT_FLOOR = real_total, real_floor
+
+    def test_a_second_process_call_for_the_same_group_never_reaches_the_cloud(self):
+        # M6: drives process() itself twice, so this exercises DEDUP's wiring in process() (the
+        # `if DEDUP.seen(key): return` guard), not the Dedup class in isolation - which is what
+        # test_dedup_within_an_hour above already covers and what left this gap unnoticed. Mutating
+        # that guard to `if False:` leaves every other test green because none of them call
+        # process() twice for the same group.
+        key = "m6-dedup-wiring-test"
+        self.agent.process({"groupKey": key})
+        first_call_posts = list(Sink.posts)
+        self.assertIn("/v1/triage", [p for p, _ in first_call_posts], "the first call must reach the cloud")
+        self.assertIn("/slack", [p for p, _ in first_call_posts], "the first call must post the note")
+        self.agent.process({"groupKey": key})
+        self.assertEqual(Sink.posts, first_call_posts,
+                          "a repeat for an already-triaged group must not call the cloud or post again")
 
 
 if __name__ == "__main__":

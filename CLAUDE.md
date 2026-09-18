@@ -47,6 +47,17 @@ wiki's git repository after someone adds the first page through the web UI, so w
 Full runbooks with causes, mitigation and root-cause fixes are the paid tier's differentiator. Keep
 `docs/ALERTS.md` to what fires an alert and where to look first.
 
+## AI triage agent
+
+`scripts/triage_agent.py` (stdlib only, Python 3.12) is the compose service `triage-agent`, switched
+on by the `triage` profile -- `scripts/init.sh`'s last wizard question, after email. It receives a
+copy of every critical alert from Alertmanager's `webhook-triage` route, gathers a redacted context
+pack from this stack's own services, and either prints it (dry run, the default) or sends it to the
+hosted triage service and posts the note it returns to the same receivers Alertmanager uses. Both
+`TRIAGE_LICENSE_KEY` and `TRIAGE_API_URL` must be set to turn dry run off; either alone leaves it on.
+Its tests are `tests/test_triage_agent.sh`, which drives `tests/test_triage_agent.py` against fake
+upstreams (no containers needed) -- `tests/smoke.sh` is the one place its packs meet the real stack.
+
 ## Running the tests
 
 ```bash

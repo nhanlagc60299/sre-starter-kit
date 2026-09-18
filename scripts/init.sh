@@ -67,10 +67,10 @@ if [ -n "$ALERT_EMAIL_TO" ]; then
   [ -n "$SMTP_USER" ] && ask_secret SMTP_PASSWORD "SMTP password"
 fi
 # AI triage: a copy of every critical alert goes to the triage agent (profile "triage"), which
-# gathers context from this stack. Without a key it only prints that context pack to its own log
-# (dry run) so you can see exactly what would leave your network. Cloud delivery -- sending the
-# pack to the triage service for a note once a licence key is set -- is not built yet; today a
-# non-dry-run agent just logs that the pack was dropped instead of sending it anywhere.
+# gathers context from this stack. Without both a licence key and a service URL it only prints
+# that context pack to its own log (dry run) so you can see exactly what would leave your network.
+# With both set, the agent sends the pack to your triage service and posts the note it returns to
+# your configured receivers.
 # The re-run default is probed from TRIAGE_WEBHOOK_URL, not COMPOSE_PROFILES: the cAdvisor
 # question above already overwrote COMPOSE_PROFILES by the time we get here.
 case "${TRIAGE_WEBHOOK_URL:-}" in http://triage-agent:9096/alert) tri_default=y ;; *) tri_default=n ;; esac
@@ -79,7 +79,8 @@ case "$TRIAGE_ANS" in y|Y|yes|YES)
   COMPOSE_PROFILES="${COMPOSE_PROFILES:+$COMPOSE_PROFILES,}triage"
   TRIAGE_WEBHOOK_URL=http://triage-agent:9096/alert
   ask_secret TRIAGE_LICENSE_KEY "Triage licence key (empty = dry run: the pack is only printed to the agent's log)"
-  [ -n "${TRIAGE_LICENSE_KEY:-}" ] && TRIAGE_DRY_RUN=false || TRIAGE_DRY_RUN=true ;;
+  ask TRIAGE_API_URL "Triage service URL (from your Gumroad purchase; empty = dry run)" "${TRIAGE_API_URL:-}"
+  [ -n "${TRIAGE_LICENSE_KEY:-}" ] && [ -n "${TRIAGE_API_URL:-}" ] && TRIAGE_DRY_RUN=false || TRIAGE_DRY_RUN=true ;;
 *) TRIAGE_WEBHOOK_URL=http://localhost:9/; TRIAGE_DRY_RUN=true ;;
 esac
 # Telegram needs both the bot token and the chat id to actually notify anyone; the token alone

@@ -110,7 +110,23 @@ echo "smoke: log alert selector counts pushed lines ($n)"
 # webhook-triage; the agent must log a dry-run pack whose sources are all reachable. Written outside
 # build/ (SMOKE_PACK_OUT), because cleanup() above deletes build/ on every exit, including success.
 PACK_OUT="${SMOKE_PACK_OUT:-${TMPDIR:-/tmp}/triage-sample-pack.json}"
-curl -sf -XPOST $H:9093/api/v2/alerts -H 'Content-Type: application/json' -d '[{"labels":{"alertname":"ServiceDown","severity":"critical","module":"app","service":"prometheus-self","instance":"http://prometheus:9090/-/healthy","job":"blackbox-http"},"annotations":{"summary":"smoke: synthetic ServiceDown","runbook_url":"https://github.com/nhanlagc60299/sre-starter-kit/blob/main/docs/ALERTS.md#servicedown"}}]'
+
+# Seed one Grafana deploy annotation before the alert fires, so the pack's grafana source exercises
+# its "ok" shape live (a fresh Grafana has no annotations, so it would otherwise only ever prove
+# "empty") and deploys() has a real deploy-tagged entry to read.
+curl -sf -XPOST "$H:3000/api/annotations" -u "admin:smoke" -H 'Content-Type: application/json' \
+  -d '{"tags":["deploy"],"text":"smoke deploy"}' >/dev/null \
+  || { echo "FAIL: could not post the Grafana deploy annotation"; exit 1; }
+
+# M8: wait for Alertmanager's own readiness before posting to it -- racing the POST against startup
+# (or against another compose project's Alertmanager sharing the host) makes the POST fail in a way
+# that points at the agent 80s later, not at Alertmanager.
+for i in $(seq 1 15); do curl -sf "$H:9093/-/ready" >/dev/null && break; sleep 4; done
+curl -sf "$H:9093/-/ready" >/dev/null || { echo "FAIL: alertmanager not ready after 60s"; exit 1; }
+curl -sf -XPOST $H:9093/api/v2/alerts -H 'Content-Type: application/json' \
+  --retry 5 --retry-connrefused --retry-delay 2 \
+  -d '[{"labels":{"alertname":"ServiceDown","severity":"critical","module":"app","service":"prometheus-self","instance":"http://prometheus:9090/-/healthy","job":"blackbox-http"},"annotations":{"summary":"smoke: synthetic ServiceDown","runbook_url":"https://github.com/nhanlagc60299/sre-starter-kit/blob/main/docs/ALERTS.md#servicedown"}}]' \
+  || { echo "FAIL: could not post the synthetic alert to Alertmanager"; exit 1; }
 pack=""
 for i in $(seq 1 20); do
   pack=$($COMPOSE logs --no-log-prefix triage-agent 2>/dev/null | grep '^{' | tail -1 || true)
@@ -127,8 +143,11 @@ for s in ("rules", "query", "alertmanager", "runbook"):
     assert p["sources"][s]=="ok", (s, p["sources"])
 # no service logs for prometheus-self is fine (no Loki stream to match); unreachable is not
 assert p["sources"]["loki"] in ("ok","empty"), p["sources"]
-# a fresh Grafana has no deploy annotations yet; empty is fine, unreachable is not
-assert p["sources"]["grafana"] in ("ok","empty"), p["sources"]
+# M9: a deploy annotation was seeded above, so grafana must come back "ok" (not just "empty") and
+# deploys() must actually carry it - this is the one live exercise of the headline "deploy in the
+# last 2h" path, not just the shape a fresh, empty Grafana would give it.
+assert p["sources"]["grafana"]=="ok", p["sources"]
+assert any("deploy" in d.get("tags", []) for d in p["deploys"]), p["deploys"]
 # the synthetic alert CLAIMS ServiceDown, but the probed target (Prometheus's own /-/healthy) is
 # actually healthy, so the real rule expression (probe_success{job="blackbox-http"} == 0) matches no
 # series over the last 30m; empty is the honest answer here, not a broken source. "query" above stays
