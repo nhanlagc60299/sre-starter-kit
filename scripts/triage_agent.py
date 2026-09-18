@@ -323,7 +323,7 @@ def post_json(url, body, headers=None, timeout=45):
     data = json.dumps(body).encode()
     req = urllib.request.Request(url, data=data, headers={"Content-Type": "application/json", **(headers or {})})
     with urllib.request.urlopen(req, timeout=timeout) as r:
-        return r.status, r.read().decode()
+        return r.status, r.read().decode("utf-8", "replace")
 
 
 def send_to_cloud(pack, timeout=45):
@@ -346,6 +346,8 @@ def send_to_cloud(pack, timeout=45):
         log("triage service: HTTP %d error=%s" % (e.code, err)); return None
     except Exception as e:  # noqa: BLE001 - timeout, connection refused, etc.
         log("triage service unreachable: %s" % e.__class__.__name__); return None
+    if status != 200:
+        log("triage service: unexpected status %d" % status); return None
     try:
         note = json.loads(body)
     except ValueError:
