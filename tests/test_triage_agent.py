@@ -148,11 +148,41 @@ class PackTests(unittest.TestCase):
         self.assertNotIn("YWRtaW46c3VwZXJzZWNyZXQ=", s)
         self.assertIn("Authorization: [redacted]", s)
 
-    def test_secret_keyword_embedded_in_a_longer_identifier_is_redacted(self):
-        # AWS_SECRET_ACCESS_KEY: the keyword "secret" isn't adjacent to the "=", it's part of a longer name
+    def test_prefixed_authorization_header_is_not_redacted(self):
+        # "MyAuthorization:" is a different field, not the standard header - same root cause as the
+        # keyword-boundary bug below, so it gets the same fix (a non-alnum boundary before the keyword).
+        # Two whitespace-separated tokens after the colon, same shape as the positive test above, so
+        # this actually exercises the \s*\S+\s+\S+ value match rather than failing to match anyway.
+        original = "MyAuthorization: Basic c29tZXNlY3JldA=="
+        s = self.agent.redact(original)
+        self.assertEqual(s, original)
+
+    def test_secret_keyword_at_the_end_of_a_longer_identifier_is_redacted(self):
+        # AWS_SECRET_ACCESS_KEY: "secret" is embedded mid-identifier and must NOT match (see the
+        # false-positive test below); what actually redacts this is "access_key" as the identifier's
+        # own trailing keyword, immediately before "=".
         s = self.agent.redact("AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI/K7MDENG")
         self.assertNotIn("wJalrXUtnFEMI/K7MDENG", s)
         self.assertIn("AWS_SECRET_ACCESS_KEY=[redacted]", s)
+
+    def test_session_token_is_redacted(self):
+        s = self.agent.redact("session_token=abc123xyz")
+        self.assertNotIn("abc123xyz", s)
+        self.assertIn("session_token=[redacted]", s)
+
+    def test_keyword_as_a_substring_of_an_ordinary_identifier_is_not_redacted(self):
+        # a keyword embedded in the MIDDLE of an identifier (not immediately before the separator)
+        # must survive untouched - these are all real, harmless diagnostic/config fields.
+        safe = [
+            "tokenizer_latency=0.2",
+            "token_count=42",
+            "max_tokens=100",
+            "secretary_id=42",
+            "passwordless_login=true",
+            "pwd_check_interval=60",
+        ]
+        for s in safe:
+            self.assertEqual(self.agent.redact(s), s, s)
 
     def test_slack_webhook_url_is_redacted(self):
         s = self.agent.redact("post to https://hooks.slack.com/services/T000/B000/XXXX now")

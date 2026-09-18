@@ -20,15 +20,19 @@ ENV = os.environ.get
 # quoted JSON value or a comma-separated field instead of swallowing whatever follows.
 _REDACT_VALUE = r'[^\s"\',;)]+'
 DEFAULT_REDACT = [
-    # keyword can be embedded in a longer identifier (AWS_SECRET_ACCESS_KEY=...), and the keyword
-    # itself and/or the separator may be quoted, as in a JSON log line: {"password":"hunter2"}.
-    # The identifier wrap is bounded ({0,40}, generous for any real env-var name) - unbounded, it
-    # reintroduces the same O(n^2) backtracking on a long word-character run with no real keyword
-    # in it (e.g. a 50KB base64 blob) that the email pattern below is bounded to avoid.
-    (r'(?i)([\w.-]{0,40}(?:password|passwd|pwd|secret|token|api[_-]?key)[\w.-]{0,40})(["\']?\s*[:=]\s*["\']?)' + _REDACT_VALUE,
+    # The keyword must directly precede the separator, with a non-alnum (or start-of-string) boundary
+    # before it. That is what makes AWS_SECRET_ACCESS_KEY= (via the "access_key" alternative) and
+    # "password":"..." (quoted JSON) redact, while max_tokens=, token_count=, secretary_id=,
+    # passwordless_login= and pwd_check_interval= - keyword as a mid-identifier substring, not the
+    # part immediately before the separator - pass through untouched. A round-1 version wrapped the
+    # keyword in [\w.-]* on both sides, which caught AWS_SECRET_ACCESS_KEY= via "secret" but also
+    # destroyed every ordinary field with "token"/"secret"/"password" as a substring; fixed here by
+    # requiring the keyword end the identifier and adding the specific extra keywords that need it
+    # (access_key, private_key, client_secret) instead of matching a keyword anywhere in the word.
+    (r'(?i)(?<![A-Za-z0-9])((?:password|passwd|pwd|secret|token|api[_-]?key|access[_-]?key|private[_-]?key|client[_-]?secret))(["\']?\s*[:=]\s*["\']?)' + _REDACT_VALUE,
      r"\1\2[redacted]"),
     (r"(?i)bearer\s+\S+", "Bearer [redacted]"),
-    (r"(?i)authorization:\s*\S+\s+\S+", "Authorization: [redacted]"),
+    (r"(?i)(?<![A-Za-z0-9])authorization:\s*\S+\s+\S+", "Authorization: [redacted]"),
     (r"(?i)https?://hooks\.(?:slack\.com|discord(?:app)?\.com)/" + _REDACT_VALUE, "[webhook-url-redacted]"),
     (r"://[^/\s:]+:[^@\s]+@", "://[redacted]@"),          # user:pass@ in URLs - must run before the
                                                             # email pattern, or "user:pass@host" reads
@@ -311,6 +315,9 @@ def process(payload):
     try:
         pack = build_pack(payload)
     except Exception as e:  # noqa: BLE001 - an upstream returning garbage must not kill this thread
+        # DEDUP.seen() above already marked this key seen; on failure we deliberately leave that mark
+        # in place rather than undo it, so a repeatedly-firing alert is skipped for DEDUP_SECONDS
+        # instead of hammering a broken upstream on every Alertmanager repeat.
         log("build_pack failed for %s: %s: %s" % (key, e.__class__.__name__, e)); return
     if ENV("TRIAGE_DRY_RUN", "true").lower() == "true":
         log("dry run pack (%d bytes, sources %s)" % (len(json.dumps(pack)), json.dumps(pack["sources"])))
