@@ -99,12 +99,21 @@ tokens and emails before any of it is written anywhere.
 
 `TRIAGE_DRY_RUN=true` is the default, and nothing leaves your network in that mode: the context pack
 is only printed to the agent's own log (`docker compose logs triage-agent`), so you can see exactly
-what a licence key would send. Cloud delivery -- sending that same redacted pack to the triage
-service and getting a note back -- is not built yet; setting a licence key and `TRIAGE_DRY_RUN=false`
-today just stops the agent from logging the pack, without sending it anywhere either.
+what a licence key would send.
 
 `TRIAGE_REDACT` takes extra regexes (separated by `;;`) to strip from log lines before anything is
 sent.
+
+### Live mode
+
+Set `TRIAGE_LICENSE_KEY` and `TRIAGE_API_URL` (from your Gumroad purchase) and `TRIAGE_DRY_RUN=false`
+to turn cloud delivery on. The agent POSTs the same redacted pack you'd otherwise see in dry-run's log
+to `TRIAGE_API_URL`, and posts the note that comes back -- a probable cause and next steps, ending
+with a link to say whether it helped -- to whichever of Slack, Discord, Telegram and email you have
+configured (same receiver env vars Alertmanager itself uses). Any failure -- a rejected licence key, a
+quota limit, a pack the model refuses, an unreachable service, a timeout -- is logged and nothing is
+posted to your alert channel; a wrong or missing note there would be worse than a missing one. Teams
+is not posted to yet.
 
 ## Sizing
 
