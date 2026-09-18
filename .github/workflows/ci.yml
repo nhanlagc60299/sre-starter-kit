@@ -16,6 +16,7 @@ jobs:
       - run: bash tests/test_render.sh
       - run: bash tests/test_init.sh
       - run: bash tests/test_env_example.sh
+      - run: bash tests/test_triage_agent.sh
 
   smoke:
     runs-on: ubuntu-latest

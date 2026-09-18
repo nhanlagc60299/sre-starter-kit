@@ -11,14 +11,31 @@ MAX_BYTES = 40000          # ~12k tokens; see trim() for what goes first (test c
 HARD_CAP_BYTES = 40000     # fixed final safety net, independent of MAX_BYTES; see trim()
 SOURCE_TIMEOUT = 5         # seconds per upstream call
 TOTAL_DEADLINE = 30        # seconds for the whole build_pack, across every upstream call
-DEDUP_SECONDS = 3600       # matches the critical route's repeat_interval
+DEDUP_SECONDS = 3600       # the webhook-triage route has no repeat_interval of its own and inherits
+                           # the top-level route's 4h; this just bounds our own re-triage cadence,
+                           # independent of whatever Alertmanager's routes are configured to re-notify at
 RUNBOOK_MAX_LINES = 60
 ENV = os.environ.get
+# Value matcher excludes whitespace/quote/comma/semicolon/close-paren so it stops at the end of a
+# quoted JSON value or a comma-separated field instead of swallowing whatever follows.
+_REDACT_VALUE = r'[^\s"\',;)]+'
 DEFAULT_REDACT = [
-    (r"(?i)(password|passwd|pwd|secret|token|api[_-]?key)(\s*[=:]\s*)\S+", r"\1\2[redacted]"),
+    # keyword can be embedded in a longer identifier (AWS_SECRET_ACCESS_KEY=...), and the keyword
+    # itself and/or the separator may be quoted, as in a JSON log line: {"password":"hunter2"}.
+    # The identifier wrap is bounded ({0,40}, generous for any real env-var name) - unbounded, it
+    # reintroduces the same O(n^2) backtracking on a long word-character run with no real keyword
+    # in it (e.g. a 50KB base64 blob) that the email pattern below is bounded to avoid.
+    (r'(?i)([\w.-]{0,40}(?:password|passwd|pwd|secret|token|api[_-]?key)[\w.-]{0,40})(["\']?\s*[:=]\s*["\']?)' + _REDACT_VALUE,
+     r"\1\2[redacted]"),
     (r"(?i)bearer\s+\S+", "Bearer [redacted]"),
-    (r"[\w.+-]+@[\w-]+\.[\w.-]+", "[email]"),
-    (r"://[^/\s:]+:[^@\s]+@", "://[redacted]@"),          # user:pass@ in URLs
+    (r"(?i)authorization:\s*\S+\s+\S+", "Authorization: [redacted]"),
+    (r"(?i)https?://hooks\.(?:slack\.com|discord(?:app)?\.com)/" + _REDACT_VALUE, "[webhook-url-redacted]"),
+    (r"://[^/\s:]+:[^@\s]+@", "://[redacted]@"),          # user:pass@ in URLs - must run before the
+                                                            # email pattern, or "user:pass@host" reads
+                                                            # as an email and eats the hostname with it
+    # bounded quantifiers: an unbounded [\w.+-]+@[\w-]+\.[\w.-]+ backtracks O(n^2) on a long line with
+    # an "@" but no "." after it (an attacker-controlled log line, easily tens of KB)
+    (r"[\w.+-]{1,64}@[\w-]{1,63}(?:\.[\w-]{1,63})+", "[email]"),
 ]
 
 
@@ -73,6 +90,8 @@ def rule_for(name, budget):
     d, st = fetch_json(budget, prom_url("/api/v1/rules", type="alert"))
     if st == "unreachable":
         return None, "unreachable"
+    if not isinstance(d, dict):        # an upstream returning the wrong shape is "empty", not a crash
+        return None, "empty"
     for g in d.get("data", {}).get("groups", []):
         for r in g.get("rules", []):
             if r.get("name") == name:
@@ -86,6 +105,8 @@ def series_now(expr, budget, limit=20):
     d, st = fetch_json(budget, prom_url("/api/v1/query", query=expr))
     if st == "unreachable":
         return None, "unreachable"
+    if not isinstance(d, dict):
+        return None, "empty"
     result = d.get("data", {}).get("result", [])[:limit]
     return [{"metric": x.get("metric", {}), "value": x["value"][1]} for x in result], ("ok" if result else "empty")
 
@@ -97,6 +118,8 @@ def series_30m(expr, budget, limit=20):
     d, st = fetch_json(budget, prom_url("/api/v1/query_range", query=expr, start=now - 1800, end=now, step=60))
     if st == "unreachable":
         return None, "unreachable"
+    if not isinstance(d, dict):
+        return None, "empty"
     result = d.get("data", {}).get("result", [])[:limit]
     out = []
     for x in result:
@@ -118,6 +141,8 @@ def loki_errors(service, budget, limit=50):
     d, st = fetch_json(budget, url, {"X-Scope-OrgID": "fake"})
     if st == "unreachable":
         return [], "unreachable"
+    if not isinstance(d, dict):
+        return [], "empty"
     lines = []
     for s in d.get("data", {}).get("result", []):
         for ts, line in s.get("values", []):
@@ -131,6 +156,8 @@ def firing_alerts(budget, limit=30):
     d, st = fetch_json(budget, ENV("ALERTMANAGER_URL", "http://alertmanager:9093") + "/api/v2/alerts?active=true&silenced=true&inhibited=true")
     if st == "unreachable":
         return [], "unreachable"
+    if not isinstance(d, list):        # e.g. an error body like {"error": "..."} instead of the alert list
+        return [], "empty"
     out = [{"labels": a.get("labels", {}), "startsAt": a.get("startsAt"), "state": a.get("status", {}).get("state"),
             "inhibitedBy": a.get("status", {}).get("inhibitedBy", []), "silencedBy": a.get("status", {}).get("silencedBy", [])}
            for a in d[:limit]]
@@ -146,14 +173,19 @@ def deploys(budget, limit=10):
     d, st = fetch_json(budget, url, hdr)
     if st == "unreachable":
         return [], "unreachable"
+    if not isinstance(d, list):
+        return [], "empty"
     out = [{"time": a.get("time"), "tags": a.get("tags", []), "text": a.get("text", "")} for a in d]
     return out, ("ok" if out else "empty")
 
 
 def cap_lines(text, n=RUNBOOK_MAX_LINES):
-    """Runbooks can run long; cap what leaves the box regardless of where it came from."""
+    """Runbooks can run long; cap what leaves the box regardless of where it came from. Bounded on
+    both axes: a line-count cap alone still lets one absurdly long unwrapped line (or a line with a
+    pathological run of redact()-bait characters) through, so also hard-cap total characters."""
     lines = text.splitlines()
-    return text if len(lines) <= n else "\n".join(lines[:n])
+    capped = text if len(lines) <= n else "\n".join(lines[:n])
+    return capped if len(capped) <= HARD_CAP_BYTES else capped[:HARD_CAP_BYTES]
 
 
 def runbook(name):
@@ -173,19 +205,22 @@ def runbook(name):
 
 
 def redact(obj):
+    """Recurses over the whole pack; build the pattern list once here rather than on every recursive
+    call (redact() used to rebuild it - including re-parsing TRIAGE_REDACT - once per string/list/dict
+    in the tree)."""
     pats = list(DEFAULT_REDACT) + [(p, "[redacted]") for p in ENV("TRIAGE_REDACT", "").split(";;") if p.strip()]
+    return _redact(obj, pats)
 
-    def fix(s):
-        for pat, rep in pats:
-            s = re.sub(pat, rep, s)
-        return s
 
+def _redact(obj, pats):
     if isinstance(obj, str):
-        return fix(obj)
+        for pat, rep in pats:
+            obj = re.sub(pat, rep, obj)
+        return obj
     if isinstance(obj, list):
-        return [redact(x) for x in obj]
+        return [_redact(x, pats) for x in obj]
     if isinstance(obj, dict):
-        return {k: redact(v) for k, v in obj.items()}
+        return {k: _redact(v, pats) for k, v in obj.items()}
     return obj
 
 
@@ -195,6 +230,10 @@ def trim(pack):
              ("firing", lambda: pack["firing"][:10]), ("rule_30m", lambda: (pack["rule_30m"] or [])[:5]),
              ("rule_now", lambda: (pack["rule_now"] or [])[:5]), ("firing", lambda: []),
              ("up", lambda: None),
+             # a big grouped alert (Alertmanager can group hundreds under one alertname/service/instance)
+             # is the one field with no structural limit anywhere else in build_pack
+             ("alerts", lambda: pack["alerts"][:20]),
+             ("group", lambda: {k: pack["group"].get(k) for k in ("status", "receiver", "externalURL")}),
              ("runbook", lambda: {"source": pack["runbook"]["source"], "text": pack["runbook"]["text"][:3000]})]
     for key, shrink in steps:
         if len(json.dumps(pack)) <= MAX_BYTES:
@@ -269,7 +308,10 @@ def process(payload):
     key = payload.get("groupKey") or json.dumps(payload.get("groupLabels", {}), sort_keys=True)
     if DEDUP.seen(key):
         log("skip: group already triaged within %ds: %s" % (DEDUP_SECONDS, key)); return
-    pack = build_pack(payload)
+    try:
+        pack = build_pack(payload)
+    except Exception as e:  # noqa: BLE001 - an upstream returning garbage must not kill this thread
+        log("build_pack failed for %s: %s: %s" % (key, e.__class__.__name__, e)); return
     if ENV("TRIAGE_DRY_RUN", "true").lower() == "true":
         log("dry run pack (%d bytes, sources %s)" % (len(json.dumps(pack)), json.dumps(pack["sources"])))
         print(json.dumps(pack), flush=True); return

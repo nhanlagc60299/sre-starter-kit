@@ -2,7 +2,7 @@
 """Unit tests for scripts/triage_agent.py against fake Prometheus/Loki/Alertmanager/Grafana servers.
 Every fixture below is the JSON shape the real service returns (verified live by tests/smoke.sh);
 if a live shape ever differs, fix the fixture here, never the agent to match the fixture."""
-import importlib.util, json, os, sys, threading, unittest, urllib.request
+import importlib.util, json, os, threading, time, unittest, urllib.parse, urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -21,6 +21,9 @@ RANGE = {"status": "success", "data": {"resultType": "matrix", "result": [
 LOKI = {"status": "success", "data": {"resultType": "streams", "result": [
     {"stream": {"service": "api", "container": "api"},
      "values": [["1758000120000000000", "ERROR db connect password=hunter2 refused for ops@example.com"],
+                # a JSON-shaped log line: the keyword is immediately followed by a quote, not a bare
+                # separator, which a naive password(\s*[=:]\s*)\S+ pattern misses entirely
+                ["1758000115000000000", '{"level":"error","msg":"auth failed","password":"hunter2json"}'],
                 ["1758000110000000000", "ERROR upstream timeout"]]}]}}
 AM_ALERTS = [
     {"labels": {"alertname": "ServiceDown", "severity": "critical", "service": "api", "instance": "http://api:8080/health"},
@@ -44,9 +47,13 @@ WEBHOOK = {"version": "4", "groupKey": '{}:{alertname="ServiceDown"}', "status":
 class Fake(BaseHTTPRequestHandler):
     routes = {}      # path prefix -> (status, body); set per test
     hits = []
+    sleep_prefix = None   # path prefix to artificially delay, and for how long - set per test
+    sleep_seconds = 0
 
     def do_GET(self):
         Fake.hits.append(self.path)
+        if Fake.sleep_prefix and self.path.startswith(Fake.sleep_prefix):
+            time.sleep(Fake.sleep_seconds)
         # /api/v1/query_range must be checked before /api/v1/query: it is a prefix match.
         for prefix, (status, body) in Fake.routes.items():
             if self.path.startswith(prefix):
@@ -94,6 +101,8 @@ class PackTests(unittest.TestCase):
     def setUp(self):
         Fake.hits = []
         Fake.routes = routes_ok()
+        Fake.sleep_prefix = None
+        Fake.sleep_seconds = 0
 
     def test_pack_has_every_source(self):
         p = self.agent.build_pack(WEBHOOK)
@@ -103,7 +112,7 @@ class PackTests(unittest.TestCase):
         self.assertEqual(p["rule_now"][0]["value"], "0")
         self.assertEqual(p["rule_30m"][0]["last"], "0"); self.assertEqual(p["rule_30m"][0]["min"], "0"); self.assertEqual(p["rule_30m"][0]["max"], "1")
         self.assertEqual(p["up"][0]["value"], "0")
-        self.assertEqual(len(p["logs"]), 2)
+        self.assertEqual(len(p["logs"]), 3)
         self.assertEqual(p["deploys"][0]["text"], "api v2.14 by ci")
         self.assertEqual([a["labels"]["alertname"] for a in p["firing"]], ["ServiceDown", "HighErrorRate"])
         self.assertEqual(p["firing"][1]["state"], "suppressed")
@@ -126,6 +135,49 @@ class PackTests(unittest.TestCase):
         s = json.dumps(p)
         self.assertNotIn("hunter2", s); self.assertNotIn("ops@example.com", s)
         self.assertIn("password=[redacted]", s); self.assertIn("[email]", s)
+
+    def test_quoted_json_secret_is_redacted(self):
+        # {"password":"hunter2json"} - keyword directly followed by a quote, not a bare [=:] separator
+        p = self.agent.build_pack(WEBHOOK)
+        line = next(l["line"] for l in p["logs"] if "auth failed" in l["line"])
+        self.assertNotIn("hunter2json", line)
+        self.assertIn('"password":"[redacted]"', line)
+
+    def test_authorization_header_is_redacted(self):
+        s = self.agent.redact("Authorization: Basic YWRtaW46c3VwZXJzZWNyZXQ=")
+        self.assertNotIn("YWRtaW46c3VwZXJzZWNyZXQ=", s)
+        self.assertIn("Authorization: [redacted]", s)
+
+    def test_secret_keyword_embedded_in_a_longer_identifier_is_redacted(self):
+        # AWS_SECRET_ACCESS_KEY: the keyword "secret" isn't adjacent to the "=", it's part of a longer name
+        s = self.agent.redact("AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI/K7MDENG")
+        self.assertNotIn("wJalrXUtnFEMI/K7MDENG", s)
+        self.assertIn("AWS_SECRET_ACCESS_KEY=[redacted]", s)
+
+    def test_slack_webhook_url_is_redacted(self):
+        s = self.agent.redact("post to https://hooks.slack.com/services/T000/B000/XXXX now")
+        self.assertNotIn("T000/B000/XXXX", s)
+        self.assertIn("[webhook-url-redacted]", s)
+
+    def test_url_userinfo_is_redacted_and_hostname_survives(self):
+        s = self.agent.redact("connect to postgres://admin:s3cr3t@db.internal:5432/prod")
+        self.assertNotIn("s3cr3t", s)
+        self.assertIn("://[redacted]@", s)
+        self.assertIn("db.internal", s, "the email pattern must not eat the hostname after user:pass@")
+
+    def test_redact_is_not_quadratic_on_a_long_line_with_no_dot(self):
+        # 50KB, one "@", no "." after it - the worst case for a naive [\w.+-]+@[\w-]+\.[\w.-]+ or an
+        # unbounded identifier wrap around the secret-keyword alternation
+        malicious = "a" * 25000 + "@" + "b" * 25000
+        start = time.monotonic()
+        self.agent.redact(malicious)
+        elapsed = time.monotonic() - start
+        self.assertLess(elapsed, 2.0, "redact() must not be quadratic on an attacker-controlled line")
+
+    def test_cap_lines_bounds_total_characters_not_just_line_count(self):
+        # a single unwrapped 500KB line passes a line-count cap trivially
+        text = self.agent.cap_lines("x" * 500000, n=60)
+        self.assertLessEqual(len(text), self.agent.HARD_CAP_BYTES)
 
     def test_bearer_tokens_are_redacted(self):
         # a distinct case from generic secret=... so a mutation that only removes the Bearer pattern is caught
@@ -159,6 +211,37 @@ class PackTests(unittest.TestCase):
         self.assertEqual(p["sources"]["query_range"], "ok")
         self.assertEqual(p["sources"]["alertmanager"], "ok")
         self.assertEqual(p["sources"]["runbook"], "ok")
+
+    def test_alertmanager_error_body_is_not_a_shape_crash(self):
+        # a real Alertmanager /api/v2/alerts error response is a dict, not the expected list
+        Fake.routes["/api/v2/alerts"] = (200, {"error": "boom"})
+        p = self.agent.build_pack(WEBHOOK)
+        self.assertEqual(p["firing"], [])
+        self.assertEqual(p["sources"]["alertmanager"], "empty")
+
+    def test_rules_endpoint_returning_a_list_is_not_a_shape_crash(self):
+        Fake.routes["/api/v1/rules"] = (200, [])
+        p = self.agent.build_pack(WEBHOOK)
+        self.assertIsNone(p["rule"])
+        self.assertEqual(p["sources"]["rules"], "empty")
+
+    def test_process_logs_and_survives_build_pack_exceptions(self):
+        # DEDUP.seen() runs before build_pack(); if build_pack raises, process() must not crash the
+        # background thread silently - it should log and return.
+        import io, contextlib
+        original = self.agent.build_pack
+
+        def boom(payload):
+            raise RuntimeError("boom")
+
+        self.agent.build_pack = boom
+        try:
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                self.agent.process({"groupKey": "process-exception-test"})
+            self.assertIn("build_pack failed", buf.getvalue())
+        finally:
+            self.agent.build_pack = original
 
     def test_deadline_exhausted_marks_remaining_sources_unreachable(self):
         # a spent (or negative) deadline means no upstream call is even attempted
@@ -244,6 +327,66 @@ class PackTests(unittest.TestCase):
             self.agent.MAX_BYTES = 40000
             os.remove(os.path.join(self.tmp, "runbooks", "ServiceDown.md"))
 
+    def test_trim_drops_up_before_runbook(self):
+        # isolated trim() call: everything else is already minimal, only "up" is oversized, so this
+        # pins the ("up", lambda: None) step specifically rather than relying on some other step
+        # coincidentally getting the pack small enough first.
+        pack = {"logs": [], "deploys": [], "firing": [], "rule_30m": None, "rule_now": None,
+                "up": [{"metric": {"a": "b" * 2000}, "value": "1"}],
+                "alerts": [], "group": {}, "runbook": {"source": None, "text": "short"}}
+        baseline = len(json.dumps(pack))
+        real_max = self.agent.MAX_BYTES
+        self.agent.MAX_BYTES = baseline - 100   # just under "with up", well above "without up"
+        try:
+            p = self.agent.trim(pack)
+            self.assertIsNone(p["up"])
+            self.assertIn("up", p["trimmed"])
+        finally:
+            self.agent.MAX_BYTES = real_max
+
+    def test_loki_window_is_15_minutes_not_wider(self):
+        self.agent.build_pack(WEBHOOK)
+        hit = next(h for h in Fake.hits if h.startswith("/loki/api/v1/query_range"))
+        qs = urllib.parse.parse_qs(urllib.parse.urlparse(hit).query)
+        start_ns, end_ns = int(qs["start"][0]), int(qs["end"][0])
+        self.assertAlmostEqual((end_ns - start_ns) / 1e9, 15 * 60, delta=2)
+
+    def test_loki_line_is_capped_at_300_chars(self):
+        long_line = dict(LOKI); long_line["data"] = {"resultType": "streams", "result": [
+            {"stream": {"service": "api"}, "values": [["1758000120000000000", "ERROR " + "z" * 1000]]}]}
+        Fake.routes["/loki/api/v1/query_range"] = (200, long_line)
+        p = self.agent.build_pack(WEBHOOK)
+        self.assertEqual(len(p["logs"][0]["line"]), 300)
+
+    def test_trim_caps_alerts_and_shrinks_group_for_a_big_grouped_alert(self):
+        # Alertmanager can group hundreds of alerts under one alertname/service/instance; nothing
+        # else in build_pack bounds pack["alerts"], so a big group alone can blow past HARD_CAP_BYTES.
+        big_webhook = json.loads(json.dumps(WEBHOOK))
+        tmpl = big_webhook["alerts"][0]
+        big_webhook["alerts"] = [dict(tmpl, fingerprint="fp-%d" % i) for i in range(300)]
+        p = self.agent.build_pack(big_webhook)
+        self.assertLessEqual(len(json.dumps(p)), self.agent.HARD_CAP_BYTES)
+        self.assertLess(len(p["alerts"]), 300)
+
+    def test_alert_endpoint_responds_before_upstream_calls_finish(self):
+        # moving process(payload) ahead of send_response(200) would leave every other test green
+        # (they only check what got printed, not when) - this asserts the timing directly.
+        srv, base = self.agent.serve(port=0)
+        Fake.sleep_prefix = "/api/v1/rules"; Fake.sleep_seconds = 1.0
+        # a distinct groupKey: DEDUP is a module-level singleton shared across every test in this
+        # class, and reusing WEBHOOK's groupKey here would get deduped against another test's POST.
+        webhook = dict(WEBHOOK, groupKey="timing-test-key")
+        try:
+            req = urllib.request.Request(base + "/alert", data=json.dumps(webhook).encode(), headers={"Content-Type": "application/json"})
+            start = time.monotonic()
+            resp = urllib.request.urlopen(req, timeout=5)
+            elapsed = time.monotonic() - start
+            self.assertEqual(resp.status, 200)
+            self.assertLess(elapsed, 0.5, "POST /alert must return well before the slow upstream call finishes")
+        finally:
+            Fake.sleep_prefix = None; Fake.sleep_seconds = 0
+            srv.shutdown()
+
     def test_combine_reports_unreachable_over_a_partial_ok(self):
         # a single logical endpoint (e.g. /api/v1/query, hit once for rule_now and once for up) must
         # not read "ok" when one of the two calls actually failed - that would hide a partial failure.
@@ -260,7 +403,7 @@ class PackTests(unittest.TestCase):
         self.assertFalse(d.seen("k"))
 
     def test_http_alert_returns_200_immediately_and_dry_runs(self):
-        import io, contextlib, time
+        import io, contextlib
         srv, base = self.agent.serve(port=0)
         try:
             buf = io.StringIO()
@@ -269,7 +412,7 @@ class PackTests(unittest.TestCase):
                 self.assertEqual(urllib.request.urlopen(req, timeout=5).status, 200)
                 self.assertEqual(urllib.request.urlopen(base + "/healthz", timeout=5).status, 200)
                 for _ in range(50):
-                    if "dry run pack" in buf.getvalue(): break
+                    if any(l.startswith("{") for l in buf.getvalue().splitlines()): break
                     time.sleep(0.1)
             out = buf.getvalue()
             self.assertIn("triage-agent: dry run pack", out)
