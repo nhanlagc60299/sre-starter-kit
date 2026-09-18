@@ -29,10 +29,14 @@ PY
 
 # --- re-run 2: disk warn 30 / crit 15 must not collide, security answered "n" ---
 # Podman-style: security off (so no auth-log question), custom socket, cAdvisor off.
+# ALERTMANAGER_EXTERNAL_URL is never asked either; set a custom value by hand first to prove a
+# re-run keeps it instead of resetting it to the .env.example default.
+sed -i.bak "s#^ALERTMANAGER_EXTERNAL_URL=.*#ALERTMANAGER_EXTERNAL_URL='https://am.example.test'#" "$tmp/.env" && rm -f "$tmp/.env.bak"
 printf '\n\n\n\n\n\n30\n15\n\n\n\nn\n/run/user/1000/podman/podman.sock\nn\n' | ( cd "$tmp" && bash scripts/init.sh >/dev/null )
 grep -qxF "CONTAINER_SOCK='/run/user/1000/podman/podman.sock'" "$tmp/.env"
 grep -qxF "COMPOSE_PROFILES=''" "$tmp/.env"
 grep -qxF "AUTH_LOG_PATH='/var/log/secure'" "$tmp/.env"   # not asked, previous value kept
+grep -qxF "ALERTMANAGER_EXTERNAL_URL='https://am.example.test'" "$tmp/.env"   # not asked, previous value kept
 grep -qxF "DISK_WARN_PCT='30'" "$tmp/.env"
 grep -qxF "DISK_CRIT_PCT='15'" "$tmp/.env"
 grep -qxF "MODULE_SECURITY='false'" "$tmp/.env"
