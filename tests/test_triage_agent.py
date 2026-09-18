@@ -483,8 +483,10 @@ FENCE_OPEN, FENCE_CLOSE = "```\n", "\n```"
 
 def _unfenced(s):
     """Strip the ```...``` code fence post_note() wraps every chunk in, for asserting on the
-    original note text a test posted."""
-    assert s.startswith(FENCE_OPEN) and s.endswith(FENCE_CLOSE), s
+    original note text a test posted. A plain assert here would be stripped under `python -O`,
+    silently accepting an unfenced string instead of failing the test that relies on this helper."""
+    if not (s.startswith(FENCE_OPEN) and s.endswith(FENCE_CLOSE)):
+        raise AssertionError("not fenced: %r" % s)
     return s[len(FENCE_OPEN):-len(FENCE_CLOSE)]
 
 
