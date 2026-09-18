@@ -3,7 +3,7 @@
 redacts it, and either prints it (dry run, the default) or sends it to the triage API and posts the
 returned note to the alert receivers. Standard library only, on purpose: anyone can read this file
 end to end and know exactly what leaves their network. Only GETs against the kit's services."""
-import base64, json, os, re, threading, time, urllib.parse, urllib.request
+import base64, json, os, re, threading, time, urllib.error, urllib.parse, urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 SCHEMA_VERSION = 1
@@ -11,11 +11,24 @@ MAX_BYTES = 40000          # ~12k tokens; see trim() for what goes first (test c
 HARD_CAP_BYTES = 40000     # fixed final safety net, independent of MAX_BYTES; see trim()
 SOURCE_TIMEOUT = 5         # seconds per upstream call
 TOTAL_DEADLINE = 30        # seconds for the whole build_pack, across every upstream call
+TOTAL_TRIAGE_BUDGET = 45   # seconds, end to end: build_pack + the cloud call. Hard "never exceed" -
+                           # the cloud call's timeout is exactly what's left of this, never more.
+CLOUD_TIMEOUT_FLOOR = 10   # seconds; below this much remaining budget, skip the cloud call entirely
+                           # (log and return) rather than make a call so short it can't succeed
 DEDUP_SECONDS = 3600       # the webhook-triage route has no repeat_interval of its own and inherits
                            # the top-level route's 4h; this just bounds our own re-triage cadence,
                            # independent of whatever Alertmanager's routes are configured to re-notify at
+                           # (a group whose cloud call fails or times out stays deduped for this long too -
+                           # the next Alertmanager repeat re-triages it rather than retrying immediately)
 RUNBOOK_MAX_LINES = 60
+DISCORD_CHUNK_BYTES = 2000   # Discord's own hard limit on message content length
+TELEGRAM_CHUNK_BYTES = 4096  # Telegram's own hard limit on sendMessage's text length
+FENCE_OPEN, FENCE_CLOSE = "```\n", "\n```"   # wraps the note so Slack/Discord/Telegram render it in a
+                                              # fixed-width font - the numbered steps and PromQL in a
+                                              # triage note are unreadable reflowed by a proportional font
+FENCE_BYTES = len(FENCE_OPEN) + len(FENCE_CLOSE)
 ENV = os.environ.get
+TELEGRAM_API = "https://api.telegram.org/bot%s/sendMessage"
 # Value matcher excludes whitespace/quote/comma/semicolon/close-paren so it stops at the end of a
 # quoted JSON value or a comma-separated field instead of swallowing whatever follows.
 _REDACT_VALUE = r'[^\s"\',;)]+'
@@ -313,10 +326,119 @@ class Dedup:
 DEDUP = Dedup()
 
 
+def post_json(url, body, headers=None, timeout=45):
+    data = json.dumps(body).encode()
+    req = urllib.request.Request(url, data=data, headers={"Content-Type": "application/json", **(headers or {})})
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        return r.status, r.read().decode("utf-8", "replace")
+
+
+def send_to_cloud(pack, timeout=45):
+    """POST the redacted pack to the hosted triage service. Returns the parsed note dict on a clean
+    200 whose "text" is a real, non-blank triage note, or None on absolutely anything else (bad key,
+    quota, refused pack, model error, oversized body, timeout, garbage response, a "text" that isn't
+    a string or is blank or doesn't even look like a triage note) - process() must never post an
+    error into the alert channel, so every failure mode here ends the same way: log one line, return
+    None, nothing gets posted."""
+    api, key = ENV("TRIAGE_API_URL", "").rstrip("/"), ENV("TRIAGE_LICENSE_KEY", "")
+    if not api or not key:
+        log("TRIAGE_API_URL or TRIAGE_LICENSE_KEY missing; alert dropped (no cloud configured)"); return None
+    try:
+        status, body = post_json(api + "/v1/triage", pack, {"Authorization": "Bearer " + key}, timeout=timeout)
+    except urllib.error.HTTPError as e:
+        if e.code == 413:
+            log("triage service: pack too large"); return None
+        try:
+            err = json.loads(e.read().decode("utf-8", "replace")).get("error", "unknown")
+        except Exception:  # noqa: BLE001 - an error body that isn't even JSON is still just a failure
+            err = "unknown"
+        log("triage service: HTTP %d error=%s" % (e.code, err)); return None
+    except Exception as e:  # noqa: BLE001 - timeout, connection refused, etc.
+        log("triage service unreachable: %s" % e.__class__.__name__); return None
+    if status != 200:
+        log("triage service: unexpected status %d" % status); return None
+    try:
+        note = json.loads(body)
+    except ValueError:
+        log("triage service: malformed response (status %d)" % status); return None
+    if not isinstance(note, dict):
+        log("triage service: malformed response (status %d)" % status); return None
+    # engine.render() on the cloud side always starts a real note with "Triage:" - a free structural
+    # guard against a 200 whose body technically parses but whose "text" is the wrong shape entirely
+    # (a number, a list, a dict, or just whitespace) rather than an actual note.
+    t = note.get("text")
+    if not isinstance(t, str) or not t.strip() or not t.startswith("Triage:"):
+        log("triage service: malformed response (status %d)" % status); return None
+    return note
+
+
+def _chunks(text, size):
+    """Split text into <=size pieces so a long note still reaches a receiver instead of being cut
+    off (Discord: 2000 chars: Telegram: 4096) or rejected outright."""
+    return [text[i:i + size] for i in range(0, len(text), size)] or [""]
+
+
+def _fenced(chunk):
+    """Wrap a chunk in a code fence so Slack/Discord/Telegram render the note in a fixed-width font;
+    the numbered steps and PromQL expressions in a triage note are unreadable reflowed by a
+    proportional one. Telegram gets no parse_mode, so the fence renders as literal ``` characters
+    exactly like Slack's mrkdwn and Discord's markdown do - one representation, three receivers."""
+    return FENCE_OPEN + chunk + FENCE_CLOSE
+
+
+def post_note(text):
+    """Same channels Alertmanager uses, read from the same .env. Failures are logged, never retried
+    into the alert channel: a noisy triage is worse than a missing one. Each receiver is attempted
+    independently so one failing (or unconfigured) receiver never stops the others."""
+    def attempt(name, fn):
+        try: fn(); log("posted to " + name)
+        except Exception as e: log("post to %s failed: %s" % (name, e.__class__.__name__))  # noqa: BLE001
+    if ENV("SLACK_WEBHOOK_URL"):
+        attempt("slack", lambda: post_json(ENV("SLACK_WEBHOOK_URL"), {"text": _fenced(text)}, timeout=10))
+    if ENV("DISCORD_WEBHOOK_URL"):
+        def discord():
+            # each chunk is fenced on its own, so a message stays a well-formed code block even when
+            # the note is split; if a chunk's POST fails, the loop stops there and attempt() logs it -
+            # whatever already sent stays sent (a half note beats none), nothing further is attempted.
+            for chunk in _chunks(text, DISCORD_CHUNK_BYTES - FENCE_BYTES):
+                post_json(ENV("DISCORD_WEBHOOK_URL"),
+                          {"content": _fenced(chunk), "allowed_mentions": {"parse": []}}, timeout=10)
+        attempt("discord", discord)
+    if ENV("TELEGRAM_BOT_TOKEN") and ENV("TELEGRAM_CHAT_ID"):
+        def telegram():
+            for chunk in _chunks(text, TELEGRAM_CHUNK_BYTES - FENCE_BYTES):
+                post_json(TELEGRAM_API % ENV("TELEGRAM_BOT_TOKEN"),
+                          {"chat_id": ENV("TELEGRAM_CHAT_ID"), "text": _fenced(chunk)}, timeout=10)
+        attempt("telegram", telegram)
+    if ENV("ALERT_EMAIL_TO") and ENV("SMTP_HOST"):
+        def mail():
+            import smtplib
+            from email.message import EmailMessage
+            m = EmailMessage()
+            m["Subject"] = text.splitlines()[0][:120] if text else "Triage note"
+            m["From"] = ENV("SMTP_FROM", ""); m["To"] = ENV("ALERT_EMAIL_TO"); m.set_content(text)
+            host, _, port = ENV("SMTP_HOST").partition(":")
+            with smtplib.SMTP(host, int(port or 587), timeout=10) as s:
+                try:
+                    s.starttls()
+                except smtplib.SMTPNotSupportedError:
+                    # .env.example documents an unauthenticated relay on your own network as a valid
+                    # setup, and those commonly don't offer STARTTLS at all. That's fine when there's
+                    # no password to protect; it is never fine to send a login over the resulting
+                    # plaintext connection, so refuse outright rather than silently downgrade.
+                    if ENV("SMTP_USER"):
+                        log("email: server has no STARTTLS and a login is configured; refusing to send in clear")
+                        raise
+                if ENV("SMTP_USER"): s.login(ENV("SMTP_USER"), ENV("SMTP_PASSWORD", ""))
+                s.send_message(m)
+        attempt("email", mail)
+
+
 def process(payload):
     key = payload.get("groupKey") or json.dumps(payload.get("groupLabels", {}), sort_keys=True)
     if DEDUP.seen(key):
         log("skip: group already triaged within %ds: %s" % (DEDUP_SECONDS, key)); return
+    budget = Budget(TOTAL_TRIAGE_BUDGET)
     try:
         pack = build_pack(payload)
     except Exception as e:  # noqa: BLE001 - an upstream returning garbage must not kill this thread
@@ -327,8 +449,18 @@ def process(payload):
     if ENV("TRIAGE_DRY_RUN", "true").lower() == "true":
         log("dry run pack (%d bytes, sources %s)" % (len(json.dumps(pack)), json.dumps(pack["sources"])))
         print(json.dumps(pack), flush=True); return
-    # Task 10 adds: note = send_to_cloud(pack); post_note(note)
-    log("TRIAGE_DRY_RUN=false but cloud delivery is not built yet; pack dropped")
+    # TOTAL_TRIAGE_BUDGET is a hard ceiling, not a target: the cloud call gets exactly what's left of
+    # it, never more. Below CLOUD_TIMEOUT_FLOOR remaining, a call that short can't realistically
+    # succeed, so skip it outright rather than extend past the budget to give it a fairer chance.
+    remaining = budget.remaining()
+    if remaining < CLOUD_TIMEOUT_FLOOR:
+        log("triage: budget exhausted, skipping cloud call"); return
+    # post_note() below runs after the budget check, not against it: it posts to already-configured
+    # receivers over their own short per-receiver timeouts (10s each), independent of the 45s budget
+    # above, which only covers build_pack + the cloud call.
+    note = send_to_cloud(pack, timeout=remaining)
+    if note and note.get("text"):
+        post_note(note["text"])
 
 
 class Handler(BaseHTTPRequestHandler):

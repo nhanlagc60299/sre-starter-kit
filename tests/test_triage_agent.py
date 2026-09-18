@@ -2,8 +2,9 @@
 """Unit tests for scripts/triage_agent.py against fake Prometheus/Loki/Alertmanager/Grafana servers.
 Every fixture below is the JSON shape the real service returns (verified live by tests/smoke.sh);
 if a live shape ever differs, fix the fixture here, never the agent to match the fixture."""
-import importlib.util, json, os, threading, time, unittest, urllib.parse, urllib.request
+import importlib.util, json, os, smtplib, tempfile, threading, time, unittest, urllib.parse, urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from unittest import mock
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -448,6 +449,15 @@ class PackTests(unittest.TestCase):
         d.stamp["k"] -= 3601
         self.assertFalse(d.seen("k"))
 
+    def test_trimmed_pack_fits_under_the_64kb_cloud_request_limit(self):
+        # the triage service rejects request bodies over 64KB (413); trim()'s own HARD_CAP_BYTES
+        # (40000) is supposed to keep every pack well clear of that, even a maximally-grouped one.
+        big_webhook = json.loads(json.dumps(WEBHOOK))
+        tmpl = big_webhook["alerts"][0]
+        big_webhook["alerts"] = [dict(tmpl, fingerprint="fp-%d" % i) for i in range(300)]
+        p = self.agent.build_pack(big_webhook)
+        self.assertLessEqual(len(json.dumps(p).encode()), 64 * 1024)
+
     def test_http_alert_returns_200_immediately_and_dry_runs(self):
         import io, contextlib
         srv, base = self.agent.serve(port=0)
@@ -466,6 +476,272 @@ class PackTests(unittest.TestCase):
             self.assertEqual(json.loads(line)["schema_version"], 1)
         finally:
             srv.shutdown()
+
+
+FENCE_OPEN, FENCE_CLOSE = "```\n", "\n```"
+
+
+def _unfenced(s):
+    """Strip the ```...``` code fence post_note() wraps every chunk in, for asserting on the
+    original note text a test posted. A plain assert here would be stripped under `python -O`,
+    silently accepting an unfenced string instead of failing the test that relies on this helper."""
+    if not (s.startswith(FENCE_OPEN) and s.endswith(FENCE_CLOSE)):
+        raise AssertionError("not fenced: %r" % s)
+    return s[len(FENCE_OPEN):-len(FENCE_CLOSE)]
+
+
+class Sink(BaseHTTPRequestHandler):
+    """Fake cloud service + fake receivers (Slack/Discord/Telegram/email-via-webhook all just POST
+    somewhere) on one server. Response bodies match the real /v1/triage contract exactly (PR #4 in
+    the sre-triage repo): 200 {id,text,url,tier,used,limit}; 401 {"error":"unauthorized"};
+    429 {"error":"quota","resets_on"}; 422 {"error":"schema"} or {"error":"refused","category"};
+    502 {"error":"model","kind"}; 413 {"error":"too_large"}. The /text-* paths are still a clean 200
+    but with a "text" field of the wrong shape, to drive send_to_cloud()'s own response validation."""
+    posts = []
+
+    def do_POST(self):
+        n = int(self.headers.get("Content-Length", "0")); Sink.posts.append((self.path, self.rfile.read(n).decode()))
+        if self.path.startswith("/slow"):
+            time.sleep(5); self.send_response(200); self.end_headers(); return
+        if self.path.startswith("/slack-down"):
+            self.send_response(500); self.end_headers(); return
+        if self.path == "/v1/triage" and self.headers.get("Authorization") != "Bearer key-1":
+            self._json(401, {"error": "unauthorized"}); return
+        if self.path == "/quota/v1/triage":
+            self._json(429, {"error": "quota", "resets_on": "2026-10-01"}); return
+        if self.path == "/schema/v1/triage":
+            self._json(422, {"error": "schema"}); return
+        if self.path == "/refused/v1/triage":
+            self._json(422, {"error": "refused", "category": "self-harm"}); return
+        if self.path == "/model/v1/triage":
+            self._json(502, {"error": "model", "kind": "upstream-timeout"}); return
+        if self.path == "/big/v1/triage":
+            self._json(413, {"error": "too_large"}); return
+        if self.path == "/garbage/v1/triage":
+            body = b"not json"; self.send_response(200); self.send_header("Content-Length", str(len(body)))
+            self.end_headers(); self.wfile.write(body); return
+        if self.path == "/text-int/v1/triage":
+            self._json(200, {"id": "x", "text": 12345, "url": "u"}); return
+        if self.path == "/text-dict/v1/triage":
+            self._json(200, {"id": "x", "text": {"a": 1}, "url": "u"}); return
+        if self.path == "/text-list/v1/triage":
+            self._json(200, {"id": "x", "text": ["a", "b"], "url": "u"}); return
+        if self.path == "/text-blank/v1/triage":
+            self._json(200, {"id": "x", "text": "   \n\t  ", "url": "u"}); return
+        if self.path == "/text-noprefix/v1/triage":
+            self._json(200, {"id": "x", "text": "not a triage note", "url": "u"}); return
+        if self.path == "/v1/triage":
+            self._json(200, {"id": "abc", "text": "Triage: ServiceDown on api\nProbable cause\n  1. x",
+                              "url": "https://t/abc", "tier": "free", "used": 1, "limit": 50}); return
+        self.send_response(200); self.send_header("Content-Length", "2"); self.end_headers(); self.wfile.write(b"ok")
+
+    def _json(self, status, obj):
+        body = json.dumps(obj).encode()
+        self.send_response(status); self.send_header("Content-Length", str(len(body))); self.end_headers(); self.wfile.write(body)
+
+    def log_message(self, *a): pass
+
+
+class CloudTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.srv = ThreadingHTTPServer(("127.0.0.1", 0), Sink); threading.Thread(target=cls.srv.serve_forever, daemon=True).start()
+        cls.base = "http://127.0.0.1:%d" % cls.srv.server_address[1]
+        cls.agent = load_agent(cls.base, tempfile.mkdtemp())
+        os.environ.update({"TRIAGE_API_URL": cls.base, "TRIAGE_LICENSE_KEY": "key-1", "SLACK_WEBHOOK_URL": cls.base + "/slack",
+                           "DISCORD_WEBHOOK_URL": cls.base + "/discord", "TELEGRAM_BOT_TOKEN": "", "TELEGRAM_CHAT_ID": "",
+                           "ALERT_EMAIL_TO": "", "SMTP_HOST": "",
+                           # load_agent() above forces dry run back on; process()'s end-to-end tests need it off
+                           # so they actually exercise send_to_cloud() instead of short-circuiting into dry run.
+                           "TRIAGE_DRY_RUN": "false"})
+        cls.agent.TELEGRAM_API = cls.base + "/tg/bot%s/sendMessage"
+
+    def setUp(self): Sink.posts = []
+
+    def test_send_and_post_to_every_configured_receiver(self):
+        note = self.agent.send_to_cloud({"schema_version": 1, "alerts": []})
+        self.assertEqual(note["id"], "abc")
+        self.agent.post_note(note["text"])
+        paths = [p for p, _ in Sink.posts]
+        self.assertIn("/slack", paths); self.assertIn("/discord", paths)
+        slack = json.loads(next(b for p, b in Sink.posts if p == "/slack"))
+        self.assertEqual(_unfenced(slack["text"]), note["text"])
+        discord = json.loads(next(b for p, b in Sink.posts if p == "/discord"))
+        self.assertEqual(_unfenced(discord["content"]), note["text"])
+        self.assertEqual(discord["allowed_mentions"], {"parse": []})
+
+    def test_bad_key_and_quota_are_logged_not_posted(self):
+        os.environ["TRIAGE_LICENSE_KEY"] = "wrong"
+        try: self.assertIsNone(self.agent.send_to_cloud({"schema_version": 1, "alerts": []}))
+        finally: os.environ["TRIAGE_LICENSE_KEY"] = "key-1"
+        os.environ["TRIAGE_API_URL"] = self.base + "/quota"
+        try: self.assertIsNone(self.agent.send_to_cloud({"schema_version": 1, "alerts": []}))
+        finally: os.environ["TRIAGE_API_URL"] = self.base
+        self.assertEqual([p for p, _ in Sink.posts if p in ("/slack", "/discord")], [])
+
+    def test_schema_refused_model_and_oversized_pack_all_return_none(self):
+        for suffix in ("/schema", "/refused", "/model", "/big", "/garbage"):
+            os.environ["TRIAGE_API_URL"] = self.base + suffix
+            try:
+                self.assertIsNone(self.agent.send_to_cloud({"schema_version": 1, "alerts": []}), suffix)
+            finally:
+                os.environ["TRIAGE_API_URL"] = self.base
+        self.assertEqual([p for p, _ in Sink.posts if p in ("/slack", "/discord")], [])
+
+    def test_a_clean_200_with_a_malformed_text_field_returns_none(self):
+        # a "text" that isn't a string, or is blank, or doesn't even look like a triage note (real
+        # notes always start "Triage:" - see engine.render on the cloud side) must not be treated as
+        # a usable note, even though the response is a clean 200.
+        for suffix in ("/text-int", "/text-dict", "/text-list", "/text-blank", "/text-noprefix"):
+            os.environ["TRIAGE_API_URL"] = self.base + suffix
+            try:
+                self.assertIsNone(self.agent.send_to_cloud({"schema_version": 1, "alerts": []}), suffix)
+            finally:
+                os.environ["TRIAGE_API_URL"] = self.base
+        self.assertEqual([p for p, _ in Sink.posts if p in ("/slack", "/discord")], [])
+
+    def test_telegram_when_configured(self):
+        os.environ.update({"TELEGRAM_BOT_TOKEN": "t0k", "TELEGRAM_CHAT_ID": "-100"})
+        try:
+            self.agent.post_note("Triage: x")
+            tg = next((p, b) for p, b in Sink.posts if p.startswith("/tg/"))
+            self.assertEqual(tg[0], "/tg/bott0k/sendMessage")
+            body = json.loads(tg[1])
+            self.assertEqual(body["chat_id"], "-100")
+            self.assertEqual(_unfenced(body["text"]), "Triage: x")
+            self.assertNotIn("parse_mode", body)
+        finally: os.environ.update({"TELEGRAM_BOT_TOKEN": "", "TELEGRAM_CHAT_ID": ""})
+
+    def test_telegram_splits_a_note_over_4096_chars(self):
+        os.environ.update({"TELEGRAM_BOT_TOKEN": "t0k", "TELEGRAM_CHAT_ID": "-100"})
+        try:
+            long_text = "Triage: " + ("y" * 4992)  # 5000 chars total
+            self.agent.post_note(long_text)
+            tg_posts = [b for p, b in Sink.posts if p.startswith("/tg/")]
+            self.assertEqual(len(tg_posts), 2)
+            for b in tg_posts:
+                self.assertLessEqual(len(json.loads(b)["text"]), 4096)
+            rebuilt = "".join(_unfenced(json.loads(b)["text"]) for b in tg_posts)
+            self.assertEqual(rebuilt, long_text)
+        finally: os.environ.update({"TELEGRAM_BOT_TOKEN": "", "TELEGRAM_CHAT_ID": ""})
+
+    def test_email_receiver_failure_does_not_raise(self):
+        # no fake SMTP server here; port 1 refuses immediately, so this exercises attempt()'s own
+        # try/except around mail() - post_note() must swallow the failure, not propagate it.
+        os.environ.update({"ALERT_EMAIL_TO": "ops@example.com", "SMTP_HOST": "127.0.0.1:1"})
+        try:
+            self.agent.post_note("Triage: x")  # must not raise
+        finally:
+            os.environ.update({"ALERT_EMAIL_TO": "", "SMTP_HOST": ""})
+
+    def test_starttls_unsupported_without_credentials_still_sends(self):
+        # .env.example documents an unauthenticated relay as a valid setup, and those commonly have
+        # no STARTTLS at all - with nothing to protect, sending unencrypted must still work.
+        os.environ.update({"ALERT_EMAIL_TO": "ops@example.com", "SMTP_HOST": "smtp.example.test:25", "SMTP_USER": ""})
+        try:
+            with mock.patch("smtplib.SMTP") as MockSMTP:
+                conn = MockSMTP.return_value.__enter__.return_value
+                conn.starttls.side_effect = smtplib.SMTPNotSupportedError("no STARTTLS")
+                self.agent.post_note("Triage: x")
+                conn.send_message.assert_called_once()
+                conn.login.assert_not_called()
+        finally:
+            os.environ.update({"ALERT_EMAIL_TO": "", "SMTP_HOST": "", "SMTP_USER": ""})
+
+    def test_starttls_unsupported_with_credentials_refuses_to_send(self):
+        # a login must never go out over a connection that turned out to be plaintext.
+        os.environ.update({"ALERT_EMAIL_TO": "ops@example.com", "SMTP_HOST": "smtp.example.test:25",
+                           "SMTP_USER": "bob", "SMTP_PASSWORD": "secret"})
+        try:
+            with mock.patch("smtplib.SMTP") as MockSMTP:
+                conn = MockSMTP.return_value.__enter__.return_value
+                conn.starttls.side_effect = smtplib.SMTPNotSupportedError("no STARTTLS")
+                self.agent.post_note("Triage: x")  # must not raise out of post_note
+                conn.login.assert_not_called()
+                conn.send_message.assert_not_called()
+        finally:
+            os.environ.update({"ALERT_EMAIL_TO": "", "SMTP_HOST": "", "SMTP_USER": "", "SMTP_PASSWORD": ""})
+
+    def test_slack_failure_does_not_stop_discord(self):
+        # a receiver failing must not abort the loop - point Slack at a path that 500s and confirm
+        # Discord (which comes after it in post_note) still gets the note.
+        os.environ["SLACK_WEBHOOK_URL"] = self.base + "/slack-down"
+        try:
+            self.agent.post_note("Triage: slack is down but discord should still get this")
+            discord = next((b for p, b in Sink.posts if p == "/discord"), None)
+            self.assertIsNotNone(discord)
+        finally:
+            os.environ["SLACK_WEBHOOK_URL"] = self.base + "/slack"
+
+    def test_discord_splits_a_note_over_2000_chars(self):
+        long_text = "Triage: " + ("x" * 2500)
+        self.agent.post_note(long_text)
+        discord_posts = [b for p, b in Sink.posts if p == "/discord"]
+        self.assertEqual(len(discord_posts), 2)
+        for b in discord_posts:
+            content = json.loads(b)["content"]
+            self.assertLessEqual(len(content), 2000)
+        rebuilt = "".join(_unfenced(json.loads(b)["content"]) for b in discord_posts)
+        self.assertEqual(rebuilt, long_text)
+
+    def test_end_to_end_cloud_errors_never_post_to_a_receiver(self):
+        # drives process() itself (not send_to_cloud alone): every failure mode - bad key, quota,
+        # model error, timeout - must end with zero posts to the alert receivers.
+        for i, suffix in enumerate(("", "/quota", "/model")):
+            os.environ["TRIAGE_API_URL"] = self.base + suffix
+            os.environ["TRIAGE_LICENSE_KEY"] = "wrong" if suffix == "" else "key-1"
+            try:
+                self.agent.process({"groupKey": "e2e-error-%d" % i})
+            finally:
+                os.environ["TRIAGE_API_URL"] = self.base; os.environ["TRIAGE_LICENSE_KEY"] = "key-1"
+        real_total, real_floor = self.agent.TOTAL_TRIAGE_BUDGET, self.agent.CLOUD_TIMEOUT_FLOOR
+        self.agent.TOTAL_TRIAGE_BUDGET, self.agent.CLOUD_TIMEOUT_FLOOR = 2, 0.3
+        os.environ["TRIAGE_API_URL"] = self.base + "/slow"
+        try:
+            self.agent.process({"groupKey": "e2e-error-timeout"})
+        finally:
+            self.agent.TOTAL_TRIAGE_BUDGET, self.agent.CLOUD_TIMEOUT_FLOOR = real_total, real_floor
+            os.environ["TRIAGE_API_URL"] = self.base
+        self.assertEqual([p for p, _ in Sink.posts if p in ("/slack", "/discord")], [])
+
+    def test_budget_floor_caps_the_cloud_timeout_so_process_returns_promptly(self):
+        # sources taking ~1s, then a sink that sleeps well past the remaining budget: process() must
+        # still return in bounded time (not hang for the sink's full sleep) and post nothing. The
+        # bound is expressed against the *scaled* budget used in this test, not a literal "45" -
+        # a hardcoded 45s ceiling would pass even if the timeout math stopped bounding anything.
+        real_total, real_floor = self.agent.TOTAL_TRIAGE_BUDGET, self.agent.CLOUD_TIMEOUT_FLOOR
+        real_build_pack = self.agent.build_pack
+        scaled_budget = 2
+        self.agent.TOTAL_TRIAGE_BUDGET, self.agent.CLOUD_TIMEOUT_FLOOR = scaled_budget, 0.5
+
+        def slow_build_pack(payload):
+            time.sleep(1)
+            return {"schema_version": 1, "alerts": []}
+        self.agent.build_pack = slow_build_pack
+        os.environ["TRIAGE_API_URL"] = self.base + "/slow"
+        try:
+            start = time.monotonic()
+            self.agent.process({"groupKey": "budget-floor-test"})
+            elapsed = time.monotonic() - start
+            self.assertLess(elapsed, scaled_budget + 1.5,
+                             "process() must never run out past its own (scaled) total triage budget")
+            self.assertEqual([p for p, _ in Sink.posts if p in ("/slack", "/discord")], [])
+        finally:
+            self.agent.TOTAL_TRIAGE_BUDGET, self.agent.CLOUD_TIMEOUT_FLOOR = real_total, real_floor
+            self.agent.build_pack = real_build_pack
+            os.environ["TRIAGE_API_URL"] = self.base
+
+    def test_budget_exhausted_before_the_floor_skips_the_cloud_call_entirely(self):
+        # once less than CLOUD_TIMEOUT_FLOOR remains, process() must not extend the budget to give
+        # the cloud call a fairer chance - it must skip the call outright.
+        real_total, real_floor = self.agent.TOTAL_TRIAGE_BUDGET, self.agent.CLOUD_TIMEOUT_FLOOR
+        self.agent.TOTAL_TRIAGE_BUDGET, self.agent.CLOUD_TIMEOUT_FLOOR = 5, 10  # floor exceeds the whole budget
+        try:
+            self.agent.process({"groupKey": "budget-exhausted-test"})
+            self.assertEqual([p for p, _ in Sink.posts if p == "/v1/triage"], [],
+                              "the cloud must not be called once too little budget remains to bother")
+        finally:
+            self.agent.TOTAL_TRIAGE_BUDGET, self.agent.CLOUD_TIMEOUT_FLOOR = real_total, real_floor
 
 
 if __name__ == "__main__":
