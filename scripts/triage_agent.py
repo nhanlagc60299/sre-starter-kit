@@ -33,7 +33,7 @@ FENCE_OPEN, FENCE_CLOSE = "```\n", "\n```"   # wraps the note so Slack/Discord r
                                               # font. Telegram gets no parse_mode, so a fence would
                                               # render as three literal backtick lines instead of a
                                               # code block there - see post_note()'s telegram().
-FENCE_BYTES = len(FENCE_OPEN) + len(FENCE_CLOSE)
+FENCE_CHARS = len(FENCE_OPEN) + len(FENCE_CLOSE)
 ENV = os.environ.get
 TELEGRAM_API = "https://api.telegram.org/bot%s/sendMessage"
 # Value matcher excludes whitespace/quote/comma/semicolon/close-paren so it stops at the end of a
@@ -416,7 +416,7 @@ def post_note(text):
             # each chunk is fenced on its own, so a message stays a well-formed code block even when
             # the note is split; if a chunk's POST fails, the loop stops there and attempt() logs it -
             # whatever already sent stays sent (a half note beats none), nothing further is attempted.
-            for chunk in _chunks(text, DISCORD_CHUNK_CHARS - FENCE_BYTES):
+            for chunk in _chunks(text, DISCORD_CHUNK_CHARS - FENCE_CHARS):
                 post_json(ENV("DISCORD_WEBHOOK_URL"),
                           {"content": _fenced(chunk), "allowed_mentions": {"parse": []}}, timeout=10)
         attempt("discord", discord)
