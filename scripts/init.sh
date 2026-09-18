@@ -67,9 +67,10 @@ if [ -n "$ALERT_EMAIL_TO" ]; then
   [ -n "$SMTP_USER" ] && ask_secret SMTP_PASSWORD "SMTP password"
 fi
 # AI triage: a copy of every critical alert goes to the triage agent (profile "triage"), which
-# gathers context from this stack and, with a licence key, asks the triage service for a note.
-# Without a key it only prints the context pack to its own log (dry run) so you can see what
-# would leave your network before you decide.
+# gathers context from this stack. Without a key it only prints that context pack to its own log
+# (dry run) so you can see exactly what would leave your network. Cloud delivery -- sending the
+# pack to the triage service for a note once a licence key is set -- is not built yet; today a
+# non-dry-run agent just logs that the pack was dropped instead of sending it anywhere.
 # The re-run default is probed from TRIAGE_WEBHOOK_URL, not COMPOSE_PROFILES: the cAdvisor
 # question above already overwrote COMPOSE_PROFILES by the time we get here.
 case "${TRIAGE_WEBHOOK_URL:-}" in http://triage-agent:9096/alert) tri_default=y ;; *) tri_default=n ;; esac

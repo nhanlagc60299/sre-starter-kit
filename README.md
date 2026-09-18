@@ -99,8 +99,9 @@ tokens and emails before any of it is written anywhere.
 
 `TRIAGE_DRY_RUN=true` is the default, and nothing leaves your network in that mode: the context pack
 is only printed to the agent's own log (`docker compose logs triage-agent`), so you can see exactly
-what would be sent before you decide. With a licence key configured (`TRIAGE_DRY_RUN=false`), that
-same redacted pack is what leaves the network, sent to the triage service.
+what a licence key would send. Cloud delivery -- sending that same redacted pack to the triage
+service and getting a note back -- is not built yet; setting a licence key and `TRIAGE_DRY_RUN=false`
+today just stops the agent from logging the pack, without sending it anywhere either.
 
 `TRIAGE_REDACT` takes extra regexes (separated by `;;`) to strip from log lines before anything is
 sent.
