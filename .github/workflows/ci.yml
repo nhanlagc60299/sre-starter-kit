@@ -25,3 +25,11 @@ jobs:
       - name: Install build deps
         run: sudo apt-get update && sudo apt-get install -y gettext-base python3-yaml
       - run: make smoke
+        env:
+          SMOKE_PACK_OUT: ${{ runner.temp }}/triage-sample-pack.json
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: triage-sample-pack
+          path: ${{ runner.temp }}/triage-sample-pack.json
+          if-no-files-found: error

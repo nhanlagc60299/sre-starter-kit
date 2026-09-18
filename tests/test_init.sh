@@ -4,17 +4,21 @@ cd "$(dirname "$0")/.."
 tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
 cp -r core scripts .env.example "$tmp/"
 # answers: project, slack, telegram token, chat id, teams, services (2 then blank), disk warn, disk crit,
-# prom ret, loki ret, grafana pw, security y, container sock, cadvisor y, auth log path
-printf 'acme\nhttp://localhost:9/\n123:abc\n-100\n\napi=http://api:8080/health\nweb=http://web/\n\n20\n8\n15d\n168h\ns3cret\ny\n\ny\n/var/log/secure\n' \
+# prom ret, loki ret, grafana pw, security y, container sock, cadvisor y, auth log path, discord blank,
+# email blank, triage y, licence key blank
+printf 'acme\nhttp://localhost:9/\n123:abc\n-100\n\napi=http://api:8080/health\nweb=http://web/\n\n20\n8\n15d\n168h\ns3cret\ny\n\ny\n/var/log/secure\n\n\ny\n\n' \
   | ( cd "$tmp" && bash scripts/init.sh >/dev/null )
 grep -qxF "PROJECT_NAME='acme'" "$tmp/.env"
 grep -qxF "CONTAINER_SOCK='/var/run/docker.sock'" "$tmp/.env"
-grep -qxF "COMPOSE_PROFILES='cadvisor'" "$tmp/.env"
+grep -qxF "COMPOSE_PROFILES='cadvisor,triage'" "$tmp/.env"
 grep -qxF "AUTH_LOG_PATH='/var/log/secure'" "$tmp/.env"
 case "$(ls -ld "$tmp/.env")" in -rw-------*) ;; *) echo "FAIL: .env is not 0600: $(ls -ld "$tmp/.env")"; exit 1 ;; esac
 grep -qxF "TELEGRAM_BOT_TOKEN='123:abc'" "$tmp/.env"
 grep -qxF "DISK_WARN_PCT='20'" "$tmp/.env"
 grep -qxF "SERVICES='api=http://api:8080/health,web=http://web/'" "$tmp/.env"
+grep -qxF "TRIAGE_WEBHOOK_URL='http://triage-agent:9096/alert'" "$tmp/.env"
+grep -qxF "TRIAGE_DRY_RUN='true'" "$tmp/.env"          # no key -> dry run
+grep -qxF "TRIAGE_LICENSE_KEY=''" "$tmp/.env"
 ( cd "$tmp" && bash scripts/render.sh >/dev/null )
 python3 - "$tmp" <<'PY'
 import json,sys,os
@@ -28,11 +32,12 @@ assert "* 100 < 8\n" in rules and "* 100 < 20\n" in rules, "disk thresholds not 
 PY
 
 # --- re-run 2: disk warn 30 / crit 15 must not collide, security answered "n" ---
-# Podman-style: security off (so no auth-log question), custom socket, cAdvisor off.
+# Podman-style: security off (so no auth-log question), custom socket, cAdvisor off, and triage
+# answered "n" explicitly (a blank/EOF answer here would remember run 1's "y" and re-enable it).
 # ALERTMANAGER_EXTERNAL_URL is never asked either; set a custom value by hand first to prove a
 # re-run keeps it instead of resetting it to the .env.example default.
 sed -i.bak "s#^ALERTMANAGER_EXTERNAL_URL=.*#ALERTMANAGER_EXTERNAL_URL='https://am.example.test'#" "$tmp/.env" && rm -f "$tmp/.env.bak"
-printf '\n\n\n\n\n\n30\n15\n\n\n\nn\n/run/user/1000/podman/podman.sock\nn\n' | ( cd "$tmp" && bash scripts/init.sh >/dev/null )
+printf '\n\n\n\n\n\n30\n15\n\n\n\nn\n/run/user/1000/podman/podman.sock\nn\n\n\nn\n' | ( cd "$tmp" && bash scripts/init.sh >/dev/null )
 grep -qxF "CONTAINER_SOCK='/run/user/1000/podman/podman.sock'" "$tmp/.env"
 grep -qxF "COMPOSE_PROFILES=''" "$tmp/.env"
 grep -qxF "AUTH_LOG_PATH='/var/log/secure'" "$tmp/.env"   # not asked, previous value kept
@@ -41,6 +46,7 @@ grep -qxF "DISK_WARN_PCT='30'" "$tmp/.env"
 grep -qxF "DISK_CRIT_PCT='15'" "$tmp/.env"
 grep -qxF "MODULE_SECURITY='false'" "$tmp/.env"
 grep -qxF "PROJECT_NAME='acme'" "$tmp/.env"   # blank answers keep the previous value
+grep -qxF "TRIAGE_WEBHOOK_URL='http://localhost:9/'" "$tmp/.env"   # answered n -> back to the sink
 ( cd "$tmp" && bash scripts/render.sh >/dev/null )
 python3 - "$tmp" <<'PY'
 import re,sys
@@ -137,10 +143,33 @@ fi
 [ ! -e "$tmp8b/.env" ] || { echo "FAIL: wizard wrote .env with a Telegram token but no chat id"; exit 1; }
 
 # --- old answer files stop early: the new trailing questions must take defaults at EOF, not abort ---
-tmp9=$(mktemp -d); trap 'rm -rf "$tmp" "$tmp7" "$tmp8" "$tmp8b" "$tmp9"' EXIT
+tmp9=$(mktemp -d); trap 'rm -rf "$tmp" "$tmp7" "$tmp8" "$tmp8b" "$tmp9" "${tmp10:-}"' EXIT
 cp -r core scripts .env.example "$tmp9/"
 printf 'acme\nhttp://localhost:9/\n\n\n\n\n\n\n\n\n\nn\n\nn\n' | ( cd "$tmp9" && bash scripts/init.sh >/dev/null )
 grep -qxF "DISCORD_WEBHOOK_URL=''" "$tmp9/.env"
 grep -qxF "ALERT_EMAIL_TO=''" "$tmp9/.env"
+
+# --- triage: a re-run with blank answers must remember the previous answer (probed from
+#     TRIAGE_WEBHOOK_URL, since COMPOSE_PROFILES gets overwritten by the cAdvisor question first),
+#     and an explicit "n" removes the profile and points the webhook back at the sink ---
+tmp10=$(mktemp -d)
+cp -r core scripts .env.example "$tmp10/"
+# 19 answers: project, slack, 8 blanks (telegram token/chat id/teams/services-end/disk warn/disk
+# crit/prom ret/loki ret), grafana pw, security y, container sock blank, cadvisor y, auth log path
+# blank, discord blank, email blank, triage y, licence key blank
+printf 'acme\nhttp://localhost:9/\n\n\n\n\n\n\n\n\ns3cret\ny\n\ny\n\n\n\ny\n\n' \
+  | ( cd "$tmp10" && bash scripts/init.sh >/dev/null )
+grep -qxF "COMPOSE_PROFILES='cadvisor,triage'" "$tmp10/.env"
+grep -qxF "TRIAGE_WEBHOOK_URL='http://triage-agent:9096/alert'" "$tmp10/.env"
+
+# re-run with every answer blank: all 19 questions default, and the triage default must come back "y"
+printf '%.0s\n' $(seq 1 19) | ( cd "$tmp10" && bash scripts/init.sh >/dev/null )
+grep -qxF "COMPOSE_PROFILES='cadvisor,triage'" "$tmp10/.env"
+grep -qxF "TRIAGE_WEBHOOK_URL='http://triage-agent:9096/alert'" "$tmp10/.env"
+
+# re-run answering "n" to triage (17 blanks then n) removes the profile and resets the webhook
+printf '\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\nn\n' | ( cd "$tmp10" && bash scripts/init.sh >/dev/null )
+grep -qxF "COMPOSE_PROFILES='cadvisor'" "$tmp10/.env"
+grep -qxF "TRIAGE_WEBHOOK_URL='http://localhost:9/'" "$tmp10/.env"
 
 echo "test_init OK"

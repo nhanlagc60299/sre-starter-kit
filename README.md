@@ -89,6 +89,23 @@ service name in Loki, so the App and Overview log panels stay empty when the two
 `build/` contains rendered secrets (Slack/Discord/Teams webhooks, the Telegram bot token, the SMTP
 password) readable by other local users — run the kit on a host you control.
 
+## AI triage (optional)
+
+Answer `y` to the triage question in `make init` and the kit runs a small agent
+(`scripts/triage_agent.py`, standard-library Python) that receives a copy of every critical alert. It
+gathers the alert's rule and current values from Prometheus, the last error lines from Loki, other
+firing alerts, recent deploy annotations and the alert's runbook section, and redacts passwords,
+tokens and emails before any of it is written anywhere.
+
+`TRIAGE_DRY_RUN=true` is the default, and nothing leaves your network in that mode: the context pack
+is only printed to the agent's own log (`docker compose logs triage-agent`), so you can see exactly
+what a licence key would send. Cloud delivery -- sending that same redacted pack to the triage
+service and getting a note back -- is not built yet; setting a licence key and `TRIAGE_DRY_RUN=false`
+today just stops the agent from logging the pack, without sending it anywhere either.
+
+`TRIAGE_REDACT` takes extra regexes (separated by `;;`) to strip from log lines before anything is
+sent.
+
 ## Sizing
 
 | Scale | Machine | Disk |
