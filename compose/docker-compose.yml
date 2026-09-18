@@ -24,7 +24,7 @@ services:
   alertmanager:
     <<: *restart
     image: prom/alertmanager:v0.28.1
-    command: [--config.file=/etc/alertmanager/alertmanager.yml]
+    command: [--config.file=/etc/alertmanager/alertmanager.yml, "--web.external-url=${ALERTMANAGER_EXTERNAL_URL:-http://localhost:9093}"]
     volumes:
       - ../build/alertmanager:/etc/alertmanager:ro
       - am-data:/alertmanager

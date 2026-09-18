@@ -37,6 +37,8 @@ ssh -L 3000:127.0.0.1:3000 you@your-host   # then http://localhost:3000
 
 Only set `BIND_ADDR=0.0.0.0` if a reverse proxy in front of the host is doing the authentication.
 
+Every alert links back to Alertmanager at `ALERTMANAGER_EXTERNAL_URL`; set it to whatever your team can actually open, the default is only right on the monitoring host itself.
+
 **node-exporter (9100) is the exception, and it is deliberate.** It runs in the host network
 namespace (`network_mode: host`) because `/proc/net` is namespace-scoped at read time: a
 container-networked node-exporter reports its own veth as `node_network_*`, so the Node dashboard's
