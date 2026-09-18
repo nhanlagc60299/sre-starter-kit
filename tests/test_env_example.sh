@@ -21,6 +21,13 @@ ${CONTAINER_ENGINE:-docker} run --rm -v "$tmp/build/alertmanager:/c" --entrypoin
 cfg=$( cd "$tmp" && ALERTMANAGER_EXTERNAL_URL=https://am.example.test ${CONTAINER_ENGINE:-docker} compose --env-file .env -f compose/docker-compose.yml config )
 [[ "$cfg" == *"--web.external-url=https://am.example.test"* ]] || { echo "FAIL: ALERTMANAGER_EXTERNAL_URL not passed to alertmanager"; exit 1; }
 cfg=$( cd "$tmp" && ${CONTAINER_ENGINE:-docker} compose --env-file .env -f compose/docker-compose.yml config )
+[[ "$cfg" == *"--web.external-url=http://localhost:9093"* ]] || { echo "FAIL: .env.example's ALERTMANAGER_EXTERNAL_URL not passed to alertmanager"; exit 1; }
+
+# .env.example already sets ALERTMANAGER_EXTERNAL_URL, so the check above can't tell that value
+# apart from compose/docker-compose.yml's own default. Strip the key and confirm the
+# ${ALERTMANAGER_EXTERNAL_URL:-http://localhost:9093} fallback still renders it.
+grep -v '^ALERTMANAGER_EXTERNAL_URL=' "$tmp/.env" > "$tmp/.env.no-external-url" || true
+cfg=$( cd "$tmp" && ${CONTAINER_ENGINE:-docker} compose --env-file .env.no-external-url -f compose/docker-compose.yml config )
 [[ "$cfg" == *"--web.external-url=http://localhost:9093"* ]] || { echo "FAIL: external URL has no default"; exit 1; }
 
 echo "test_env_example OK"
