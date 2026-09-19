@@ -13,7 +13,7 @@ except ImportError:
     triage_engine = None
 
 SCHEMA_VERSION = 1
-MAX_BYTES = 40000          # ~12k tokens; see trim() for what goes first (test code may lower this)
+MAX_BYTES = 40000          # ~10k tokens; TRIAGE_MAX_INPUT_TOKENS overrides below (test code may lower this)
 HARD_CAP_BYTES = 40000     # fixed final safety net, independent of MAX_BYTES; see trim()
 SOURCE_TIMEOUT = 5         # seconds per upstream call
 TOTAL_TRIAGE_BUDGET = 45   # seconds, end to end: build_pack + the model call. Hard "never exceed" -
@@ -38,6 +38,34 @@ FENCE_OPEN, FENCE_CLOSE = "```\n", "\n```"   # a code fence; format_note() puts 
                                               # it never sees a fence - see post_note()'s telegram().
 FENCE_CHARS = len(FENCE_OPEN) + len(FENCE_CLOSE)
 ENV = os.environ.get
+# The pack is what the model reads: cap it in tokens so an internal model with a small context window
+# never gets a prompt it cannot hold. 4 bytes per token is conservative for ASCII JSON; the floor keeps
+# a runbook and one rule in the pack; HARD_CAP_BYTES stays the never-exceed ceiling.
+# Known context windows by model-name prefix (tokens). When TRIAGE_MAX_INPUT_TOKENS is unset, the pack
+# gets at most half the window so the system prompt and the answer always fit; unknown models keep the
+# 10k default. Vendors' own limits at the time of writing - a wrong entry only shrinks the pack.
+CONTEXT_WINDOWS = [("claude-", 200000), ("gpt-5", 400000), ("gpt-4.1", 1000000), ("gpt-4o", 128000), ("o3", 200000), ("o4", 200000),
+                   ("deepseek-reasoner", 128000), ("deepseek-chat", 128000), ("deepseek-v3", 128000), ("deepseek-r1", 128000),
+                   ("glm-4.5", 128000), ("glm-4.6", 200000), ("glm-4-", 128000), ("glm-4", 128000), ("glm-z1", 128000),
+                   ("qwen3", 128000), ("qwen2.5", 32768), ("llama-3.1", 128000), ("llama-3.3", 128000), ("llama3.1", 128000),
+                   ("llama3", 8192), ("llama-3", 8192), ("mistral", 32768), ("mixtral", 32768), ("gemma", 8192), ("phi", 16000)]
+
+
+def input_cap_bytes(env=None):
+    """Bytes of pack the model may read: TRIAGE_MAX_INPUT_TOKENS, else half the model's known context
+    window, else 10k tokens; 4 bytes per token is conservative for ASCII JSON; floored so a runbook
+    and one rule always fit, ceilinged at HARD_CAP_BYTES, the never-exceed limit."""
+    env = env or os.environ
+    cap = env.get("TRIAGE_MAX_INPUT_TOKENS", "")
+    tokens = int(cap) if cap.isdigit() and int(cap) > 0 else 0
+    if not tokens:
+        model = (env.get("TRIAGE_MODEL") or "").lower()
+        window = next((w for prefix, w in CONTEXT_WINDOWS if model.startswith(prefix)), 0)
+        tokens = min(10000, window // 2) if window else 10000
+    return min(HARD_CAP_BYTES, max(4000, tokens * 4))
+
+
+MAX_BYTES = input_cap_bytes()
 # Discord (behind Cloudflare) rejects the default "Python-urllib/3.x" User-Agent with 403 error 1010,
 # so every note to a Discord webhook was lost until the first live dogfood on 2026-09-19. Slack and
 # Telegram do not care, but one identity on every outbound request is cheaper than remembering which.
