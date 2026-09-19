@@ -95,7 +95,7 @@ class Budget:
 def get_json(url, headers=None, timeout=SOURCE_TIMEOUT):
     """GET and parse JSON; None on any failure. Never raises: every source is optional."""
     try:
-        req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT, **(headers or {})})
+        req = urllib.request.Request(url, headers={**(headers or {}), "User-Agent": USER_AGENT})
         with urllib.request.urlopen(req, timeout=timeout) as r:
             return json.loads(r.read().decode())
     except Exception as e:  # noqa: BLE001 - a dead upstream must not kill the triage
@@ -347,7 +347,7 @@ DEDUP = Dedup()
 
 def post_json(url, body, headers=None, timeout=45):
     data = json.dumps(body).encode()
-    req = urllib.request.Request(url, data=data, headers={"Content-Type": "application/json", "User-Agent": USER_AGENT, **(headers or {})})
+    req = urllib.request.Request(url, data=data, headers={"Content-Type": "application/json", **(headers or {}), "User-Agent": USER_AGENT})
     with urllib.request.urlopen(req, timeout=timeout) as r:
         return r.status, r.read().decode("utf-8", "replace")
 

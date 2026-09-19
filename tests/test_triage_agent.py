@@ -496,7 +496,7 @@ class Sink(BaseHTTPRequestHandler):
     posts = []
 
     def do_POST(self):
-        n = int(self.headers.get("Content-Length", "0")); Sink.posts.append((self.path, self.rfile.read(n).decode(), dict(self.headers)))
+        n = int(self.headers.get("Content-Length", "0")); Sink.posts.append((self.path, self.rfile.read(n).decode(), {k.lower(): v for k, v in self.headers.items()}))
         if self.path.startswith("/slack-down"):
             self.send_response(500); self.end_headers(); return
         self.send_response(200); self.send_header("Content-Length", "2"); self.end_headers(); self.wfile.write(b"ok")
@@ -611,8 +611,11 @@ class PostTests(unittest.TestCase):
         SINK.posts.clear()
         self.agent.post_note("Triage: x\nPack: docker compose logs triage-agent")
         self.assertTrue(SINK.posts)
+        SINK.posts.clear()
+        self.agent.post_json(SINK.base + "/slack", {"text": "x"}, headers={"User-Agent": "someone-else/9"})
+        self.assertEqual(SINK.posts[0][2].get("user-agent"), self.agent.USER_AGENT)
         for path, body, headers in SINK.posts:
-            self.assertEqual(headers.get("User-Agent"), self.agent.USER_AGENT, path)
+            self.assertEqual(headers.get("user-agent"), self.agent.USER_AGENT, path)   # keys lowercased by the sink
 
     def test_discord_splits_a_note_over_2000_chars(self):
         long_text = "Triage: " + ("x" * 2500)
