@@ -70,7 +70,7 @@ fi
 # The re-run default is probed from TRIAGE_WEBHOOK_URL, not COMPOSE_PROFILES: the cAdvisor
 # question above already overwrote COMPOSE_PROFILES by the time we get here.
 case "${TRIAGE_WEBHOOK_URL:-}" in http://triage-agent:9096/alert) tri_default=y ;; *) tri_default=n ;; esac
-ask TRIAGE_ANS "Enable AI triage notes for critical alerts? (y/n)" "$tri_default"
+ask TRIAGE_ANS "Enable the triage agent? Free tier: dry-run context packs in the agent log, no AI notes (y/n)" "$tri_default"
 case "$TRIAGE_ANS" in y|Y|yes|YES)
   COMPOSE_PROFILES="${COMPOSE_PROFILES:+$COMPOSE_PROFILES,}triage"
   TRIAGE_WEBHOOK_URL=http://triage-agent:9096/alert ;;
