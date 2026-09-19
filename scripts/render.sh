@@ -31,7 +31,14 @@ fi
 # literal and break the scrape.
 : "${NODE_EXPORTER_TARGET:=node-exporter:9100}"
 export NODE_EXPORTER_TARGET
-rm -rf "$ROOT/build"; mkdir -p "$ROOT/build"
+# Refresh build/ IN PLACE, never `rm -rf build`: compose bind-mounts build/prometheus, build/alertmanager,
+# build/loki/config.alloy and friends, and on Linux a bind mount follows the inode. Wiping the tree left
+# every running container reading the deleted copy, so `make reload` HUPed Prometheus into its own stale
+# config and new targets never appeared (found on EC2, 2026-09-19; macOS virtiofs hid it). Files are
+# rewritten in place (same inode) and anything without a source is removed afterwards.
+mkdir -p "$ROOT/build"
+_before=$(mktemp); _rendered=$(mktemp)
+find "$ROOT/build" -type f | sort > "$_before"
 # Only substitute variables that are defined in .env, so Prometheus/Alloy $labels etc. survive.
 VARS="$(grep -oE '^[A-Z_][A-Z0-9_]*=' "$ROOT/.env" | sed 's/=$//' | sed 's/^/\$/' | tr '\n' ' ') \$NODE_EXPORTER_TARGET"
 while IFS= read -r -d '' f; do
@@ -39,11 +46,15 @@ while IFS= read -r -d '' f; do
   out="$ROOT/build/$rel"
   mkdir -p "$(dirname "$out")"
   if [[ "$f" == *.tpl ]]; then
-    envsubst "$VARS" < "$f" > "${out%.tpl}"
+    envsubst "$VARS" < "$f" > "${out%.tpl}"; echo "${out%.tpl}" >> "$_rendered"
   else
-    cp "$f" "$out"
+    cp "$f" "$out"; echo "$out" >> "$_rendered"
   fi
 done < <(find "$ROOT/core" -type f -print0)
+# Stale files from a previous render (a removed template, a renamed rule file) go now; the generated
+# files below are recreated right after, inside directories the containers mount by path.
+sort "$_rendered" | comm -23 "$_before" - | while IFS= read -r stale; do rm -f "$stale"; done
+rm -f "$_before" "$_rendered"
 
 # --- post-render: customer-specific generation from .env ---
 # 1. blackbox targets
