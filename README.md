@@ -98,25 +98,11 @@ firing alerts, recent deploy annotations and the alert's runbook section, and re
 tokens and emails before any of it is written anywhere.
 
 `TRIAGE_DRY_RUN=true` is the default, and nothing leaves your network in that mode: the context pack
-is only printed to the agent's own log (`docker compose logs triage-agent`), so you can see exactly
-what a licence key would send.
+is only printed to the agent's own log (`docker compose logs triage-agent`). The free tier runs the
+agent in dry run only; the note itself (the model call, with your own Anthropic key) is a Pro feature.
 
 `TRIAGE_REDACT` takes extra regexes (separated by `;;`) to strip from log lines before anything is
 sent.
-
-### Live mode
-
-Set `TRIAGE_LICENSE_KEY` and `TRIAGE_API_URL` (from your Gumroad purchase) and `TRIAGE_DRY_RUN=false`
-to turn cloud delivery on. The agent POSTs the same redacted pack you'd otherwise see in dry-run's log
-to `TRIAGE_API_URL`, and posts the note that comes back -- a probable cause and next steps in a
-fixed-width code block, ending with a link to say whether it helped -- to whichever of Slack, Discord,
-Telegram and email you have configured (same receiver env vars Alertmanager itself uses). Any failure
--- a rejected licence key, a quota limit, a pack the model refuses, an unreachable service, a timeout,
-or a malformed response -- is logged and nothing is posted to your alert channel; a wrong or missing
-note there would be worse than a missing one. Either way, that alert group is already marked triaged
-for an hour (the same dedup window a successful triage uses), so a cloud failure doesn't retry into
-the same failure on every Alertmanager repeat -- the next repeat past that window re-triages it. Teams
-is not posted to yet.
 
 ## Sizing
 
@@ -162,16 +148,14 @@ Both flavours ship: `docker compose` for VMs, and a Helm chart for Kubernetes.
 licence for your organisation on any number of hosts, source included, 12 months of updates.
 Support is not included; that is why every alert ships with a runbook. Two of those runbooks are in this repo unchanged, [ServiceDown](docs/runbooks/ServiceDown.md) and [DiskWillFillIn24h](docs/runbooks/DiskWillFillIn24h.md), so you can see what you are paying for.
 
-### AI triage notes (subscription)
+### AI triage notes
 
-When a critical alert fires, a small agent already in the kit gathers the rule's numbers, a 30-minute
-trend, recent error logs, and any Grafana deploy annotation from the last two hours, and posts a short triage note back to your alert
-channel with the probable cause and what to check first. It runs in `TRIAGE_DRY_RUN` mode by default,
-so you see exactly what it would send before anything leaves your network. Setup is in
-[AI triage](#ai-triage-optional) below.
-
-[Try the Free plan](https://lagcian.gumroad.com/l/sre-triage-free) (10 notes/month) or [subscribe to Team](https://lagcian.gumroad.com/l/sre-triage-team)
-($49/month, 300 notes/month, stops when exhausted, cancel any time).
+When a critical alert fires, the agent already in this kit gathers the rule's numbers, a 30-minute
+trend, recent error logs, and any Grafana deploy annotation from the last two hours. In Pro it then
+asks Claude, with your own Anthropic API key, and posts a short note back to your alert channel:
+probable cause with the numbers it rests on, whether a deploy lines up, and what to check first from
+your runbook. Nothing goes through us; the free tier stops at the dry-run pack you can read in
+`docker compose logs triage-agent`.
 
 Install this free tier first. It is the same stack without the modules above, so it is the honest
 way to judge the code before paying for more of it. Questions: **nhanlagc60299@gmail.com**.

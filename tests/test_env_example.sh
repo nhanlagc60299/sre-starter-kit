@@ -26,13 +26,11 @@ sed -i.bak 's#^SLACK_WEBHOOK_URL=.*#SLACK_WEBHOOK_URL=http://localhost:9/#' "$tm
 ( cd "$tmp" && bash scripts/render.sh >/dev/null ) || { echo "FAIL: render failed with a webhook set"; exit 1; }
 ${CONTAINER_ENGINE:-docker} run --rm -v "$tmp/build/alertmanager:/c" --entrypoint amtool prom/alertmanager:v0.28.1 check-config /c/alertmanager.yml
 
-# I6 live check: the triage-agent's own `environment:` block reads these three straight from .env
-# (compose/docker-compose.yml), so this is the actual parser that mattered -- confirm each is really
+# I6 live check: the triage-agent's own `environment:` block reads this straight from .env
+# (compose/docker-compose.yml), so this is the actual parser that mattered -- confirm it is really
 # an empty string, not the comment text, under `--profile triage config`.
 cfg=$( cd "$tmp" && ${CONTAINER_ENGINE:-docker} compose --profile triage --env-file .env -f compose/docker-compose.yml config )
-for k in TRIAGE_LICENSE_KEY TRIAGE_API_URL TRIAGE_REDACT; do
-  [[ "$cfg" == *"$k: \"\""* ]] || { echo "FAIL: $k is not an empty string under --profile triage config"; exit 1; }
-done
+[[ "$cfg" == *'TRIAGE_REDACT: ""'* ]] || { echo "FAIL: TRIAGE_REDACT is not an empty string under --profile triage config"; exit 1; }
 
 # The Slack link on every alert is Alertmanager's external URL. Unset, it is the container's
 # hostname, which nobody can click. compose reads the key straight from .env.

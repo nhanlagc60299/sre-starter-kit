@@ -1,23 +1,29 @@
 #!/usr/bin/env python3
 """triage-agent: receives Alertmanager webhooks, gathers a context pack from the kit's own services,
-redacts it, and either prints it (dry run, the default) or sends it to the triage API and posts the
-returned note to the alert receivers. Standard library only, on purpose: anyone can read this file
-end to end and know exactly what leaves their network. Only GETs against the kit's services."""
+redacts it, and either prints it (dry run, the default) or hands it to triage_engine (Pro) which asks
+the Anthropic Messages API with your own key, and posts the returned note. Standard library only, on
+purpose: anyone can read this file end to end and know exactly what leaves their network. Only GETs
+against the kit's services."""
 import base64, json, os, re, threading, time, urllib.error, urllib.parse, urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+try:
+    import triage_engine            # Pro ships scripts/triage_engine.py next to this file; free does not
+except ImportError:
+    triage_engine = None
 
 SCHEMA_VERSION = 1
 MAX_BYTES = 40000          # ~12k tokens; see trim() for what goes first (test code may lower this)
 HARD_CAP_BYTES = 40000     # fixed final safety net, independent of MAX_BYTES; see trim()
 SOURCE_TIMEOUT = 5         # seconds per upstream call
-TOTAL_TRIAGE_BUDGET = 45   # seconds, end to end: build_pack + the cloud call. Hard "never exceed" -
-                           # the cloud call's timeout is exactly what's left of this, never more.
+TOTAL_TRIAGE_BUDGET = 45   # seconds, end to end: build_pack + the model call. Hard "never exceed" -
+                           # the model call's timeout is exactly what's left of this, never more.
 # Derived from the total rather than pinned: sources are capped at 30s, but never allowed to eat so
-# much of the budget that the cloud call - the part actually worth the wait - is left with under
+# much of the budget that the model call - the part actually worth the wait - is left with under
 # 25s. That matters most exactly when sources are degraded (several dead upstreams each burning
 # their own timeout) and a model call still needs a fair shot at succeeding.
 TOTAL_DEADLINE = min(30, TOTAL_TRIAGE_BUDGET - 25)   # seconds for the whole build_pack
-CLOUD_TIMEOUT_FLOOR = 10   # seconds; below this much remaining budget, skip the cloud call entirely
+CLOUD_TIMEOUT_FLOOR = 10   # seconds; below this much remaining budget, skip the model call entirely
                            # (log and return) rather than make a call so short it can't succeed
 DEDUP_SECONDS = 3600       # the webhook-triage route has no repeat_interval of its own and inherits
                            # the top-level route's 4h; this just bounds our own re-triage cadence,
@@ -62,6 +68,8 @@ DEFAULT_REDACT = [
     (r"://[^/\s:]+:[^@\s]+@", "://[redacted]@"),          # user:pass@ in URLs - must run before the
                                                             # email pattern, or "user:pass@host" reads
                                                             # as an email and eats the hostname with it
+    (r"(?i)x-api-key:\s*\S+", "x-api-key: [redacted]"),
+    (r"sk-ant-[A-Za-z0-9_-]+", "[anthropic-key-redacted]"),
     # bounded quantifiers: an unbounded [\w.+-]+@[\w-]+\.[\w.-]+ backtracks O(n^2) on a long line with
     # an "@" but no "." after it (an attacker-controlled log line, easily tens of KB)
     (r"[\w.+-]{1,64}@[\w-]{1,63}(?:\.[\w-]{1,63})+", "[email]"),
@@ -340,55 +348,6 @@ def post_json(url, body, headers=None, timeout=45):
         return r.status, r.read().decode("utf-8", "replace")
 
 
-def send_to_cloud(pack, timeout=45):
-    """POST the redacted pack to the hosted triage service. Returns the parsed note dict on a clean
-    200 whose "text" is a real, non-blank triage note, or None on absolutely anything else (bad key,
-    quota, refused pack, model error, oversized body, timeout, garbage response, a "text" that isn't
-    a string or is blank or doesn't even look like a triage note) - process() must never post an
-    error into the alert channel, so every failure mode here ends the same way: log one line, return
-    None, nothing gets posted."""
-    api, key = ENV("TRIAGE_API_URL", "").rstrip("/"), ENV("TRIAGE_LICENSE_KEY", "")
-    if not api or not key:
-        log("TRIAGE_API_URL or TRIAGE_LICENSE_KEY missing; alert dropped (no cloud configured)"); return None
-    try:
-        status, body = post_json(api + "/v1/triage", pack, {"Authorization": "Bearer " + key}, timeout=timeout)
-    except urllib.error.HTTPError as e:
-        if e.code == 413:
-            log("triage service: pack too large"); return None
-        try:
-            err_body = json.loads(e.read().decode("utf-8", "replace"))
-        except Exception:  # noqa: BLE001 - an error body that isn't even JSON is still just a failure
-            err_body = {}
-        if not isinstance(err_body, dict):
-            err_body = {}
-        err = err_body.get("error", "unknown")
-        # 429's body carries resets_on (an ISO timestamp) - log it so an exhausted quota is legible
-        # without going to the cloud dashboard; every other status has nothing extra worth logging.
-        resets_on = err_body.get("resets_on") if e.code == 429 else None
-        if resets_on:
-            log("triage service: HTTP %d error=%s resets_on=%s" % (e.code, err, resets_on))
-        else:
-            log("triage service: HTTP %d error=%s" % (e.code, err))
-        return None
-    except Exception as e:  # noqa: BLE001 - timeout, connection refused, etc.
-        log("triage service unreachable: %s" % e.__class__.__name__); return None
-    if status != 200:
-        log("triage service: unexpected status %d" % status); return None
-    try:
-        note = json.loads(body)
-    except ValueError:
-        log("triage service: malformed response (status %d)" % status); return None
-    if not isinstance(note, dict):
-        log("triage service: malformed response (status %d)" % status); return None
-    # engine.render() on the cloud side always starts a real note with "Triage:" - a free structural
-    # guard against a 200 whose body technically parses but whose "text" is the wrong shape entirely
-    # (a number, a list, a dict, or just whitespace) rather than an actual note.
-    t = note.get("text")
-    if not isinstance(t, str) or not t.strip() or not t.startswith("Triage:"):
-        log("triage service: malformed response (status %d)" % status); return None
-    return note
-
-
 def _chunks(text, size):
     """Split text into <=size pieces so a long note still reaches a receiver instead of being cut
     off (Discord: 2000 chars: Telegram: 4096) or rejected outright."""
@@ -469,18 +428,22 @@ def process(payload):
     if ENV("TRIAGE_DRY_RUN", "true").lower() == "true":
         log("dry run pack (%d bytes, sources %s)" % (len(json.dumps(pack)), json.dumps(pack["sources"])))
         print(json.dumps(pack), flush=True); return
-    # TOTAL_TRIAGE_BUDGET is a hard ceiling, not a target: the cloud call gets exactly what's left of
+    # TOTAL_TRIAGE_BUDGET is a hard ceiling, not a target: the model call gets exactly what's left of
     # it, never more. Below CLOUD_TIMEOUT_FLOOR remaining, a call that short can't realistically
     # succeed, so skip it outright rather than extend past the budget to give it a fairer chance.
     remaining = budget.remaining()
     if remaining < CLOUD_TIMEOUT_FLOOR:
-        log("triage: budget exhausted, skipping cloud call"); return
-    # post_note() below runs after the budget check, not against it: it posts to already-configured
-    # receivers over their own short per-receiver timeouts (10s each), independent of the 45s budget
-    # above, which only covers build_pack + the cloud call.
-    note = send_to_cloud(pack, timeout=remaining)
-    if note and note.get("text"):
-        post_note(note["text"])
+        log("triage: budget exhausted, skipping the model call"); return
+    if triage_engine is None:
+        log("triage: no triage_engine (free tier); pack logged only"); print(json.dumps(pack), flush=True); return
+    if ENV("TRIAGE_LOG_PACK", "false").lower() == "true":
+        print(json.dumps(pack), flush=True)
+    # post_note() runs after the budget, against its own per-receiver timeouts (10 s each).
+    text = triage_engine.triage(pack, remaining, os.environ)
+    if text:
+        post_note(text)
+    else:
+        log("triage: no note (%s)" % getattr(triage_engine, "LAST_ERROR", ""))
 
 
 class Handler(BaseHTTPRequestHandler):

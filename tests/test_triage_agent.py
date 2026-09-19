@@ -2,7 +2,7 @@
 """Unit tests for scripts/triage_agent.py against fake Prometheus/Loki/Alertmanager/Grafana servers.
 Every fixture below is the JSON shape the real service returns (verified live by tests/smoke.sh);
 if a live shape ever differs, fix the fixture here, never the agent to match the fixture."""
-import importlib.util, json, os, smtplib, tempfile, threading, time, unittest, urllib.parse, urllib.request
+import importlib.util, json, os, smtplib, sys, tempfile, threading, time, types, unittest, urllib.parse, urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from unittest import mock
 
@@ -457,15 +457,6 @@ class PackTests(unittest.TestCase):
         self.assertLessEqual(self.agent.TOTAL_DEADLINE, 30)
         self.assertGreaterEqual(self.agent.TOTAL_TRIAGE_BUDGET - self.agent.TOTAL_DEADLINE, 25)
 
-    def test_trimmed_pack_fits_under_the_64kb_cloud_request_limit(self):
-        # the triage service rejects request bodies over 64KB (413); trim()'s own HARD_CAP_BYTES
-        # (40000) is supposed to keep every pack well clear of that, even a maximally-grouped one.
-        big_webhook = json.loads(json.dumps(WEBHOOK))
-        tmpl = big_webhook["alerts"][0]
-        big_webhook["alerts"] = [dict(tmpl, fingerprint="fp-%d" % i) for i in range(300)]
-        p = self.agent.build_pack(big_webhook)
-        self.assertLessEqual(len(json.dumps(p).encode()), 64 * 1024)
-
     def test_http_alert_returns_200_immediately_and_dry_runs(self):
         import io, contextlib
         srv, base = self.agent.serve(port=0)
@@ -499,121 +490,45 @@ def _unfenced(s):
 
 
 class Sink(BaseHTTPRequestHandler):
-    """Fake cloud service + fake receivers (Slack/Discord/Telegram/email-via-webhook all just POST
-    somewhere) on one server. Response bodies match the real /v1/triage contract exactly (PR #4 in
-    the sre-triage repo): 200 {id,text,url,tier,used,limit}; 401 {"error":"unauthorized"};
-    429 {"error":"quota","resets_on"}; 422 {"error":"schema"} or {"error":"refused","category"};
-    502 {"error":"model","kind"}; 413 {"error":"too_large"}. The /text-* paths are still a clean 200
-    but with a "text" field of the wrong shape, to drive send_to_cloud()'s own response validation."""
+    """Fake receivers (Slack/Discord/Telegram/email-via-webhook all just POST somewhere) on one
+    server, started once at module level - shared by every test that posts a note, including
+    EngineHookTests' fake-triage_engine tests."""
     posts = []
 
     def do_POST(self):
         n = int(self.headers.get("Content-Length", "0")); Sink.posts.append((self.path, self.rfile.read(n).decode()))
-        if self.path.startswith("/slow"):
-            time.sleep(5); self.send_response(200); self.end_headers(); return
         if self.path.startswith("/slack-down"):
             self.send_response(500); self.end_headers(); return
-        if self.path == "/v1/triage" and self.headers.get("Authorization") != "Bearer key-1":
-            self._json(401, {"error": "unauthorized"}); return
-        if self.path == "/quota/v1/triage":
-            self._json(429, {"error": "quota", "resets_on": "2026-10-01"}); return
-        if self.path == "/schema/v1/triage":
-            self._json(422, {"error": "schema"}); return
-        if self.path == "/refused/v1/triage":
-            self._json(422, {"error": "refused", "category": "self-harm"}); return
-        if self.path == "/model/v1/triage":
-            self._json(502, {"error": "model", "kind": "upstream-timeout"}); return
-        if self.path == "/big/v1/triage":
-            self._json(413, {"error": "too_large"}); return
-        if self.path == "/garbage/v1/triage":
-            body = b"not json"; self.send_response(200); self.send_header("Content-Length", str(len(body)))
-            self.end_headers(); self.wfile.write(body); return
-        if self.path == "/text-int/v1/triage":
-            self._json(200, {"id": "x", "text": 12345, "url": "u"}); return
-        if self.path == "/text-dict/v1/triage":
-            self._json(200, {"id": "x", "text": {"a": 1}, "url": "u"}); return
-        if self.path == "/text-list/v1/triage":
-            self._json(200, {"id": "x", "text": ["a", "b"], "url": "u"}); return
-        if self.path == "/text-blank/v1/triage":
-            self._json(200, {"id": "x", "text": "   \n\t  ", "url": "u"}); return
-        if self.path == "/text-noprefix/v1/triage":
-            self._json(200, {"id": "x", "text": "not a triage note", "url": "u"}); return
-        if self.path == "/v1/triage":
-            self._json(200, {"id": "abc", "text": "Triage: ServiceDown on api\nProbable cause\n  1. x",
-                              "url": "https://t/abc", "tier": "free", "used": 1, "limit": 50}); return
         self.send_response(200); self.send_header("Content-Length", "2"); self.end_headers(); self.wfile.write(b"ok")
-
-    def _json(self, status, obj):
-        body = json.dumps(obj).encode()
-        self.send_response(status); self.send_header("Content-Length", str(len(body))); self.end_headers(); self.wfile.write(body)
 
     def log_message(self, *a): pass
 
 
-class CloudTests(unittest.TestCase):
+def _start_sink():
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), Sink)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    return srv, "http://127.0.0.1:%d" % srv.server_address[1]
+
+
+_SINK_SRV, Sink.base = _start_sink()
+SINK = Sink   # the name used below; Sink.posts and Sink.base are both class attributes
+
+
+class PostTests(unittest.TestCase):
+    """post_note() against every configured receiver, driven directly (not through process()/the
+    triage engine) - the cloud-specific tests that used to live here (send_to_cloud, its HTTP error
+    modes, budget/dedup wiring against the cloud) are gone with send_to_cloud itself; that coverage
+    now belongs to EngineHookTests below, against the triage_engine hook."""
     @classmethod
     def setUpClass(cls):
-        cls.srv = ThreadingHTTPServer(("127.0.0.1", 0), Sink); threading.Thread(target=cls.srv.serve_forever, daemon=True).start()
-        cls.base = "http://127.0.0.1:%d" % cls.srv.server_address[1]
+        cls.base = SINK.base
         cls.agent = load_agent(cls.base, tempfile.mkdtemp())
-        os.environ.update({"TRIAGE_API_URL": cls.base, "TRIAGE_LICENSE_KEY": "key-1", "SLACK_WEBHOOK_URL": cls.base + "/slack",
-                           "DISCORD_WEBHOOK_URL": cls.base + "/discord", "TELEGRAM_BOT_TOKEN": "", "TELEGRAM_CHAT_ID": "",
-                           "ALERT_EMAIL_TO": "", "SMTP_HOST": "",
-                           # load_agent() above forces dry run back on; process()'s end-to-end tests need it off
-                           # so they actually exercise send_to_cloud() instead of short-circuiting into dry run.
+        os.environ.update({"SLACK_WEBHOOK_URL": cls.base + "/slack", "DISCORD_WEBHOOK_URL": cls.base + "/discord",
+                           "TELEGRAM_BOT_TOKEN": "", "TELEGRAM_CHAT_ID": "", "ALERT_EMAIL_TO": "", "SMTP_HOST": "",
                            "TRIAGE_DRY_RUN": "false"})
         cls.agent.TELEGRAM_API = cls.base + "/tg/bot%s/sendMessage"
 
     def setUp(self): Sink.posts = []
-
-    def test_send_and_post_to_every_configured_receiver(self):
-        note = self.agent.send_to_cloud({"schema_version": 1, "alerts": []})
-        self.assertEqual(note["id"], "abc")
-        self.agent.post_note(note["text"])
-        paths = [p for p, _ in Sink.posts]
-        self.assertIn("/slack", paths); self.assertIn("/discord", paths)
-        slack = json.loads(next(b for p, b in Sink.posts if p == "/slack"))
-        self.assertEqual(_unfenced(slack["text"]), note["text"])
-        discord = json.loads(next(b for p, b in Sink.posts if p == "/discord"))
-        self.assertEqual(_unfenced(discord["content"]), note["text"])
-        self.assertEqual(discord["allowed_mentions"], {"parse": []})
-
-    def test_bad_key_and_quota_are_logged_not_posted(self):
-        import io, contextlib
-        os.environ["TRIAGE_LICENSE_KEY"] = "wrong"
-        try: self.assertIsNone(self.agent.send_to_cloud({"schema_version": 1, "alerts": []}))
-        finally: os.environ["TRIAGE_LICENSE_KEY"] = "key-1"
-        os.environ["TRIAGE_API_URL"] = self.base + "/quota"
-        try:
-            buf = io.StringIO()
-            with contextlib.redirect_stdout(buf):
-                self.assertIsNone(self.agent.send_to_cloud({"schema_version": 1, "alerts": []}))
-            # Sink's /quota route returns {"error": "quota", "resets_on": "2026-10-01"} - the 429
-            # log line must surface resets_on so an exhausted quota is legible without a dashboard.
-            self.assertIn("error=quota resets_on=2026-10-01", buf.getvalue())
-        finally: os.environ["TRIAGE_API_URL"] = self.base
-        self.assertEqual([p for p, _ in Sink.posts if p in ("/slack", "/discord")], [])
-
-    def test_schema_refused_model_and_oversized_pack_all_return_none(self):
-        for suffix in ("/schema", "/refused", "/model", "/big", "/garbage"):
-            os.environ["TRIAGE_API_URL"] = self.base + suffix
-            try:
-                self.assertIsNone(self.agent.send_to_cloud({"schema_version": 1, "alerts": []}), suffix)
-            finally:
-                os.environ["TRIAGE_API_URL"] = self.base
-        self.assertEqual([p for p, _ in Sink.posts if p in ("/slack", "/discord")], [])
-
-    def test_a_clean_200_with_a_malformed_text_field_returns_none(self):
-        # a "text" that isn't a string, or is blank, or doesn't even look like a triage note (real
-        # notes always start "Triage:" - see engine.render on the cloud side) must not be treated as
-        # a usable note, even though the response is a clean 200.
-        for suffix in ("/text-int", "/text-dict", "/text-list", "/text-blank", "/text-noprefix"):
-            os.environ["TRIAGE_API_URL"] = self.base + suffix
-            try:
-                self.assertIsNone(self.agent.send_to_cloud({"schema_version": 1, "alerts": []}), suffix)
-            finally:
-                os.environ["TRIAGE_API_URL"] = self.base
-        self.assertEqual([p for p, _ in Sink.posts if p in ("/slack", "/discord")], [])
 
     def test_telegram_when_configured(self):
         # Telegram gets no fence (M7): no parse_mode is set, so a fence would render as three
@@ -701,79 +616,125 @@ class CloudTests(unittest.TestCase):
         rebuilt = "".join(_unfenced(json.loads(b)["content"]) for b in discord_posts)
         self.assertEqual(rebuilt, long_text)
 
-    def test_end_to_end_cloud_errors_never_post_to_a_receiver(self):
-        # drives process() itself (not send_to_cloud alone): every failure mode - bad key, quota,
-        # model error, timeout - must end with zero posts to the alert receivers.
-        for i, suffix in enumerate(("", "/quota", "/model")):
-            os.environ["TRIAGE_API_URL"] = self.base + suffix
-            os.environ["TRIAGE_LICENSE_KEY"] = "wrong" if suffix == "" else "key-1"
-            try:
-                self.agent.process({"groupKey": "e2e-error-%d" % i})
-            finally:
-                os.environ["TRIAGE_API_URL"] = self.base; os.environ["TRIAGE_LICENSE_KEY"] = "key-1"
-        real_total, real_floor = self.agent.TOTAL_TRIAGE_BUDGET, self.agent.CLOUD_TIMEOUT_FLOOR
-        self.agent.TOTAL_TRIAGE_BUDGET, self.agent.CLOUD_TIMEOUT_FLOOR = 2, 0.3
-        os.environ["TRIAGE_API_URL"] = self.base + "/slow"
+
+class EngineHookTests(unittest.TestCase):
+    """process() with a fake triage_engine module on sys.path: the agent's only contract with Pro.
+    Also covers DEDUP's wiring in process() and the budget-floor skip (M6/I3 in the old cloud
+    tests), now against the engine hook instead of a cloud HTTP call."""
+    def setUp(self):
+        self.calls = []
+        fake = types.ModuleType("triage_engine")
+        fake.LAST_ERROR = ""
+
+        def triage(pack, timeout, env, post=None):
+            self.calls.append((pack, timeout)); return self.result
+        fake.triage = triage
+        sys.modules["triage_engine"] = fake
+        # a fresh module load (not the same object load_agent() built for another test) so the
+        # `import triage_engine` at the top of triage_agent.py picks up the fake just registered,
+        # and so this test's DEDUP starts empty regardless of what other tests did with WEBHOOK's key.
+        self.agent = load_agent(SINK.base, tempfile.mkdtemp())
+        os.environ.update({"TRIAGE_DRY_RUN": "false", "SLACK_WEBHOOK_URL": SINK.base + "/slack"})
+        SINK.posts.clear()
+
+    def tearDown(self):
+        sys.modules.pop("triage_engine", None)
+        os.environ["TRIAGE_DRY_RUN"] = "true"
+
+    def test_note_from_engine_is_posted(self):
+        self.result = "Triage: x\nPack: docker compose logs triage-agent"
+        self.agent.process(WEBHOOK)
+        self.assertEqual(len(self.calls), 1)
+        self.assertLessEqual(self.calls[0][1], self.agent.TOTAL_TRIAGE_BUDGET)   # remaining budget, not a constant
+        self.assertEqual(len(SINK.posts), 1); self.assertIn("Triage: x", SINK.posts[0][1])
+
+    def test_engine_none_posts_nothing(self):
+        # spying on post_note() itself, not just SINK.posts: post_note(None) would raise inside its
+        # own per-receiver try/except (which swallows it and logs) and never reach SINK either way,
+        # so asserting on SINK.posts alone would pass even if process() wrongly called post_note.
+        self.result = None
+        posted = []
+        self.agent.post_note = posted.append
+        self.agent.process(WEBHOOK)
+        self.assertEqual(posted, [])
+        self.assertEqual(SINK.posts, [])
+
+    def test_dry_run_never_calls_engine(self):
+        os.environ["TRIAGE_DRY_RUN"] = "true"; self.result = "Triage: x"
+        self.agent.process(WEBHOOK)
+        self.assertEqual(self.calls, []); self.assertEqual(SINK.posts, [])
+
+    def test_budget_below_the_floor_skips_the_engine_call(self):
+        # deterministic, no sleeping: replace Budget itself (both process()'s own budget and the one
+        # build_pack() constructs internally use the module-global name) with a fake whose
+        # .remaining() always answers a fixed number, so this test isn't a race against real time.
+        self.result = "Triage: x"
+        floor = self.agent.CLOUD_TIMEOUT_FLOOR
+        real_budget_cls = self.agent.Budget
+
+        class BelowFloorBudget:
+            def __init__(self, seconds): pass
+            def remaining(self): return floor - 1   # always under CLOUD_TIMEOUT_FLOOR
+
+        self.agent.Budget = BelowFloorBudget
         try:
-            self.agent.process({"groupKey": "e2e-error-timeout"})
+            self.agent.process(WEBHOOK)
         finally:
-            self.agent.TOTAL_TRIAGE_BUDGET, self.agent.CLOUD_TIMEOUT_FLOOR = real_total, real_floor
-            os.environ["TRIAGE_API_URL"] = self.base
-        self.assertEqual([p for p, _ in Sink.posts if p in ("/slack", "/discord")], [])
+            self.agent.Budget = real_budget_cls
+        self.assertEqual(self.calls, [], "the engine must not be called once the budget is below the floor")
+        self.assertEqual(SINK.posts, [])
 
-    def test_budget_floor_caps_the_cloud_timeout_so_process_returns_promptly(self):
-        # sources taking ~1s, then a sink that sleeps well past the remaining budget: process() must
-        # still return in bounded time (not hang for the sink's full sleep) and post nothing. The
-        # bound is expressed against the *scaled* budget used in this test, not a literal "45" -
-        # a hardcoded 45s ceiling would pass even if the timeout math stopped bounding anything.
-        real_total, real_floor = self.agent.TOTAL_TRIAGE_BUDGET, self.agent.CLOUD_TIMEOUT_FLOOR
-        real_build_pack = self.agent.build_pack
-        scaled_budget = 2
-        self.agent.TOTAL_TRIAGE_BUDGET, self.agent.CLOUD_TIMEOUT_FLOOR = scaled_budget, 0.5
+        # same setup, budget comfortably above the floor: the call (and the post) must happen -
+        # proves the assertions above aren't vacuously true regardless of what process() does.
+        class AboveFloorBudget:
+            def __init__(self, seconds): pass
+            def remaining(self): return floor + 5
 
-        def slow_build_pack(payload):
-            time.sleep(1)
-            return {"schema_version": 1, "alerts": []}
-        self.agent.build_pack = slow_build_pack
-        os.environ["TRIAGE_API_URL"] = self.base + "/slow"
+        self.agent.Budget = AboveFloorBudget
         try:
-            start = time.monotonic()
-            self.agent.process({"groupKey": "budget-floor-test"})
-            elapsed = time.monotonic() - start
-            self.assertLess(elapsed, scaled_budget + 1.5,
-                             "process() must never run out past its own (scaled) total triage budget")
-            self.assertEqual([p for p, _ in Sink.posts if p in ("/slack", "/discord")], [])
+            self.agent.process(dict(WEBHOOK, groupKey="budget-above-floor-test"))
         finally:
-            self.agent.TOTAL_TRIAGE_BUDGET, self.agent.CLOUD_TIMEOUT_FLOOR = real_total, real_floor
-            self.agent.build_pack = real_build_pack
-            os.environ["TRIAGE_API_URL"] = self.base
+            self.agent.Budget = real_budget_cls
+        self.assertEqual(len(self.calls), 1)
+        self.assertEqual(len(SINK.posts), 1)
 
-    def test_budget_exhausted_before_the_floor_skips_the_cloud_call_entirely(self):
-        # once less than CLOUD_TIMEOUT_FLOOR remains, process() must not extend the budget to give
-        # the cloud call a fairer chance - it must skip the call outright.
-        real_total, real_floor = self.agent.TOTAL_TRIAGE_BUDGET, self.agent.CLOUD_TIMEOUT_FLOOR
-        self.agent.TOTAL_TRIAGE_BUDGET, self.agent.CLOUD_TIMEOUT_FLOOR = 5, 10  # floor exceeds the whole budget
+    def test_no_engine_module_logs_pack_only(self):
+        sys.modules.pop("triage_engine"); sys.modules["triage_engine"] = None   # import raises ImportError
+        agent = load_agent(SINK.base, tempfile.mkdtemp())
+        os.environ["TRIAGE_DRY_RUN"] = "false"   # load_agent() above forced dry run back on
+        agent.process(WEBHOOK)
+        self.assertEqual(SINK.posts, [])
+
+    def test_api_key_is_redacted_from_packs(self):
+        p = self.agent.redact({"logs": ["x-api-key: sk-ant-abc123 sk-ant-api03-zzz"]})
+        self.assertNotIn("abc123", json.dumps(p)); self.assertNotIn("zzz", json.dumps(p))
+
+    def test_log_pack_env_controls_the_stdout_pack_line_in_live_mode(self):
+        # R1: TRIAGE_LOG_PACK=true prints the pack (for Task 3's smoke test to capture) right before
+        # the engine call, and the note is still posted; the default (false) stays silent.
+        import io, contextlib
+        self.result = "Triage: x"
+        os.environ["TRIAGE_LOG_PACK"] = "true"
+        buf = io.StringIO()
         try:
-            self.agent.process({"groupKey": "budget-exhausted-test"})
-            self.assertEqual([p for p, _ in Sink.posts if p == "/v1/triage"], [],
-                              "the cloud must not be called once too little budget remains to bother")
+            with contextlib.redirect_stdout(buf):
+                self.agent.process(WEBHOOK)
         finally:
-            self.agent.TOTAL_TRIAGE_BUDGET, self.agent.CLOUD_TIMEOUT_FLOOR = real_total, real_floor
+            os.environ["TRIAGE_LOG_PACK"] = "false"
+        out = buf.getvalue()
+        self.assertTrue(any(l.startswith("{") and json.loads(l).get("schema_version") == 1 for l in out.splitlines()),
+                         "TRIAGE_LOG_PACK=true must print the pack before the engine call")
+        self.assertEqual(len(SINK.posts), 1, "the note must still be posted")
 
-    def test_a_second_process_call_for_the_same_group_never_reaches_the_cloud(self):
-        # M6: drives process() itself twice, so this exercises DEDUP's wiring in process() (the
-        # `if DEDUP.seen(key): return` guard), not the Dedup class in isolation - which is what
-        # test_dedup_within_an_hour above already covers and what left this gap unnoticed. Mutating
-        # that guard to `if False:` leaves every other test green because none of them call
-        # process() twice for the same group.
-        key = "m6-dedup-wiring-test"
-        self.agent.process({"groupKey": key})
-        first_call_posts = list(Sink.posts)
-        self.assertIn("/v1/triage", [p for p, _ in first_call_posts], "the first call must reach the cloud")
-        self.assertIn("/slack", [p for p, _ in first_call_posts], "the first call must post the note")
-        self.agent.process({"groupKey": key})
-        self.assertEqual(Sink.posts, first_call_posts,
-                          "a repeat for an already-triaged group must not call the cloud or post again")
+        SINK.posts.clear()
+        buf2 = io.StringIO()
+        with contextlib.redirect_stdout(buf2):
+            # a different group so DEDUP (already marked WEBHOOK's key above) doesn't short-circuit
+            # this into a no-op that would trivially pass regardless of TRIAGE_LOG_PACK
+            self.agent.process(dict(WEBHOOK, groupKey="log-pack-default-test"))
+        self.assertFalse(any(l.startswith("{") for l in buf2.getvalue().splitlines()),
+                          "TRIAGE_LOG_PACK default (false) must not print the pack")
+        self.assertEqual(len(SINK.posts), 1, "the note must still be posted without pack logging")
 
 
 if __name__ == "__main__":
