@@ -41,6 +41,10 @@ FENCE_OPEN, FENCE_CLOSE = "```\n", "\n```"   # wraps the note so Slack/Discord r
                                               # code block there - see post_note()'s telegram().
 FENCE_CHARS = len(FENCE_OPEN) + len(FENCE_CLOSE)
 ENV = os.environ.get
+# Discord (behind Cloudflare) rejects the default "Python-urllib/3.x" User-Agent with 403 error 1010,
+# so every note to a Discord webhook was lost until the first live dogfood on 2026-09-19. Slack and
+# Telegram do not care, but one identity on every outbound request is cheaper than remembering which.
+USER_AGENT = "sre-starter-kit-triage-agent/1 (+https://github.com/nhanlagc60299/sre-starter-kit)"
 TELEGRAM_API = "https://api.telegram.org/bot%s/sendMessage"
 # Value matcher excludes whitespace/quote/comma/semicolon/close-paren so it stops at the end of a
 # quoted JSON value or a comma-separated field instead of swallowing whatever follows.
@@ -91,7 +95,7 @@ class Budget:
 def get_json(url, headers=None, timeout=SOURCE_TIMEOUT):
     """GET and parse JSON; None on any failure. Never raises: every source is optional."""
     try:
-        req = urllib.request.Request(url, headers=headers or {})
+        req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT, **(headers or {})})
         with urllib.request.urlopen(req, timeout=timeout) as r:
             return json.loads(r.read().decode())
     except Exception as e:  # noqa: BLE001 - a dead upstream must not kill the triage
@@ -343,7 +347,7 @@ DEDUP = Dedup()
 
 def post_json(url, body, headers=None, timeout=45):
     data = json.dumps(body).encode()
-    req = urllib.request.Request(url, data=data, headers={"Content-Type": "application/json", **(headers or {})})
+    req = urllib.request.Request(url, data=data, headers={"Content-Type": "application/json", "User-Agent": USER_AGENT, **(headers or {})})
     with urllib.request.urlopen(req, timeout=timeout) as r:
         return r.status, r.read().decode("utf-8", "replace")
 

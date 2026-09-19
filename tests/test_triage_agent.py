@@ -496,7 +496,7 @@ class Sink(BaseHTTPRequestHandler):
     posts = []
 
     def do_POST(self):
-        n = int(self.headers.get("Content-Length", "0")); Sink.posts.append((self.path, self.rfile.read(n).decode()))
+        n = int(self.headers.get("Content-Length", "0")); Sink.posts.append((self.path, self.rfile.read(n).decode(), dict(self.headers)))
         if self.path.startswith("/slack-down"):
             self.send_response(500); self.end_headers(); return
         self.send_response(200); self.send_header("Content-Length", "2"); self.end_headers(); self.wfile.write(b"ok")
@@ -536,7 +536,7 @@ class PostTests(unittest.TestCase):
         os.environ.update({"TELEGRAM_BOT_TOKEN": "t0k", "TELEGRAM_CHAT_ID": "-100"})
         try:
             self.agent.post_note("Triage: x")
-            tg = next((p, b) for p, b in Sink.posts if p.startswith("/tg/"))
+            tg = next((p, b) for p, b, _ in Sink.posts if p.startswith("/tg/"))
             self.assertEqual(tg[0], "/tg/bott0k/sendMessage")
             body = json.loads(tg[1])
             self.assertEqual(body["chat_id"], "-100")
@@ -549,7 +549,7 @@ class PostTests(unittest.TestCase):
         try:
             long_text = "Triage: " + ("y" * 4992)  # 5000 chars total
             self.agent.post_note(long_text)
-            tg_posts = [b for p, b in Sink.posts if p.startswith("/tg/")]
+            tg_posts = [b for p, b, _ in Sink.posts if p.startswith("/tg/")]
             self.assertEqual(len(tg_posts), 2)
             for b in tg_posts:
                 self.assertLessEqual(len(json.loads(b)["text"]), 4096)
@@ -600,15 +600,24 @@ class PostTests(unittest.TestCase):
         os.environ["SLACK_WEBHOOK_URL"] = self.base + "/slack-down"
         try:
             self.agent.post_note("Triage: slack is down but discord should still get this")
-            discord = next((b for p, b in Sink.posts if p == "/discord"), None)
+            discord = next((b for p, b, _ in Sink.posts if p == "/discord"), None)
             self.assertIsNotNone(discord)
         finally:
             os.environ["SLACK_WEBHOOK_URL"] = self.base + "/slack"
 
+    def test_every_receiver_post_carries_the_agent_user_agent(self):
+        # Discord's edge (Cloudflare) answers 403 to urllib's default User-Agent; a real dogfood on
+        # 2026-09-19 lost every note that way while the fake sink in the smoke happily accepted them.
+        SINK.posts.clear()
+        self.agent.post_note("Triage: x\nPack: docker compose logs triage-agent")
+        self.assertTrue(SINK.posts)
+        for path, body, headers in SINK.posts:
+            self.assertEqual(headers.get("User-Agent"), self.agent.USER_AGENT, path)
+
     def test_discord_splits_a_note_over_2000_chars(self):
         long_text = "Triage: " + ("x" * 2500)
         self.agent.post_note(long_text)
-        discord_posts = [b for p, b in Sink.posts if p == "/discord"]
+        discord_posts = [b for p, b, _ in Sink.posts if p == "/discord"]
         self.assertEqual(len(discord_posts), 2)
         for b in discord_posts:
             content = json.loads(b)["content"]
