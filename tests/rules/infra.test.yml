@@ -16,6 +16,7 @@ tests:
         exp_alerts:
           - exp_labels: { severity: critical, module: infra, job: node, instance: n1 }
             exp_annotations:
+              dashboard: sre-node
               summary: "Node n1 is down"
               runbook_url: https://github.com/nhanlagc60299/sre-starter-kit/blob/main/docs/ALERTS.md#nodedown
       - eval_time: 5m
@@ -23,6 +24,7 @@ tests:
         exp_alerts:
           - exp_labels: { severity: critical, module: infra, job: node, instance: n1, mountpoint: "/", fstype: ext4 }
             exp_annotations:
+              dashboard: sre-node
               summary: "Disk / on n1 has 4% free"
               runbook_url: https://github.com/nhanlagc60299/sre-starter-kit/blob/main/docs/ALERTS.md#diskfull
   - interval: 1m
@@ -75,6 +77,7 @@ tests:
         exp_alerts:
           - exp_labels: { severity: warning, module: infra, job: cadvisor, name: hog }
             exp_annotations:
+              dashboard: sre-overview
               summary: "Container hog is at 84.94% of its memory limit"
               runbook_url: https://github.com/nhanlagc60299/sre-starter-kit/blob/main/docs/ALERTS.md#containermemorynearlimit
   # ContainerMetricsMissing. The failure it exists for is silent: cAdvisor up, target UP, series
@@ -103,6 +106,7 @@ tests:
         exp_alerts:
           - exp_labels: { severity: critical, module: infra, job: cadvisor, instance: "cadvisor:8080" }
             exp_annotations:
+              dashboard: sre-overview
               summary: "cAdvisor is up but reporting no containers; every container alert is blind"
               runbook_url: https://github.com/nhanlagc60299/sre-starter-kit/blob/main/docs/ALERTS.md#containermetricsmissing
   # (b) cAdvisor up and reporting a container: must stay quiet. This is the case that fails if
@@ -154,6 +158,7 @@ tests:
         exp_alerts:
           - exp_labels: { severity: critical, module: infra, job: cadvisor, name: looper }
             exp_annotations:
+              dashboard: sre-overview
               summary: "Container looper restarted >3 times in 15m"
               runbook_url: https://github.com/nhanlagc60299/sre-starter-kit/blob/main/docs/ALERTS.md#containerrestartloop
   # ContainerAtMemoryCeiling. `pinned` hits its limit continuously; `blip` hits it once and stops,
@@ -182,5 +187,6 @@ tests:
         exp_alerts:
           - exp_labels: { severity: warning, module: infra, job: cadvisor, name: pinned }
             exp_annotations:
+              dashboard: sre-overview
               summary: "Container pinned has been hitting its memory limit for 15m"
               runbook_url: https://github.com/nhanlagc60299/sre-starter-kit/blob/main/docs/ALERTS.md#containeratmemoryceiling

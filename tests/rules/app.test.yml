@@ -23,6 +23,7 @@ tests:
         exp_alerts:
           - exp_labels: { severity: critical, module: app, job: blackbox-http, service: api, instance: "http://api/health" }
             exp_annotations:
+              dashboard: sre-app
               summary: "Service api is DOWN (http://api/health)"
               runbook_url: https://github.com/nhanlagc60299/sre-starter-kit/blob/main/docs/ALERTS.md#servicedown
       - eval_time: 6m
@@ -30,6 +31,7 @@ tests:
         exp_alerts:
           - exp_labels: { severity: critical, module: app, job: blackbox, instance: "blackbox:9115" }
             exp_annotations:
+              dashboard: sre-app
               summary: "Blackbox exporter is down - service probes are not running"
               runbook_url: https://github.com/nhanlagc60299/sre-starter-kit/blob/main/docs/ALERTS.md#blackboxexporterdown
       - eval_time: 2m
@@ -37,6 +39,7 @@ tests:
         exp_alerts:
           - exp_labels: { severity: warning, module: app, job: blackbox-http, service: api, instance: "http://api/health" }
             exp_annotations:
+              dashboard: sre-app
               summary: "TLS cert for api expires in less than 7 days"
               runbook_url: https://github.com/nhanlagc60299/sre-starter-kit/blob/main/docs/ALERTS.md#certexpiresin7d
       - eval_time: 10m
@@ -44,6 +47,7 @@ tests:
         exp_alerts:
           - exp_labels: { severity: critical, module: app, service: api }
             exp_annotations:
+              dashboard: sre-app
               summary: "api 5xx rate is 50% over 5m"
               runbook_url: https://github.com/nhanlagc60299/sre-starter-kit/blob/main/docs/ALERTS.md#higherrorrate
 
@@ -82,6 +86,7 @@ tests:
         exp_alerts:
           - exp_labels: { severity: warning, module: app, service: slow }
             exp_annotations:
+              dashboard: sre-app
               summary: "slow 5xx rate is 2.0% over 15m"
               runbook_url: https://github.com/nhanlagc60299/sre-starter-kit/blob/main/docs/ALERTS.md#elevatederrorrate
       - eval_time: 15m
@@ -89,6 +94,7 @@ tests:
         exp_alerts:
           - exp_labels: { severity: warning, module: app, service: slow }
             exp_annotations:
+              dashboard: sre-app
               summary: "slow p95 latency is 2.41s"
               runbook_url: https://github.com/nhanlagc60299/sre-starter-kit/blob/main/docs/ALERTS.md#highp95latency
 
@@ -106,5 +112,6 @@ tests:
         exp_alerts:
           - exp_labels: { severity: critical, module: app, job: blackbox, instance: "blackbox:9115" }
             exp_annotations:
+              dashboard: sre-app
               summary: "Blackbox exporter is down - service probes are not running"
               runbook_url: https://github.com/nhanlagc60299/sre-starter-kit/blob/main/docs/ALERTS.md#blackboxexporterdown
