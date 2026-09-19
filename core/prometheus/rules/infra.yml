@@ -6,6 +6,7 @@ groups:
         for: 2m
         labels: { severity: critical, module: infra }
         annotations:
+          dashboard: sre-node
           summary: "Node {{ $labels.instance }} is down"
           runbook_url: https://github.com/nhanlagc60299/sre-starter-kit/blob/main/docs/ALERTS.md#nodedown
 
@@ -14,6 +15,7 @@ groups:
         for: 2m
         labels: { severity: critical, module: infra }
         annotations:
+          dashboard: sre-node
           summary: "Disk {{ $labels.mountpoint }} on {{ $labels.instance }} has {{ $value | printf \"%.0f\" }}% free"
           runbook_url: https://github.com/nhanlagc60299/sre-starter-kit/blob/main/docs/ALERTS.md#diskfull
 
@@ -22,6 +24,7 @@ groups:
         for: 10m
         labels: { severity: warning, module: infra }
         annotations:
+          dashboard: sre-node
           summary: "Disk {{ $labels.mountpoint }} on {{ $labels.instance }} has {{ $value | printf \"%.0f\" }}% free"
           runbook_url: https://github.com/nhanlagc60299/sre-starter-kit/blob/main/docs/ALERTS.md#disklow
 
@@ -30,6 +33,7 @@ groups:
         for: 30m
         labels: { severity: warning, module: infra }
         annotations:
+          dashboard: sre-node
           summary: "Disk {{ $labels.mountpoint }} on {{ $labels.instance }} will fill within 24h"
           runbook_url: https://github.com/nhanlagc60299/sre-starter-kit/blob/main/docs/ALERTS.md#diskwillfillin24h
 
@@ -38,6 +42,7 @@ groups:
         for: 15m
         labels: { severity: warning, module: infra }
         annotations:
+          dashboard: sre-node
           summary: "CPU on {{ $labels.instance }} above 85% for 15m"
           runbook_url: https://github.com/nhanlagc60299/sre-starter-kit/blob/main/docs/ALERTS.md#highcpu
 
@@ -46,6 +51,7 @@ groups:
         for: 10m
         labels: { severity: warning, module: infra }
         annotations:
+          dashboard: sre-node
           summary: "Memory on {{ $labels.instance }} above 90% for 10m"
           runbook_url: https://github.com/nhanlagc60299/sre-starter-kit/blob/main/docs/ALERTS.md#highmemory
 
@@ -64,6 +70,7 @@ groups:
         for: 5m
         labels: { severity: critical, module: infra }
         annotations:
+          dashboard: sre-overview
           summary: "cAdvisor is up but reporting no containers; every container alert is blind"
           runbook_url: https://github.com/nhanlagc60299/sre-starter-kit/blob/main/docs/ALERTS.md#containermetricsmissing
 
@@ -81,6 +88,7 @@ groups:
         expr: changes(container_start_time_seconds{name!=""}[15m]) > 3
         labels: { severity: critical, module: infra }
         annotations:
+          dashboard: sre-overview
           summary: "Container {{ $labels.name }} restarted >3 times in 15m"
           runbook_url: https://github.com/nhanlagc60299/sre-starter-kit/blob/main/docs/ALERTS.md#containerrestartloop
 
@@ -102,6 +110,7 @@ groups:
         for: 15m
         labels: { severity: warning, module: infra }
         annotations:
+          dashboard: sre-overview
           summary: "Container {{ $labels.name }} has been hitting its memory limit for 15m"
           runbook_url: https://github.com/nhanlagc60299/sre-starter-kit/blob/main/docs/ALERTS.md#containeratmemoryceiling
 
@@ -119,5 +128,6 @@ groups:
         for: 10m
         labels: { severity: warning, module: infra }
         annotations:
+          dashboard: sre-overview
           summary: "Container {{ $labels.name }} is at {{ $value | humanizePercentage }} of its memory limit"
           runbook_url: https://github.com/nhanlagc60299/sre-starter-kit/blob/main/docs/ALERTS.md#containermemorynearlimit

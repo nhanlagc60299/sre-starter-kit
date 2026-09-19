@@ -87,6 +87,7 @@ services:
     environment:
       GF_SECURITY_ADMIN_PASSWORD: "${GRAFANA_ADMIN_PASSWORD}"
       GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /var/lib/grafana/dashboards/overview.json   # log in, land on Overview
     volumes:
       - ../build/grafana/provisioning:/etc/grafana/provisioning:ro
       - ../build/grafana/dashboards:/var/lib/grafana/dashboards:ro

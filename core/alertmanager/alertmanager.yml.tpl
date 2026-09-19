@@ -42,7 +42,7 @@ receivers:
         title: ':red_circle: [${PROJECT_NAME}] {{ .CommonLabels.alertname }}'
         text: >-
           {{ range .Alerts }}*{{ .Annotations.summary }}*
-          <{{ .Annotations.runbook_url }}|runbook>
+          <{{ .Annotations.runbook_url }}|runbook> · <${GRAFANA_EXTERNAL_URL}/d/{{ .Annotations.dashboard }}|dashboard>
           {{ end }}
     # RECEIVERS_CRITICAL_EXTRA
   - name: warning
@@ -51,7 +51,7 @@ receivers:
         send_resolved: true
         title: ':large_yellow_circle: [${PROJECT_NAME}] {{ .CommonLabels.alertname }}'
         text: >-
-          {{ range .Alerts }}{{ .Annotations.summary }} <{{ .Annotations.runbook_url }}|runbook>
+          {{ range .Alerts }}{{ .Annotations.summary }} <{{ .Annotations.runbook_url }}|runbook> · <${GRAFANA_EXTERNAL_URL}/d/{{ .Annotations.dashboard }}|dashboard>
           {{ end }}
     # RECEIVERS_WARNING_EXTRA
   - name: webhook-triage

@@ -6,6 +6,7 @@ groups:
         for: 2m
         labels: { severity: critical, module: app }
         annotations:
+          dashboard: sre-app
           summary: "Service {{ $labels.service }} is DOWN ({{ $labels.instance }})"
           runbook_url: https://github.com/nhanlagc60299/sre-starter-kit/blob/main/docs/ALERTS.md#servicedown
 
@@ -17,6 +18,7 @@ groups:
         for: 5m
         labels: { severity: critical, module: app }
         annotations:
+          dashboard: sre-app
           summary: "Blackbox exporter is down - service probes are not running"
           runbook_url: https://github.com/nhanlagc60299/sre-starter-kit/blob/main/docs/ALERTS.md#blackboxexporterdown
 
@@ -25,6 +27,7 @@ groups:
         for: 1m
         labels: { severity: warning, module: app }
         annotations:
+          dashboard: sre-app
           summary: "TLS cert for {{ $labels.service }} expires in less than 7 days"
           runbook_url: https://github.com/nhanlagc60299/sre-starter-kit/blob/main/docs/ALERTS.md#certexpiresin7d
 
@@ -37,6 +40,7 @@ groups:
         for: 5m
         labels: { severity: critical, module: app }
         annotations:
+          dashboard: sre-app
           summary: "{{ $labels.service }} 5xx rate is {{ $value | printf \"%.0f\" }}% over 5m"
           runbook_url: https://github.com/nhanlagc60299/sre-starter-kit/blob/main/docs/ALERTS.md#higherrorrate
 
@@ -47,6 +51,7 @@ groups:
         for: 15m
         labels: { severity: warning, module: app }
         annotations:
+          dashboard: sre-app
           summary: "{{ $labels.service }} 5xx rate is {{ $value | printf \"%.1f\" }}% over 15m"
           runbook_url: https://github.com/nhanlagc60299/sre-starter-kit/blob/main/docs/ALERTS.md#elevatederrorrate
 
@@ -56,5 +61,6 @@ groups:
         for: 10m
         labels: { severity: warning, module: app }
         annotations:
+          dashboard: sre-app
           summary: "{{ $labels.service }} p95 latency is {{ $value | printf \"%.2f\" }}s"
           runbook_url: https://github.com/nhanlagc60299/sre-starter-kit/blob/main/docs/ALERTS.md#highp95latency

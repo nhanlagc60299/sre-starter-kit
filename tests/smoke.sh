@@ -162,4 +162,7 @@ assert any(a["labels"]["alertname"]=="ServiceDown" for a in p["firing"]), "firin
 print("smoke: up{instance=<probe url>} = %r" % (p["up"],))
 print("smoke: triage pack ok, %d bytes, sources %s" % (len(open(sys.argv[1]).read()), p["sources"]))
 PY
+# UX: logging in lands on Overview and every dashboard carries the SRE Kit dropdown.
+curl -sf -u "admin:smoke" "$H:3000/api/dashboards/home" | grep -q '"uid":"sre-overview"' || { echo "FAIL: Grafana home is not the Overview dashboard"; exit 1; }
+echo "smoke: grafana home is Overview"
 echo "smoke OK: all targets up"

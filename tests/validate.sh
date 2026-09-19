@@ -8,8 +8,15 @@ fail=0
 ${CONTAINER_ENGINE:-docker} run --rm -v "$PWD/core/prometheus/rules:/r" --entrypoint promtool $PROM_IMG check rules /r/infra.yml /r/app.yml || fail=1
 # 2. every alert has severity, module, runbook_url
 python3 - <<'PY' || fail=1
-import yaml,glob,sys
+import yaml,glob,sys,json
 bad=[]
+# every dashboard is tagged sre-kit and carries the SRE Kit dropdown; every alert names one of them
+dash={}
+for d in glob.glob("core/grafana/dashboards/*.json"):
+    j=json.load(open(d)); dash[j["uid"]]=j
+    if "sre-kit" not in (j.get("tags") or []): bad.append(f"{d}: missing tag sre-kit (the SRE Kit dropdown lists by tag)")
+    if not any(l.get("type")=="dashboards" and "sre-kit" in (l.get("tags") or []) for l in (j.get("links") or [])): bad.append(f"{d}: missing the SRE Kit dashboards link")
+assert dash, "no dashboards"
 files=glob.glob("core/prometheus/rules/*.yml")+glob.glob("core/loki/rules/fake/*.yml")
 assert files, "no rule files found"
 for f in files:
@@ -19,7 +26,8 @@ for f in files:
             l=r.get("labels",{}); a=r.get("annotations",{})
             if l.get("severity") not in ("critical","warning") or "module" not in l or "runbook_url" not in a:
                 bad.append(f"{f}:{r['alert']}")
-if bad: print("alerts missing severity/module/runbook_url:", *bad, sep="\n  "); sys.exit(1)
+            if a.get("dashboard") not in dash: bad.append(f"{f}:{r['alert']}: annotations.dashboard must name a shipped dashboard uid, got {a.get('dashboard')!r}")
+if bad: print("alerts missing severity/module/runbook_url/dashboard, or a dashboard without tag/link:", *bad, sep="\n  "); sys.exit(1)
 PY
 # 2b. every runbook_url resolves to a heading in docs/ALERTS.md
 python3 - <<'EOPY' || fail=1

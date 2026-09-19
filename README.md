@@ -38,6 +38,9 @@ ssh -L 3000:127.0.0.1:3000 you@your-host   # then http://localhost:3000
 Only set `BIND_ADDR=0.0.0.0` if a reverse proxy in front of the host is doing the authentication.
 
 Every alert links back to Alertmanager at `ALERTMANAGER_EXTERNAL_URL`; set it to whatever your team can actually open, the default is only right on the monitoring host itself.
+`GRAFANA_EXTERNAL_URL` (default `http://localhost:3000`) is the dashboard link on every alert: each
+alert names the dashboard for its module, next to the runbook. Grafana opens on Overview after login,
+and every dashboard carries an "SRE Kit" dropdown listing the others.
 
 **node-exporter (9100) is the exception, and it is deliberate.** It runs in the host network
 namespace (`network_mode: host`) because `/proc/net` is namespace-scoped at read time: a
