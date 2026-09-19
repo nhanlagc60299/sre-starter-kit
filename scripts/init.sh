@@ -66,23 +66,17 @@ if [ -n "$ALERT_EMAIL_TO" ]; then
   ask SMTP_USER "SMTP username (empty = no auth)" "$SMTP_FROM"
   [ -n "$SMTP_USER" ] && ask_secret SMTP_PASSWORD "SMTP password"
 fi
-# AI triage: a copy of every critical alert goes to the triage agent (profile "triage"), which
-# gathers context from this stack. Without both a licence key and a service URL it only prints
-# that context pack to its own log (dry run) so you can see exactly what would leave your network.
-# With both set, the agent sends the pack to your triage service and posts the note it returns to
-# your configured receivers.
+# The free tier always runs the agent in dry run; AI notes are a Pro feature.
 # The re-run default is probed from TRIAGE_WEBHOOK_URL, not COMPOSE_PROFILES: the cAdvisor
 # question above already overwrote COMPOSE_PROFILES by the time we get here.
 case "${TRIAGE_WEBHOOK_URL:-}" in http://triage-agent:9096/alert) tri_default=y ;; *) tri_default=n ;; esac
 ask TRIAGE_ANS "Enable AI triage notes for critical alerts? (y/n)" "$tri_default"
 case "$TRIAGE_ANS" in y|Y|yes|YES)
   COMPOSE_PROFILES="${COMPOSE_PROFILES:+$COMPOSE_PROFILES,}triage"
-  TRIAGE_WEBHOOK_URL=http://triage-agent:9096/alert
-  ask_secret TRIAGE_LICENSE_KEY "Triage licence key (empty = dry run: the pack is only printed to the agent's log)"
-  ask TRIAGE_API_URL "Triage service URL (from your Gumroad purchase; empty = dry run)" "${TRIAGE_API_URL:-}"
-  [ -n "${TRIAGE_LICENSE_KEY:-}" ] && [ -n "${TRIAGE_API_URL:-}" ] && TRIAGE_DRY_RUN=false || TRIAGE_DRY_RUN=true ;;
-*) TRIAGE_WEBHOOK_URL=http://localhost:9/; TRIAGE_DRY_RUN=true ;;
+  TRIAGE_WEBHOOK_URL=http://triage-agent:9096/alert ;;
+*) TRIAGE_WEBHOOK_URL=http://localhost:9/ ;;
 esac
+TRIAGE_DRY_RUN=true
 # Telegram needs both the bot token and the chat id to actually notify anyone; the token alone
 # is not a usable receiver, so it does not count towards "at least one" below.
 tg=""; [ -n "${TELEGRAM_BOT_TOKEN:-}" ] && [ -n "${TELEGRAM_CHAT_ID:-}" ] && tg=1
@@ -104,8 +98,6 @@ SMTP_USER=$(q "${SMTP_USER:-}")
 SMTP_PASSWORD=$(q "${SMTP_PASSWORD:-}")
 TRIAGE_WEBHOOK_URL=$(q "${TRIAGE_WEBHOOK_URL:-http://localhost:9/}")
 TRIAGE_DRY_RUN=$(q "${TRIAGE_DRY_RUN:-true}")
-TRIAGE_LICENSE_KEY=$(q "${TRIAGE_LICENSE_KEY:-}")
-TRIAGE_API_URL=$(q "${TRIAGE_API_URL:-}")
 TRIAGE_REDACT=$(q "${TRIAGE_REDACT:-}")
 SERVICES=$(q "${SERVICES:-}")
 DISK_WARN_PCT=$(q "$DISK_WARN_PCT")

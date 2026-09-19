@@ -52,11 +52,12 @@ Full runbooks with causes, mitigation and root-cause fixes are the paid tier's d
 `scripts/triage_agent.py` (stdlib only, Python 3.12) is the compose service `triage-agent`, switched
 on by the `triage` profile -- `scripts/init.sh`'s last wizard question, after email. It receives a
 copy of every critical alert from Alertmanager's `webhook-triage` route, gathers a redacted context
-pack from this stack's own services, and either prints it (dry run, the default) or sends it to the
-hosted triage service and posts the note it returns to the same receivers Alertmanager uses. Both
-`TRIAGE_LICENSE_KEY` and `TRIAGE_API_URL` must be set to turn dry run off; either alone leaves it on.
-Its tests are `tests/test_triage_agent.sh`, which drives `tests/test_triage_agent.py` against fake
-upstreams (no containers needed) -- `tests/smoke.sh` is the one place its packs meet the real stack.
+pack from this stack's own services, and prints it (dry run) -- free is dry-run only. `triage_engine.py`
+exists only in Pro (it is what turns the pack into a model call and a posted note); the agent imports
+it if present and otherwise stays in dry run. Keep the agent byte-identical to Pro's copy of the same
+file. Its tests are `tests/test_triage_agent.sh`, which drives `tests/test_triage_agent.py` against
+fake upstreams (no containers needed) -- `tests/smoke.sh` is the one place its packs meet the real
+stack.
 
 ## Running the tests
 
