@@ -200,7 +200,7 @@
   .proof { background: var(--panel); padding: 20px 22px; }
   .proof h3 { font-size: 17px; font-weight: 600; letter-spacing: -.01em; }
   .proof p { margin: 7px 0 0; color: var(--ink-soft); font-size: 15.5px; }
-  .proof pre {
+  .proof pre, .note-sample {
     margin: 13px 0 0; padding: 12px 14px; background: var(--shade);
     border-left: 2px solid var(--critical);
     font-family: "IBM Plex Mono", monospace; font-size: 12.5px; line-height: 1.55;
@@ -461,6 +461,49 @@
         <a class="btn" href="https://lagcian.gumroad.com/l/sre-starter-kit-pro">Buy for $199</a>
       </div>
     </div>
+  </div>
+</section>
+
+<section id="ai-triage" style="background: var(--shade); border-block: 1px solid var(--rule);">
+  <div class="wrap">
+    <p class="eyebrow">Add-on</p>
+    <h2>AI triage notes</h2>
+    <p class="section-intro">
+      When a critical alert fires, a small agent already in the kit gathers the firing rule's numbers,
+      a 30-minute trend, the last error log lines, and any deploy from the last 2 hours, then posts a
+      short triage note back to your Slack, Discord, Telegram, or email: probable cause with the
+      numbers or log lines it rests on, whether a deploy lines up, what to check first, and what it did
+      not see. It runs in <code>TRIAGE_DRY_RUN</code> mode by default, so you see exactly what it would
+      send before anything leaves your network. Context is redacted at the agent (tokens, passwords,
+      emails, webhook URLs) before it goes anywhere.
+    </p>
+    <p>
+      <a href="https://lagcian.gumroad.com/l/sre-triage-free">Free plan</a>: 10 triage notes/month.<br>
+      <a href="https://lagcian.gumroad.com/l/sre-triage-team">Team plan</a>: $49/month, 300 triage notes/month, stops when
+      exhausted, never a surprise bill, cancel any time.
+    </p>
+    <p>Not supported in year one: Alertmanagers outside the kit, self-hosting, chat back-and-forth with
+      the note, automatic actions.</p>
+
+    <h3>Sample note</h3>
+    <pre class="note-sample">
+Triage: PostgresConnectionsHigh on db-1        (confidence: medium)
+
+Probable cause
+  1. Connection pool exhausted after deploy of api v2.14 at 01:47 - numbackends went 40->95 in 6 min,
+     3 min after the deploy annotation. Logs: 17x "remaining connection slots are reserved".
+  2. Less likely: batch job - no queue-related alerts firing, queue metrics flat.
+
+Also firing: PostgresIdleInTransaction (same instance, started 2 min later - likely same cause).
+
+Check first (from runbook)
+  docker compose exec postgres-exporter psql -c "select count(*) from pg_stat_activity;"
+  # runbook: restart api only after confirming pool exhaustion above, not before
+
+Not seen: no replication lag, disk at 41%, no OOM in kernel log.
+
+Feedback: https://triage.example/t/8f3a  [thumbs up] [thumbs down]
+  </pre>
   </div>
 </section>
 
