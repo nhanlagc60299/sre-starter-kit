@@ -6,11 +6,14 @@ cd "$(dirname "$0")/.."
 # I6: compose's dotenv reader strips an inline comment only when a value precedes it; with an empty
 # value it takes the comment text as the value instead. The TRIAGE_* keys are consumed only through
 # compose's `environment:` block for the triage-agent service (unlike the older receiver keys, whose
-# broken-looking `KEY=   # comment` shape is harmless because render.sh shell-sources .env, where a
-# comment after whitespace is a real comment) -- so a `TRIAGE_KEY=  # ...` line ships genuinely
-# broken with nothing to catch it, which is exactly what shipped before this fix.
-bad=$(grep -nE '^TRIAGE_[A-Za-z0-9_]*=[[:space:]]*#' .env.example || true)
-[ -z "$bad" ] || { echo "FAIL: .env.example has a TRIAGE_* key with an empty value and an inline comment:"; echo "$bad"; exit 1; }
+# broken-looking `KEY=   # comment` shape was "fine to ship" only because render.sh shell-sources
+# .env, where a comment after whitespace is a real comment) -- so a `TRIAGE_KEY=  # ...` line ships
+# genuinely broken with nothing to catch it, which is exactly what shipped before this fix. M4
+# (synced from Pro) widens this from TRIAGE_* to every key: the render.sh escape hatch bounded the
+# blast radius, it didn't make the shape correct, and the guard should not depend on which parser
+# happens to read a given key today.
+bad=$(grep -nE '^[A-Za-z_][A-Za-z0-9_]*=[[:space:]]*#' .env.example || true)
+[ -z "$bad" ] || { echo "FAIL: .env.example has a key with an empty value and an inline comment:"; echo "$bad"; exit 1; }
 
 tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
 cp -r core scripts compose .env.example "$tmp/"

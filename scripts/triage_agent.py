@@ -439,11 +439,14 @@ def process(payload):
     if ENV("TRIAGE_LOG_PACK", "false").lower() == "true":
         print(json.dumps(pack), flush=True)
     # post_note() runs after the budget, against its own per-receiver timeouts (10 s each).
-    text = triage_engine.triage(pack, remaining, os.environ)
+    try:
+        text = triage_engine.triage(pack, remaining, os.environ)
+    except Exception as e:  # noqa: BLE001 - an engine bug must not kill this worker thread
+        log("triage: engine raised %s: %s" % (e.__class__.__name__, e)); return
     if text:
         post_note(text)
     else:
-        log("triage: no note (%s)" % getattr(triage_engine, "LAST_ERROR", ""))
+        log("triage: no note (%s)" % getattr(triage_engine, "last_error", lambda: "")())
 
 
 class Handler(BaseHTTPRequestHandler):

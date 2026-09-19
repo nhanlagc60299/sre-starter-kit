@@ -624,7 +624,7 @@ class EngineHookTests(unittest.TestCase):
     def setUp(self):
         self.calls = []
         fake = types.ModuleType("triage_engine")
-        fake.LAST_ERROR = ""
+        fake.last_error = lambda: ""
 
         def triage(pack, timeout, env, post=None):
             self.calls.append((pack, timeout)); return self.result
@@ -696,7 +696,32 @@ class EngineHookTests(unittest.TestCase):
         finally:
             self.agent.Budget = real_budget_cls
         self.assertEqual(len(self.calls), 1)
+        # I5: the engine call must get exactly what's left of the budget, never the full constant -
+        # AboveFloorBudget.remaining() always answers floor + 5, so that's what the call should see.
+        # assertLessEqual on TOTAL_TRIAGE_BUDGET elsewhere can't tell "remaining" from "the constant"
+        # apart; this can.
+        self.assertEqual(self.calls[0][1], floor + 5)
         self.assertEqual(len(SINK.posts), 1)
+
+    def test_second_process_call_for_the_same_group_never_reaches_the_engine(self):
+        # I1: DEDUP.seen(key) in process() must actually gate the engine call, not just the Dedup
+        # class in isolation (test_dedup_within_an_hour covers that already). Same groupKey both
+        # times, well within DEDUP_SECONDS (1h) of each other.
+        self.result = "Triage: x\nPack: docker compose logs triage-agent"
+        self.agent.process(WEBHOOK)
+        self.agent.process(WEBHOOK)
+        self.assertEqual(len(self.calls), 1)
+        self.assertEqual(len(SINK.posts), 1)
+
+    def test_engine_raising_is_logged_not_fatal(self):
+        # the try/except around the engine call: a bug in triage_engine must not kill process()'s
+        # thread or post anything, only log.
+        def boom(pack, timeout, env, post=None):
+            self.calls.append((pack, timeout)); raise RuntimeError("engine bug")
+        sys.modules["triage_engine"].triage = boom
+        self.agent.process(WEBHOOK)   # must not raise
+        self.assertEqual(len(self.calls), 1)
+        self.assertEqual(SINK.posts, [])
 
     def test_no_engine_module_logs_pack_only(self):
         sys.modules.pop("triage_engine"); sys.modules["triage_engine"] = None   # import raises ImportError
