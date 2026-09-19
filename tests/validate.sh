@@ -13,7 +13,9 @@ bad=[]
 # every dashboard is tagged sre-kit and carries the SRE Kit dropdown; every alert names one of them
 dash={}
 for d in glob.glob("core/grafana/dashboards/*.json"):
-    j=json.load(open(d)); dash[j["uid"]]=j
+    with open(d) as fh: j=json.load(fh)
+    if not j.get("uid"): bad.append(f"{d}: dashboard has no uid"); continue
+    dash[j["uid"]]=j
     if "sre-kit" not in (j.get("tags") or []): bad.append(f"{d}: missing tag sre-kit (the SRE Kit dropdown lists by tag)")
     if not any(l.get("type")=="dashboards" and "sre-kit" in (l.get("tags") or []) for l in (j.get("links") or [])): bad.append(f"{d}: missing the SRE Kit dashboards link")
 assert dash, "no dashboards"
