@@ -165,7 +165,7 @@ Support is not included; that is why every alert ships with a runbook. Two of th
 ### AI triage notes (subscription)
 
 When a critical alert fires, a small agent already in the kit gathers the rule's numbers, a 30-minute
-trend, recent error logs, and any recent deploy, and posts a short triage note back to your alert
+trend, recent error logs, and any Grafana deploy annotation from the last two hours, and posts a short triage note back to your alert
 channel with the probable cause and what to check first. It runs in `TRIAGE_DRY_RUN` mode by default,
 so you see exactly what it would send before anything leaves your network. Setup is in
 [AI triage](#ai-triage-optional) below.
