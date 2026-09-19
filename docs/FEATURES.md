@@ -21,7 +21,7 @@ and AI triage notes that run inside your own network with your own Anthropic key
 | Container metrics | cAdvisor (optional profile) | ✓ |
 | HTTP probes | blackbox exporter for every service you list (`SERVICES=`) | ✓ |
 | Logs | Loki + Grafana Alloy (Promtail is EOL and not used) | ✓ |
-| Alert rules | 16 Prometheus (infra + app) + 4 Loki (log bursts, HTTP 5xx in access logs, SSH failed-login burst, root login) | 40 to 58 Prometheus depending on modules + 4 Loki + 5 recording rules |
+| Alert rules | 16 Prometheus (infra + app) + 4 Loki (log bursts, HTTP 5xx in access logs, SSH failed-login burst, root login) | 40 to 65 Prometheus depending on modules + 4 Loki + 5 recording rules |
 | Receivers | Slack, Discord, email (SMTP), Telegram, MS Teams. Any one is enough | ✓ |
 | Routing | critical → now, repeats hourly; warning → batched every 30 min; NodeDown silences the node's other alerts | + service down silences its error/latency/SLO alerts; exporter down silences its AWS alerts (12 inhibit rules) |
 | Alert documentation | `docs/ALERTS.md`: one section per alert, what fires it and where to look first | `runbooks/<Alert>.md`: 69 files, same headings every time (meaning, first checks, usual causes, mitigation, root-cause fix), linked from every notification; a test fails the build if an alert has no runbook or a runbook has no alert |
