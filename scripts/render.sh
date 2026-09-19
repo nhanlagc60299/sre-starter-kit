@@ -31,7 +31,13 @@ fi
 # literal and break the scrape.
 : "${NODE_EXPORTER_TARGET:=node-exporter:9100}"
 export NODE_EXPORTER_TARGET
-rm -rf "$ROOT/build"; mkdir -p "$ROOT/build"
+# Refresh build/ IN PLACE, never `rm -rf build`: compose bind-mounts build/prometheus, build/alertmanager,
+# build/loki/config.alloy and friends, and on Linux a bind mount follows the inode. Wiping the tree left
+# every running container reading the deleted copy, so `make reload` HUPed Prometheus into its own stale
+# config and new targets never appeared (found on EC2, 2026-09-19; macOS virtiofs hid it). Files are
+# rewritten in place (same inode) and anything without a source is removed afterwards.
+mkdir -p "$ROOT/build"
+_mark=$(mktemp); trap 'rm -f "$_mark"' EXIT   # every file written by this run is newer than it
 # Only substitute variables that are defined in .env, so Prometheus/Alloy $labels etc. survive.
 VARS="$(grep -oE '^[A-Z_][A-Z0-9_]*=' "$ROOT/.env" | sed 's/=$//' | sed 's/^/\$/' | tr '\n' ' ') \$NODE_EXPORTER_TARGET"
 while IFS= read -r -d '' f; do
@@ -139,3 +145,8 @@ fi
 [ "${MODULE_SECURITY:-true}" = true ] || rm -f "$ROOT/build/loki/rules/fake/security.yml"
 
 echo "rendered to build/"
+
+
+# Last: anything in build/ this run did not write (a removed template, a renamed rule file) is stale.
+# Runs after the generated files above so they are never deleted and recreated between two renders.
+find "$ROOT/build" -type f ! -newer "$_mark" -delete
