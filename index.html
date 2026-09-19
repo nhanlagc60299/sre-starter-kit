@@ -467,20 +467,16 @@
 <section id="ai-triage" style="background: var(--shade); border-block: 1px solid var(--rule);">
   <div class="wrap">
     <p class="eyebrow">Add-on</p>
-    <h2>AI triage notes</h2>
+    <h2>AI triage notes (Pro)</h2>
     <p class="section-intro">
-      When a critical alert fires, a small agent already in the kit gathers the firing rule's numbers,
-      a 30-minute trend, the last error log lines, and any deploy from the last 2 hours, then posts a
-      short triage note back to your Slack, Discord, Telegram, or email: probable cause with the
-      numbers or log lines it rests on, whether a deploy lines up, what to check first, and what it did
-      not see. It runs in <code>TRIAGE_DRY_RUN</code> mode by default, so you see exactly what it would
-      send before anything leaves your network. Context is redacted at the agent (tokens, passwords,
-      emails, webhook URLs) before it goes anywhere.
-    </p>
-    <p>
-      <a href="https://lagcian.gumroad.com/l/sre-triage-free">Free plan</a>: 10 triage notes/month.<br>
-      <a href="https://lagcian.gumroad.com/l/sre-triage-team">Team plan</a>: $49/month, 300 triage notes/month, stops when
-      exhausted, never a surprise bill, cancel any time.
+      When a critical alert fires, the agent already in this kit gathers the firing rule's numbers,
+      a 30-minute trend, the last error log lines, and any deploy from the last 2 hours, then asks
+      Claude, with your own Anthropic API key, straight from your host to Anthropic, and posts a short
+      triage note back to your Slack, Discord, Telegram, or email: probable cause with the numbers or
+      log lines it rests on, whether a deploy lines up, what to check first, and what it did not see.
+      Free runs the agent in dry run only, so you see exactly what it would send before anything leaves
+      your network. Context is redacted at the agent (tokens, passwords, emails, webhook URLs) before
+      it goes anywhere.
     </p>
     <p>Not supported in year one: Alertmanagers outside the kit, self-hosting, chat back-and-forth with
       the note, automatic actions.</p>
@@ -504,6 +500,8 @@ Not seen: no replication lag, disk at 41%, no OOM in kernel log.
 
 Feedback: https://triage.example/t/8f3a  [thumbs up] [thumbs down]
   </pre>
+    <p>Sample note, synthetic. Included in Pro.</p>
+    <a class="btn" href="https://lagcian.gumroad.com/l/sre-starter-kit-pro">Buy Pro &mdash; $199</a>
   </div>
 </section>
 
