@@ -30,7 +30,7 @@ Not seen: grafana: empty; loki: empty; query: empty; query_range: empty; no depl
 Pack: docker compose logs triage-agent
 ```
 
-Three things to notice. Every cause cites the number or alert it rests on. The commands come from
+Three things to notice. Every cause cites the numbers or alerts it rests on. The commands come from
 the runbook, verbatim, never invented. And it says what it could not see. A note that guesses is
 worse than no note, so the agent is built to refuse: if the model answers with a command that is
 not in your runbook, the command is dropped; if it forgets to mention a deploy that happened, a
