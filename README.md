@@ -162,6 +162,17 @@ Both flavours ship: `docker compose` for VMs, and a Helm chart for Kubernetes.
 licence for your organisation on any number of hosts, source included, 12 months of updates.
 Support is not included; that is why every alert ships with a runbook. Two of those runbooks are in this repo unchanged, [ServiceDown](docs/runbooks/ServiceDown.md) and [DiskWillFillIn24h](docs/runbooks/DiskWillFillIn24h.md), so you can see what you are paying for.
 
+### AI triage notes (subscription)
+
+When a critical alert fires, a small agent already in the kit gathers the rule's numbers, a 30-minute
+trend, recent error logs, and any Grafana deploy annotation from the last two hours, and posts a short triage note back to your alert
+channel with the probable cause and what to check first. It runs in `TRIAGE_DRY_RUN` mode by default,
+so you see exactly what it would send before anything leaves your network. Setup is in
+[AI triage](#ai-triage-optional) below.
+
+[Try the Free plan](https://lagcian.gumroad.com/l/sre-triage-free) (10 notes/month) or [subscribe to Team](https://lagcian.gumroad.com/l/sre-triage-team)
+($49/month, 300 notes/month, stops when exhausted, cancel any time).
+
 Install this free tier first. It is the same stack without the modules above, so it is the honest
 way to judge the code before paying for more of it. Questions: **nhanlagc60299@gmail.com**.
 
