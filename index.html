@@ -469,24 +469,24 @@
     <p class="eyebrow">Add-on</p>
     <h2>AI triage notes</h2>
     <p class="section-intro">
-    When a critical alert fires, a small agent already in the kit gathers the firing rule's numbers,
-    a 30-minute trend, the last error log lines, and any deploy from the last 2 hours, then posts a
-    short triage note back to your Slack, Discord, Telegram, or email: probable cause with the
-    numbers or log lines it rests on, whether a deploy lines up, what to check first, and what it did
-    not see. It runs in <code>TRIAGE_DRY_RUN</code> mode by default, so you see exactly what it would
-    send before anything leaves your network. Context is redacted at the agent (tokens, passwords,
-    emails, webhook URLs) before it goes anywhere.
+      When a critical alert fires, a small agent already in the kit gathers the firing rule's numbers,
+      a 30-minute trend, the last error log lines, and any deploy from the last 2 hours, then posts a
+      short triage note back to your Slack, Discord, Telegram, or email: probable cause with the
+      numbers or log lines it rests on, whether a deploy lines up, what to check first, and what it did
+      not see. It runs in <code>TRIAGE_DRY_RUN</code> mode by default, so you see exactly what it would
+      send before anything leaves your network. Context is redacted at the agent (tokens, passwords,
+      emails, webhook URLs) before it goes anywhere.
     </p>
     <p>
-    <a href="https://lagcian.gumroad.com/l/sre-triage-free">Free plan</a>: 10 triage notes/month.<br>
-    <a href="https://lagcian.gumroad.com/l/sre-triage-team">Team plan</a>: $49/month, 300 triage notes/month, stops when
-    exhausted, never a surprise bill, cancel any time.
+      <a href="https://lagcian.gumroad.com/l/sre-triage-free">Free plan</a>: 10 triage notes/month.<br>
+      <a href="https://lagcian.gumroad.com/l/sre-triage-team">Team plan</a>: $49/month, 300 triage notes/month, stops when
+      exhausted, never a surprise bill, cancel any time.
     </p>
     <p>Not supported in year one: Alertmanagers outside the kit, self-hosting, chat back-and-forth with
-    the note, automatic actions.</p>
+      the note, automatic actions.</p>
 
-<h3>Sample note</h3>
-  <pre class="note-sample">
+      <h3>Sample note</h3>
+<pre class="note-sample">
 Triage: PostgresConnectionsHigh on db-1        (confidence: medium)
 
 Probable cause
