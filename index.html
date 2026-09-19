@@ -200,7 +200,7 @@
   .proof { background: var(--panel); padding: 20px 22px; }
   .proof h3 { font-size: 17px; font-weight: 600; letter-spacing: -.01em; }
   .proof p { margin: 7px 0 0; color: var(--ink-soft); font-size: 15.5px; }
-  .proof pre {
+  .proof pre, .note-sample {
     margin: 13px 0 0; padding: 12px 14px; background: var(--shade);
     border-left: 2px solid var(--critical);
     font-family: "IBM Plex Mono", monospace; font-size: 12.5px; line-height: 1.55;
@@ -486,7 +486,7 @@
   the note, automatic actions.</p>
 
   <h3>Sample note</h3>
-  <pre>
+  <pre class="note-sample">
 Triage: PostgresConnectionsHigh on db-1        (confidence: medium)
 
 Probable cause
