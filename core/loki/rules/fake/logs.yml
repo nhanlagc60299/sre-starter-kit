@@ -14,6 +14,7 @@ groups:
         for: 5m
         labels: { severity: warning, module: app }
         annotations:
+          dashboard: sre-overview
           summary: "{{ $labels.service }} logged {{ $value | printf \"%.0f\" }} error lines in 5m"
           runbook_url: https://github.com/nhanlagc60299/sre-starter-kit/blob/main/docs/ALERTS.md#logerrorburst
 
@@ -28,5 +29,6 @@ groups:
         for: 5m
         labels: { severity: warning, module: app }
         annotations:
+          dashboard: sre-overview
           summary: "{{ $labels.service }} logged {{ $value | printf \"%.0f\" }} HTTP 5xx responses in 5m"
           runbook_url: https://github.com/nhanlagc60299/sre-starter-kit/blob/main/docs/ALERTS.md#http5xxinlogs

@@ -9,6 +9,7 @@ groups:
         for: 1m
         labels: { severity: warning, module: security }
         annotations:
+          dashboard: sre-overview
           summary: "SSH: >20 failed logins in 5m from {{ $labels.ip }} (early warning, not a security control)"
           runbook_url: https://github.com/nhanlagc60299/sre-starter-kit/blob/main/docs/ALERTS.md#sshfailedloginburst
 
@@ -17,5 +18,6 @@ groups:
           sum(count_over_time({job="authlog"} |~ "Accepted (password|publickey) for root" [5m])) > 0
         labels: { severity: warning, module: security }
         annotations:
+          dashboard: sre-overview
           summary: "SSH: root login accepted (early warning, not a security control)"
           runbook_url: https://github.com/nhanlagc60299/sre-starter-kit/blob/main/docs/ALERTS.md#rootlogindetected
