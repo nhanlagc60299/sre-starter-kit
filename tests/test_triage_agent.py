@@ -486,7 +486,9 @@ class ToolTests(unittest.TestCase):
 
     def setUp(self):
         Fake.routes = routes_ok(); Fake.hits.clear()
-        self.agent = load_agent(self.base, tempfile.mkdtemp())
+        self.tmp = tempfile.mkdtemp()
+        os.makedirs(os.path.join(self.tmp, "runbooks"))   # RUNBOOK_DIR; the traversal test writes above it
+        self.agent = load_agent(self.base, self.tmp)
 
     def test_every_tool_is_registered_and_read_only(self):
         self.assertEqual(sorted(self.agent.TOOLS), ["alerts", "deploys", "loki_query", "prom_query", "prom_range", "runbook"])
@@ -516,8 +518,14 @@ class ToolTests(unittest.TestCase):
         r, st = self.agent.run_tool("deploys", {"minutes": 60}, 5); self.assertEqual(st, "ok"); self.assertEqual(r[0]["text"], "api v2.14 by ci")
         q = urllib.parse.parse_qs(urllib.parse.urlparse([h for h in Fake.hits if "annotations" in h][0]).query)
         self.assertAlmostEqual((int(q["to"][0]) - int(q["from"][0])) / 1000, 3600, delta=5)
-        r, st = self.agent.run_tool("runbook", {"alert": "../../etc/passwd"}, 5)   # sanitised to "etcpasswd": no file
-        self.assertEqual(st, "empty")
+        # A real file one directory above RUNBOOK_DIR, asked for by a name that walks there: with the
+        # sanitiser gone, os.path.join(RUNBOOK_DIR, "../escape.md") resolves onto it and the tool
+        # answers "ok" with its text. The previous fixture here ("../../etc/passwd") could not fail -
+        # /etc/passwd.md does not exist, so that request read "empty" sanitiser or no sanitiser.
+        with open(os.path.join(self.tmp, "escape.md"), "w") as f:
+            f.write("# Escape\n\nnotmyrunbook, and never a thing to quote into an alert channel.\n")
+        r, st = self.agent.run_tool("runbook", {"alert": "../escape"}, 5)
+        self.assertEqual(st, "empty"); self.assertNotIn("notmyrunbook", json.dumps(r))
 
     def test_unknown_tool_and_bad_args(self):
         self.assertEqual(self.agent.run_tool("rm", {}, 5), (None, "unknown"))
@@ -651,6 +659,19 @@ class PostTests(unittest.TestCase):
                 conn.send_message.assert_not_called()
         finally:
             os.environ.update({"ALERT_EMAIL_TO": "", "SMTP_HOST": "", "SMTP_USER": "", "SMTP_PASSWORD": ""})
+
+    def test_post_note_says_whether_anything_accepted_the_note(self):
+        # process() turns this return value into the trace's outcome - "posted" vs "post-failed" -
+        # and the AI Triage dashboard counts those. A post_note that always returned True would
+        # report every note Slack and Discord dropped on the floor as delivered.
+        self.assertIs(self.agent.post_note("Triage: x"), True)
+        os.environ.update({"SLACK_WEBHOOK_URL": self.base + "/slack-down",
+                           "DISCORD_WEBHOOK_URL": self.base + "/slack-down-discord"})   # Sink 500s both
+        try:
+            self.assertIs(self.agent.post_note("Triage: nobody took this one"), False)
+        finally:
+            os.environ.update({"SLACK_WEBHOOK_URL": self.base + "/slack",
+                               "DISCORD_WEBHOOK_URL": self.base + "/discord"})
 
     def test_slack_failure_does_not_stop_discord(self):
         # a receiver failing must not abort the loop - point Slack at a path that 500s and confirm
