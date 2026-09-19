@@ -28,5 +28,5 @@ echo "test_render OK"
 
 # ContainerRestartLoop depends on the cadvisor job dropping container_label_restartcount: without it every
 # restart is a new series and changes() never fires (Docker 29, 2026-09-19).
-grep -A8 "job_name: cadvisor" build/prometheus/prometheus.yml | grep -q "regex: container_label_restartcount" || { echo "FAIL: cadvisor job does not drop container_label_restartcount"; exit 1; }
+grep -A12 "job_name: cadvisor" core/prometheus/prometheus.yml.tpl | grep -q "regex: container_label_restartcount" || { echo "FAIL: cadvisor job does not drop container_label_restartcount"; exit 1; }
 echo "cadvisor restartcount labeldrop OK"
