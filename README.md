@@ -107,6 +107,11 @@ agent in dry run only; the note itself (the model call, with your own Anthropic 
 `TRIAGE_REDACT` takes extra regexes (separated by `;;`) to strip from log lines before anything is
 sent.
 
+The agent also exposes a small set of read-only tools (`prom_query`, `prom_range`, `loki_query`,
+`alerts`, `deploys`, `runbook`) that Pro's engine may call while it thinks, and it prints one
+`triage-trace` line per run summarising what happened. In the free tier nothing calls the tools -- it
+stays dry run only -- so behaviour here is unchanged.
+
 ## Sizing
 
 | Scale | Machine | Disk |

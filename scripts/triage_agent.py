@@ -177,11 +177,13 @@ def series_now(expr, budget, limit=20):
     return [{"metric": x.get("metric", {}), "value": x["value"][1]} for x in result], ("ok" if result else "empty")
 
 
-def series_30m(expr, budget, limit=20):
+def series_range(expr, budget, limit=20, minutes=30):
+    """query_range over the last `minutes`, step chosen so a series has ~60 points at most."""
     if not expr:
         return None, "skipped"
     now = time.time()
-    d, st = fetch_json(budget, prom_url("/api/v1/query_range", query=expr, start=now - 1800, end=now, step=60))
+    step = max(60, minutes * 60 // 60)
+    d, st = fetch_json(budget, prom_url("/api/v1/query_range", query=expr, start=now - minutes * 60, end=now, step=step))
     if st == "unreachable":
         return None, "unreachable"
     if not isinstance(d, dict):
@@ -197,13 +199,17 @@ def series_30m(expr, budget, limit=20):
     return out, ("ok" if out else "empty")
 
 
-def loki_errors(service, budget, limit=50):
-    if not service:
+def series_30m(expr, budget, limit=20):
+    return series_range(expr, budget, limit, 30)
+
+
+def loki_lines(query, budget, minutes=15, limit=50):
+    """query_range on Loki, newest first, each line cut at 300 chars."""
+    if not query:
         return [], "skipped"
-    q = '{service="%s"} |~ "(?i)(error|exception|fatal|panic|traceback)"' % service
     now_ns = time.time_ns()
     url = ENV("LOKI_URL", "http://loki:3100") + "/loki/api/v1/query_range?" + urllib.parse.urlencode(
-        {"query": q, "start": now_ns - 15 * 60 * 10**9, "end": now_ns, "limit": limit, "direction": "backward"})
+        {"query": query, "start": now_ns - minutes * 60 * 10**9, "end": now_ns, "limit": limit, "direction": "backward"})
     d, st = fetch_json(budget, url, {"X-Scope-OrgID": "fake"})
     if st == "unreachable":
         return [], "unreachable"
@@ -218,6 +224,12 @@ def loki_errors(service, budget, limit=50):
     return lines, ("ok" if lines else "empty")
 
 
+def loki_errors(service, budget, limit=50):
+    if not service:
+        return [], "skipped"
+    return loki_lines('{service="%s"} |~ "(?i)(error|exception|fatal|panic|traceback)"' % service, budget, 15, limit)
+
+
 def firing_alerts(budget, limit=30):
     d, st = fetch_json(budget, ENV("ALERTMANAGER_URL", "http://alertmanager:9093") + "/api/v2/alerts?active=true&silenced=true&inhibited=true")
     if st == "unreachable":
@@ -230,10 +242,10 @@ def firing_alerts(budget, limit=30):
     return out, ("ok" if out else "empty")
 
 
-def deploys(budget, limit=10):
+def deploys(budget, limit=10, minutes=120):
     now_ms = int(time.time() * 1000)
     url = ENV("GRAFANA_URL", "http://grafana:3000") + "/api/annotations?" + urllib.parse.urlencode(
-        {"tags": "deploy", "from": now_ms - 2 * 3600 * 1000, "to": now_ms, "limit": limit})
+        {"tags": "deploy", "from": now_ms - minutes * 60 * 1000, "to": now_ms, "limit": limit})
     pw = ENV("GRAFANA_ADMIN_PASSWORD", "")
     hdr = {"Authorization": "Basic " + base64.b64encode(("admin:" + pw).encode()).decode()} if pw else {}
     d, st = fetch_json(budget, url, hdr)
@@ -288,6 +300,50 @@ def _redact(obj, pats):
     if isinstance(obj, dict):
         return {k: _redact(v, pats) for k, v in obj.items()}
     return obj
+
+
+# --- Tools: the Pro engine's way back into this box while it thinks (spec 3.1). The same fetchers
+# build_pack uses, behind the same redaction, each result capped. Read-only by construction: no tool
+# writes anything, and no argument ever reaches a shell - `expr`/`selector` go into a query string.
+TOOL_MAX_BYTES = 6000   # per result, after redaction; the engine caps the whole conversation separately
+TOOL_TIMEOUT = 5        # seconds per tool call, taken out of the run's remaining budget
+
+
+def _int(args, key, default, cap):
+    try:
+        v = int(args.get(key, default))
+    except (TypeError, ValueError):
+        v = default
+    return max(1, min(v, cap))
+
+
+TOOLS = {
+    "prom_query": lambda a, b: series_now(str(a.get("expr", ""))[:2000], b),
+    "prom_range": lambda a, b: series_range(str(a.get("expr", ""))[:2000], b, minutes=_int(a, "minutes", 30, 180)),
+    "loki_query": lambda a, b: loki_lines(str(a.get("selector", ""))[:2000], b, minutes=_int(a, "minutes", 15, 180), limit=_int(a, "limit", 50, 50)),
+    "alerts":     lambda a, b: firing_alerts(b),
+    "deploys":    lambda a, b: deploys(b, minutes=_int(a, "minutes", 120, 1440)),
+    "runbook":    lambda a, b: runbook(re.sub(r"[^A-Za-z0-9_]", "", str(a.get("alert", "")))[:80]),
+}
+
+
+def run_tool(name, args, seconds):
+    """One engine tool call -> (result, status). Unknown tool -> (None, "unknown"); non-dict args ->
+    (None, "skipped"); no budget left -> (None, "unreachable") without a network call. The result is
+    redacted like the pack and, past TOOL_MAX_BYTES of JSON, replaced by a marked sample."""
+    fn = TOOLS.get(name)
+    if fn is None:
+        return None, "unknown"
+    if not isinstance(args, dict):
+        return None, "skipped"
+    if seconds <= 0:
+        return None, "unreachable"
+    result, status = fn(args, Budget(min(TOOL_TIMEOUT, seconds)))
+    result = redact(result)
+    s = json.dumps(result)
+    if len(s) > TOOL_MAX_BYTES:
+        result = {"truncated": True, "sample": s[:TOOL_MAX_BYTES]}
+    return result, status
 
 
 def trim(pack):
@@ -427,7 +483,7 @@ def format_note(text, flavor):
             out.append(b(k + ":") + " " + esc(v))
         elif st == "Check first (from runbook)":
             out.append(b(st)); out.append("```"); in_cmds = True
-        elif st.startswith("Pack: "):
+        elif st.startswith("Trace: "):
             out.append(i(esc(st)))
         else:
             out.append(esc(st))
@@ -461,10 +517,14 @@ def _chunks_md(text, size):
 def post_note(text):
     """Same channels Alertmanager uses, read from the same .env. Failures are logged, never retried
     into the alert channel: a noisy triage is worse than a missing one. Each receiver is attempted
-    independently so one failing (or unconfigured) receiver never stops the others."""
+    independently so one failing (or unconfigured) receiver never stops the others. Returns True if
+    at least one receiver accepted the note."""
+    oks = []
     def attempt(name, fn):
-        try: fn(); log("posted to " + name)
-        except Exception as e: log("post to %s failed: %s" % (name, e.__class__.__name__))  # noqa: BLE001
+        try:
+            fn(); log("posted to " + name); oks.append(True)
+        except Exception as e:  # noqa: BLE001
+            log("post to %s failed: %s" % (name, e.__class__.__name__)); oks.append(False)
     if ENV("SLACK_WEBHOOK_URL"):
         attempt("slack", lambda: post_json(ENV("SLACK_WEBHOOK_URL"), {"text": format_note(text, "slack")}, timeout=10))
     if ENV("DISCORD_WEBHOOK_URL"):
@@ -508,6 +568,7 @@ def post_note(text):
                 if ENV("SMTP_USER"): s.login(ENV("SMTP_USER"), ENV("SMTP_PASSWORD", ""))
                 s.send_message(m)
         attempt("email", mail)
+    return any(oks)
 
 
 def process(payload):
@@ -536,14 +597,19 @@ def process(payload):
     if ENV("TRIAGE_LOG_PACK", "false").lower() == "true":
         print(json.dumps(pack), flush=True)
     # post_note() runs after the budget, against its own per-receiver timeouts (10 s each).
+    run = getattr(triage_engine, "run", None)
     try:
-        text = triage_engine.triage(pack, remaining, os.environ)
+        results = run(payload, pack, remaining, os.environ, tools=run_tool) if run else [(triage_engine.triage(pack, remaining, os.environ), {"task": "triage"})]
     except Exception as e:  # noqa: BLE001 - an engine bug must not kill this worker thread
         log("triage: engine raised %s: %s" % (e.__class__.__name__, e)); return
-    if text:
-        post_note(text)
-    else:
-        log("triage: no note (%s)" % getattr(triage_engine, "last_error", lambda: "")())
+    for text, trace in results:
+        if text:
+            ok = post_note(text)
+            trace["outcome"] = "posted" if ok else "post-failed"
+        else:
+            trace["outcome"] = "no-note"
+            log("triage: no note (%s)" % getattr(triage_engine, "last_error", lambda: "")())
+        print("triage-trace " + json.dumps(trace, sort_keys=True), flush=True)
 
 
 class Handler(BaseHTTPRequestHandler):

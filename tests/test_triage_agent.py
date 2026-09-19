@@ -477,6 +477,64 @@ class PackTests(unittest.TestCase):
             srv.shutdown()
 
 
+class ToolTests(unittest.TestCase):
+    """run_tool(): the engine's only way back into this box. Same fakes as the pack, so a tool result
+    is proven to be the redacted, capped shape of what the real service returns."""
+    @classmethod
+    def setUpClass(cls):
+        cls.srv, cls.base = serve()
+
+    def setUp(self):
+        Fake.routes = routes_ok(); Fake.hits.clear()
+        self.agent = load_agent(self.base, tempfile.mkdtemp())
+
+    def test_every_tool_is_registered_and_read_only(self):
+        self.assertEqual(sorted(self.agent.TOOLS), ["alerts", "deploys", "loki_query", "prom_query", "prom_range", "runbook"])
+
+    def test_prom_query_returns_series_now_shape(self):
+        r, st = self.agent.run_tool("prom_query", {"expr": "probe_success"}, 5)
+        self.assertEqual(st, "ok"); self.assertEqual(r[0]["value"], "0")
+        self.assertTrue(any(h.startswith("/api/v1/query?") for h in Fake.hits))
+
+    def test_prom_range_honours_minutes_and_caps_it(self):
+        r, st = self.agent.run_tool("prom_range", {"expr": "probe_success", "minutes": 999}, 5)
+        self.assertEqual(st, "ok"); self.assertEqual(r[0]["points"], 3)
+        q = urllib.parse.parse_qs(urllib.parse.urlparse([h for h in Fake.hits if "query_range" in h][0]).query)
+        self.assertAlmostEqual(float(q["end"][0]) - float(q["start"][0]), 180 * 60, delta=5)   # capped at 180 min
+        self.assertEqual(q["step"][0], "180")                                                 # ~60 points
+
+    def test_loki_query_passes_selector_verbatim_and_redacts(self):
+        sel = '{service="api"} |= "password"'
+        r, st = self.agent.run_tool("loki_query", {"selector": sel, "minutes": 5, "limit": 2}, 5)
+        self.assertEqual(st, "ok"); self.assertEqual(len(r), 2)
+        self.assertNotIn("hunter2", json.dumps(r))
+        q = urllib.parse.parse_qs(urllib.parse.urlparse([h for h in Fake.hits if "loki" in h][0]).query)
+        self.assertEqual(q["query"][0], sel); self.assertEqual(q["limit"][0], "2")
+
+    def test_alerts_deploys_runbook(self):
+        r, st = self.agent.run_tool("alerts", {}, 5); self.assertEqual(st, "ok"); self.assertEqual(r[0]["labels"]["alertname"], "ServiceDown")
+        r, st = self.agent.run_tool("deploys", {"minutes": 60}, 5); self.assertEqual(st, "ok"); self.assertEqual(r[0]["text"], "api v2.14 by ci")
+        q = urllib.parse.parse_qs(urllib.parse.urlparse([h for h in Fake.hits if "annotations" in h][0]).query)
+        self.assertAlmostEqual((int(q["to"][0]) - int(q["from"][0])) / 1000, 3600, delta=5)
+        r, st = self.agent.run_tool("runbook", {"alert": "../../etc/passwd"}, 5)   # sanitised to "etcpasswd": no file
+        self.assertEqual(st, "empty")
+
+    def test_unknown_tool_and_bad_args(self):
+        self.assertEqual(self.agent.run_tool("rm", {}, 5), (None, "unknown"))
+        r, st = self.agent.run_tool("prom_query", "not a dict", 5); self.assertEqual(st, "skipped")
+
+    def test_result_is_capped_and_marked(self):
+        big = {"status": "success", "data": {"result": [{"metric": {"x": "y" * 500}, "value": [1, "0"]}] * 20}}
+        Fake.routes["/api/v1/query"] = (200, big)
+        r, st = self.agent.run_tool("prom_query", {"expr": "x"}, 5)
+        self.assertTrue(r["truncated"]); self.assertLessEqual(len(r["sample"]), self.agent.TOOL_MAX_BYTES)
+
+    def test_budget_zero_is_unreachable_without_a_call(self):
+        Fake.hits.clear()
+        r, st = self.agent.run_tool("alerts", {}, 0)
+        self.assertEqual(st, "unreachable"); self.assertEqual(Fake.hits, [])
+
+
 FENCE_OPEN, FENCE_CLOSE = "```\n", "\n```"
 
 
@@ -609,7 +667,7 @@ class PostTests(unittest.TestCase):
         # Discord's edge (Cloudflare) answers 403 to urllib's default User-Agent; a real dogfood on
         # 2026-09-19 lost every note that way while the fake sink in the smoke happily accepted them.
         SINK.posts.clear()
-        self.agent.post_note("Triage: x\nPack: docker compose logs triage-agent")
+        self.agent.post_note("Triage: x\nTrace: http://localhost:3000/d/sre-triage")
         self.assertTrue(SINK.posts)
         SINK.posts.clear()
         self.agent.post_json(SINK.base + "/slack", {"text": "x"}, headers={"User-Agent": "someone-else/9"})
@@ -637,7 +695,7 @@ class PostTests(unittest.TestCase):
             "  docker compose ps <service>\n"
             "  curl -sv <url>\n"
             "Not seen: no deploys in 2h; loki empty\n"
-            "Pack: docker compose logs triage-agent")
+            "Trace: http://localhost:3000/d/sre-triage")
 
     def test_format_note_discord(self):
         md = self.agent.format_note(self.NOTE, "discord").splitlines()
@@ -648,7 +706,7 @@ class PostTests(unittest.TestCase):
         self.assertEqual(md[5:9], ["**Check first (from runbook)**", "```", "docker compose ps <service>", "curl -sv <url>"])
         self.assertEqual(md[9], "```")
         self.assertEqual(md[10], "**Not seen:** no deploys in 2h; loki empty")
-        self.assertEqual(md[11], "_Pack: docker compose logs triage-agent_")
+        self.assertEqual(md[11], "_Trace: http://localhost:3000/d/sre-triage_")
         self.assertEqual(md.count("```"), 2)
 
     def test_format_note_slack_escapes_placeholders(self):
@@ -657,14 +715,15 @@ class PostTests(unittest.TestCase):
         self.assertIn("docker compose ps &lt;service&gt;", md)
         self.assertNotIn("<service>", md)
         self.assertNotIn("**", md)
+        self.assertTrue(md.endswith("_Trace: http://localhost:3000/d/sre-triage_"), md[-80:])
 
     def test_format_note_passes_unknown_lines_through(self):
-        md = self.agent.format_note("Triage: x        (confidence: low)\nSomething new\nPack: p", "discord").splitlines()
+        md = self.agent.format_note("Triage: x        (confidence: low)\nSomething new\nTrace: http://localhost:3000/d/sre-triage", "discord").splitlines()
         self.assertEqual(md[1], "Something new")
 
     def test_discord_chunks_never_split_a_fence(self):
         cmds = "\n".join("  echo %03d %s" % (n, "y" * 60) for n in range(60))
-        text = "Triage: big        (confidence: low)\nCheck first (from runbook)\n" + cmds + "\nPack: p"
+        text = "Triage: big        (confidence: low)\nCheck first (from runbook)\n" + cmds + "\nTrace: http://localhost:3000/d/sre-triage"
         chunks = self.agent._chunks_md(self.agent.format_note(text, "discord"), 2000)
         self.assertGreater(len(chunks), 1)
         for c in chunks:
@@ -727,6 +786,11 @@ class EngineHookTests(unittest.TestCase):
         def triage(pack, timeout, env, post=None):
             self.calls.append((pack, timeout)); return self.result
         fake.triage = triage
+
+        def run(payload, pack, timeout, env, tools=None, post=None):
+            return [(fake.triage(pack, timeout, env, post=post), {"task": "triage"})]
+        fake.run = run
+        self.fake = fake
         sys.modules["triage_engine"] = fake
         # a fresh module load (not the same object load_agent() built for another test) so the
         # `import triage_engine` at the top of triage_agent.py picks up the fake just registered,
@@ -740,7 +804,7 @@ class EngineHookTests(unittest.TestCase):
         os.environ["TRIAGE_DRY_RUN"] = "true"
 
     def test_note_from_engine_is_posted(self):
-        self.result = "Triage: x\nPack: docker compose logs triage-agent"
+        self.result = "Triage: x\nTrace: http://localhost:3000/d/sre-triage"
         self.agent.process(WEBHOOK)
         self.assertEqual(len(self.calls), 1)
         self.assertLessEqual(self.calls[0][1], self.agent.TOTAL_TRIAGE_BUDGET)   # remaining budget, not a constant
@@ -805,7 +869,7 @@ class EngineHookTests(unittest.TestCase):
         # I1: DEDUP.seen(key) in process() must actually gate the engine call, not just the Dedup
         # class in isolation (test_dedup_within_an_hour covers that already). Same groupKey both
         # times, well within DEDUP_SECONDS (1h) of each other.
-        self.result = "Triage: x\nPack: docker compose logs triage-agent"
+        self.result = "Triage: x\nTrace: http://localhost:3000/d/sre-triage"
         self.agent.process(WEBHOOK)
         self.agent.process(WEBHOOK)
         self.assertEqual(len(self.calls), 1)
@@ -858,6 +922,28 @@ class EngineHookTests(unittest.TestCase):
         self.assertFalse(any(l.startswith("{") for l in buf2.getvalue().splitlines()),
                           "TRIAGE_LOG_PACK default (false) must not print the pack")
         self.assertEqual(len(SINK.posts), 1, "the note must still be posted without pack logging")
+
+    def test_run_is_preferred_and_traces_are_printed(self):
+        self.fake.run = lambda payload, pack, timeout, env, tools=None, post=None: [("Triage: y\nTrace: http://g/d/sre-triage", {"task": "triage", "outcome": "note"})]
+        with mock.patch("builtins.print") as p:
+            self.agent.process(WEBHOOK)
+        lines = [c.args[0] for c in p.call_args_list if c.args and str(c.args[0]).startswith("triage-trace ")]
+        self.assertEqual(len(lines), 1); t = json.loads(lines[0][len("triage-trace "):])
+        self.assertEqual(t["outcome"], "posted"); self.assertEqual(len(SINK.posts), 1)
+
+    def test_run_gets_the_agents_run_tool(self):
+        seen = {}
+        def run(payload, pack, timeout, env, tools=None, post=None):
+            seen["tools"] = tools; return []
+        self.fake.run = run
+        self.agent.process(WEBHOOK)
+        self.assertIs(seen["tools"], self.agent.run_tool)
+
+    def test_old_engine_without_run_still_works(self):
+        self.result = "Triage: x\nTrace: http://g/d/sre-triage"
+        del self.fake.run
+        self.agent.process(WEBHOOK)
+        self.assertEqual(len(self.calls), 1); self.assertEqual(len(SINK.posts), 1)
 
 
 if __name__ == "__main__":
