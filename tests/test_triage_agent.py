@@ -686,6 +686,35 @@ class PostTests(unittest.TestCase):
         self.assertNotIn("**", tg["text"])
 
 
+class InputCapTests(unittest.TestCase):
+    """The pack cap follows TRIAGE_MAX_INPUT_TOKENS, else half the model's known context window, so a
+    small internal model never gets a prompt it cannot hold; nothing can raise it above HARD_CAP_BYTES."""
+    def _cap(self, **env):
+        return self.agent.input_cap_bytes(env)
+    @classmethod
+    def setUpClass(cls): cls.agent = load_agent(SINK.base, tempfile.mkdtemp())
+    def test_explicit_tokens(self):
+        self.assertEqual(self._cap(TRIAGE_MAX_INPUT_TOKENS="4000"), 16000)
+    def test_never_above_the_hard_ceiling(self):
+        self.assertEqual(self._cap(TRIAGE_MAX_INPUT_TOKENS="100000"), self.agent.HARD_CAP_BYTES)
+    def test_floor_and_garbage(self):
+        self.assertEqual(self._cap(TRIAGE_MAX_INPUT_TOKENS="10"), 4000)
+        self.assertEqual(self._cap(TRIAGE_MAX_INPUT_TOKENS="lots"), 40000)
+    def test_known_model_gets_half_its_window(self):
+        self.assertEqual(self._cap(TRIAGE_MODEL="llama3:8b"), 16384)            # 8192 window -> 4096 tokens
+        self.assertEqual(self._cap(TRIAGE_MODEL="gemma2:9b"), 16384)
+        self.assertEqual(self._cap(TRIAGE_MODEL="deepseek-chat"), 40000)        # large windows keep the 10k default
+        self.assertEqual(self._cap(TRIAGE_MODEL="glm-4.5-air"), 40000)
+        self.assertEqual(self._cap(TRIAGE_MODEL="claude-sonnet-5"), 40000)
+        self.assertEqual(self._cap(TRIAGE_MODEL="something-new"), 40000)
+    def test_explicit_beats_the_table(self):
+        self.assertEqual(self._cap(TRIAGE_MODEL="llama3:8b", TRIAGE_MAX_INPUT_TOKENS="6000"), 24000)
+    def test_module_uses_the_cap_at_import(self):
+        os.environ["TRIAGE_MAX_INPUT_TOKENS"] = "4000"
+        try: self.assertEqual(load_agent(SINK.base, tempfile.mkdtemp()).MAX_BYTES, 16000)
+        finally: os.environ.pop("TRIAGE_MAX_INPUT_TOKENS", None)
+
+
 class EngineHookTests(unittest.TestCase):
     """process() with a fake triage_engine module on sys.path: the agent's only contract with Pro.
     Also covers DEDUP's wiring in process() and the budget-floor skip (M6/I3 in the old cloud
