@@ -160,6 +160,10 @@ your runbook. Nothing goes through us; the free tier stops at the dry-run pack y
 Install this free tier first. It is the same stack without the modules above, so it is the honest
 way to judge the code before paying for more of it. Questions: **nhanlagc60299@gmail.com**.
 
+## Feature report
+
+A side-by-side of the free and Pro tiers, last verified on a real AWS account: [docs/FEATURES.md](docs/FEATURES.md).
+
 ## License
 
 MIT. See [LICENSE](LICENSE).
