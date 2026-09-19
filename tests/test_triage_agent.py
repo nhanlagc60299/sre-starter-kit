@@ -625,8 +625,65 @@ class PostTests(unittest.TestCase):
         for b in discord_posts:
             content = json.loads(b)["content"]
             self.assertLessEqual(len(content), 2000)
-        rebuilt = "".join(_unfenced(json.loads(b)["content"]) for b in discord_posts)
-        self.assertEqual(rebuilt, long_text)
+        rebuilt = "".join(json.loads(b)["content"] for b in discord_posts)
+        self.assertEqual(rebuilt, "**" + long_text + "**")   # the headline is bold, nothing else changes
+
+    NOTE = ("Triage: PostgresExporterDown on postgres-exporter:9187        (confidence: medium)\n"
+            "Probable cause\n"
+            "  1. The exporter exited — up{job=\"postgres\"}=0 for 30m\n"
+            "  2. Blocked at the security group — runbook: 'the scrape times out'\n"
+            "Also firing: Watchdog (warning, ops)\n"
+            "Check first (from runbook)\n"
+            "  docker compose ps <service>\n"
+            "  curl -sv <url>\n"
+            "Not seen: no deploys in 2h; loki empty\n"
+            "Pack: docker compose logs triage-agent")
+
+    def test_format_note_discord(self):
+        md = self.agent.format_note(self.NOTE, "discord").splitlines()
+        self.assertEqual(md[0], "**Triage: PostgresExporterDown on postgres-exporter:9187** · confidence medium")
+        self.assertEqual(md[1], "**Probable cause**")
+        self.assertEqual(md[2], "1. The exporter exited — _up{job=\"postgres\"}=0 for 30m_")
+        self.assertEqual(md[4], "**Also firing:** Watchdog (warning, ops)")
+        self.assertEqual(md[5:9], ["**Check first (from runbook)**", "```", "docker compose ps <service>", "curl -sv <url>"])
+        self.assertEqual(md[9], "```")
+        self.assertEqual(md[10], "**Not seen:** no deploys in 2h; loki empty")
+        self.assertEqual(md[11], "_Pack: docker compose logs triage-agent_")
+        self.assertEqual(md.count("```"), 2)
+
+    def test_format_note_slack_escapes_placeholders(self):
+        md = self.agent.format_note(self.NOTE, "slack")
+        self.assertTrue(md.startswith("*Triage: PostgresExporterDown on postgres-exporter:9187* · confidence medium"))
+        self.assertIn("docker compose ps &lt;service&gt;", md)
+        self.assertNotIn("<service>", md)
+        self.assertNotIn("**", md)
+
+    def test_format_note_passes_unknown_lines_through(self):
+        md = self.agent.format_note("Triage: x        (confidence: low)\nSomething new\nPack: p", "discord").splitlines()
+        self.assertEqual(md[1], "Something new")
+
+    def test_discord_chunks_never_split_a_fence(self):
+        cmds = "\n".join("  echo %03d %s" % (n, "y" * 60) for n in range(60))
+        text = "Triage: big        (confidence: low)\nCheck first (from runbook)\n" + cmds + "\nPack: p"
+        chunks = self.agent._chunks_md(self.agent.format_note(text, "discord"), 2000)
+        self.assertGreater(len(chunks), 1)
+        for c in chunks:
+            self.assertLessEqual(len(c), 2000)
+            self.assertEqual(c.count("```") % 2, 0, "unbalanced fence in chunk: %r" % c[:60])
+        self.assertIn("echo 059", "".join(chunks))
+
+    def test_post_note_uses_markdown_for_slack_and_discord_only(self):
+        os.environ.update({"TELEGRAM_BOT_TOKEN": "t", "TELEGRAM_CHAT_ID": "c"})
+        try:
+            self.agent.post_note(self.NOTE)   # TELEGRAM_API already points at the sink (setUpClass)
+        finally:
+            os.environ.pop("TELEGRAM_BOT_TOKEN"); os.environ.pop("TELEGRAM_CHAT_ID")
+        by = {p: json.loads(b) for p, b, _ in Sink.posts}
+        self.assertTrue(by["/slack"]["text"].startswith("*Triage:"))
+        self.assertTrue(by["/discord"]["content"].startswith("**Triage:"))
+        tg = next(v for k, v in by.items() if k.startswith("/tg/"))
+        self.assertTrue(tg["text"].startswith("Triage: PostgresExporterDown"))
+        self.assertNotIn("**", tg["text"])
 
 
 class EngineHookTests(unittest.TestCase):
