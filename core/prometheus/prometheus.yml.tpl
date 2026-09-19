@@ -28,6 +28,14 @@ scrape_configs:
     static_configs: [{ targets: ['${NODE_EXPORTER_TARGET}'] }]
   - job_name: cadvisor
     static_configs: [{ targets: ['cadvisor:8080'] }]
+    metric_relabel_configs:
+      # Docker labels every container with its restart count, and cAdvisor exports that label as
+      # container_label_restartcount - a NEW series per restart. changes() in ContainerRestartLoop
+      # then saw one value per series and never fired (found on Docker 29, AWS, 2026-09-19). Drop
+      # the label at scrape time so a restarting container stays one series, and so a crash loop
+      # does not mint a fresh series for every cAdvisor metric on every restart.
+      - action: labeldrop
+        regex: container_label_restartcount
   # The exporter's OWN /metrics, which exists whether or not SERVICES lists anything.
   # BlackboxExporterDown reads this job, not blackbox-http: blackbox-http has one `up` series
   # per probe target, so with SERVICES empty -- the shipped default -- it has none at all and
