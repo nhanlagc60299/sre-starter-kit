@@ -33,12 +33,9 @@ DEDUP_SECONDS = 3600       # the webhook-triage route has no repeat_interval of 
 RUNBOOK_MAX_LINES = 60
 DISCORD_CHUNK_CHARS = 2000   # Discord's own hard limit on message content length, in characters
 TELEGRAM_CHUNK_CHARS = 4096  # Telegram's own hard limit on sendMessage's text length, in characters
-FENCE_OPEN, FENCE_CLOSE = "```\n", "\n```"   # wraps the note so Slack/Discord render it in a
-                                              # fixed-width font - the numbered steps and PromQL in a
-                                              # triage note are unreadable reflowed by a proportional
-                                              # font. Telegram gets no parse_mode, so a fence would
-                                              # render as three literal backtick lines instead of a
-                                              # code block there - see post_note()'s telegram().
+FENCE_OPEN, FENCE_CLOSE = "```\n", "\n```"   # a code fence; format_note() puts only the runbook
+                                              # commands inside one. Telegram gets no parse_mode, so
+                                              # it never sees a fence - see post_note()'s telegram().
 FENCE_CHARS = len(FENCE_OPEN) + len(FENCE_CLOSE)
 ENV = os.environ.get
 # Discord (behind Cloudflare) rejects the default "Python-urllib/3.x" User-Agent with 403 error 1010,
@@ -359,10 +356,78 @@ def _chunks(text, size):
 
 
 def _fenced(chunk):
-    """Wrap a chunk in a code fence so Slack/Discord render the note in a fixed-width font; the
-    numbered steps and PromQL expressions in a triage note are unreadable reflowed by a
-    proportional one. Not used for Telegram - see telegram() below."""
+    """Wrap a chunk in a code fence. Kept for chunks that are not a triage note (see format_note)."""
     return FENCE_OPEN + chunk + FENCE_CLOSE
+
+
+def format_note(text, flavor):
+    """Turn the engine's fixed-shape plain note into Slack mrkdwn or Discord markdown: bold section
+    heads, italic evidence, only the runbook commands in a code fence. One monospace block for the
+    whole note read as a wall of text on Discord (owner feedback, 2026-09-19). The shape is what
+    triage_engine.render() emits; a line that matches no known shape is kept as one plain line
+    (whitespace trimmed, blank lines dropped), so a note from a newer engine degrades to plain
+    lines, never to a lost post. Telegram and email
+    keep the plain text: Telegram gets no parse_mode (an unescaped "_" would 400 the post)."""
+    if flavor == "slack":
+        b = lambda t: "*%s*" % t
+        # Slack reads <, > and & as markup (links, mentions, entities): a runbook's `<service>`
+        # placeholder would vanish into a link. Escape them everywhere, fence included.
+        esc = lambda t: t.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    else:
+        b = lambda t: "**%s**" % t
+        esc = lambda t: t
+    i = lambda t: "_%s_" % t
+    out, in_cmds = [], False
+    for line in text.splitlines():
+        st = line.strip()
+        if not st:
+            continue
+        if in_cmds and line.startswith("  "):
+            out.append(esc(st)); continue
+        if in_cmds:
+            out.append("```"); in_cmds = False
+        if st.startswith("Triage: "):
+            m = re.match(r"^(Triage: .*?)\s+\(confidence: (\w+)\)$", st)
+            out.append(b(esc(m.group(1))) + " · confidence " + m.group(2) if m else b(esc(st)))
+        elif st == "Probable cause":
+            out.append(b(st))
+        elif re.match(r"^\d+\. ", st):
+            head, sep, ev = st.partition(" — ")
+            out.append(esc(head) + (" — " + i(esc(ev)) if sep else ""))
+        elif st.startswith("Also firing: ") or st.startswith("Not seen: "):
+            k, _, v = st.partition(": ")
+            out.append(b(k + ":") + " " + esc(v))
+        elif st == "Check first (from runbook)":
+            out.append(b(st)); out.append("```"); in_cmds = True
+        elif st.startswith("Pack: "):
+            out.append(i(esc(st)))
+        else:
+            out.append(esc(st))
+    if in_cmds:
+        out.append("```")
+    return "\n".join(out)
+
+
+def _chunks_md(text, size):
+    """Split formatted markdown at line boundaries, keeping every chunk under `size` and every code
+    fence balanced: a fence cut in half would turn the rest of the message into monospace on
+    Discord. A single line longer than `size` is sliced like _chunks does."""
+    chunks, cur, in_fence = [], "", False
+    def flush():
+        nonlocal cur
+        if cur: chunks.append(cur.rstrip("\n")); cur = ""
+    for line in text.split("\n"):
+        pieces = [line[i:i + size - 8] for i in range(0, len(line), size - 8)] or [""]
+        for piece in pieces:
+            add = piece + "\n"
+            if len(cur) + len(add) + (4 if in_fence else 0) > size:
+                if in_fence: cur += "```"
+                flush()
+                if in_fence: cur = "```\n"
+            cur += add
+            if piece.startswith("```"): in_fence = not in_fence
+    flush()
+    return chunks or [""]
 
 
 def post_note(text):
@@ -373,15 +438,15 @@ def post_note(text):
         try: fn(); log("posted to " + name)
         except Exception as e: log("post to %s failed: %s" % (name, e.__class__.__name__))  # noqa: BLE001
     if ENV("SLACK_WEBHOOK_URL"):
-        attempt("slack", lambda: post_json(ENV("SLACK_WEBHOOK_URL"), {"text": _fenced(text)}, timeout=10))
+        attempt("slack", lambda: post_json(ENV("SLACK_WEBHOOK_URL"), {"text": format_note(text, "slack")}, timeout=10))
     if ENV("DISCORD_WEBHOOK_URL"):
         def discord():
-            # each chunk is fenced on its own, so a message stays a well-formed code block even when
-            # the note is split; if a chunk's POST fails, the loop stops there and attempt() logs it -
-            # whatever already sent stays sent (a half note beats none), nothing further is attempted.
-            for chunk in _chunks(text, DISCORD_CHUNK_CHARS - FENCE_CHARS):
+            # chunks break at line boundaries with balanced fences; if a chunk's POST fails, the loop
+            # stops there and attempt() logs it - whatever already sent stays sent (a half note
+            # beats none), nothing further is attempted.
+            for chunk in _chunks_md(format_note(text, "discord"), DISCORD_CHUNK_CHARS):
                 post_json(ENV("DISCORD_WEBHOOK_URL"),
-                          {"content": _fenced(chunk), "allowed_mentions": {"parse": []}}, timeout=10)
+                          {"content": chunk, "allowed_mentions": {"parse": []}}, timeout=10)
         attempt("discord", discord)
     if ENV("TELEGRAM_BOT_TOKEN") and ENV("TELEGRAM_CHAT_ID"):
         def telegram():
