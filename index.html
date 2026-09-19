@@ -466,17 +466,17 @@
 
 <section id="ai-triage" style="background: var(--shade); border-block: 1px solid var(--rule);">
   <div class="wrap">
-    <p class="eyebrow">Add-on</p>
+    <p class="eyebrow">Pro</p>
     <h2>AI triage notes (Pro)</h2>
     <p class="section-intro">
       When a critical alert fires, the agent already in this kit gathers the firing rule's numbers,
-      a 30-minute trend, the last error log lines, and any deploy from the last 2 hours, then asks
-      Claude, with your own Anthropic API key, straight from your host to Anthropic, and posts a short
-      triage note back to your Slack, Discord, Telegram, or email: probable cause with the numbers or
-      log lines it rests on, whether a deploy lines up, what to check first, and what it did not see.
-      Free runs the agent in dry run only, so you see exactly what it would send before anything leaves
-      your network. Context is redacted at the agent (tokens, passwords, emails, webhook URLs) before
-      it goes anywhere.
+      a 30-minute trend, the last error log lines, and any deploy from the last 2 hours. In Pro, the
+      redacted pack goes straight from your host to Anthropic with your own API key, and the agent
+      posts a short triage note back to your Slack, Discord, Telegram, or email: probable cause with
+      the numbers or log lines it rests on, whether a deploy lines up, what to check first, and what it
+      did not see. In the free tier the agent stops at that dry-run pack in its own log &mdash; nothing
+      leaves your network. Context is redacted at the agent (tokens, passwords, emails, webhook URLs)
+      before it goes anywhere.
     </p>
     <p>Not supported in year one: Alertmanagers outside the kit, self-hosting, chat back-and-forth with
       the note, automatic actions.</p>
