@@ -4,11 +4,20 @@ on:
     branches: [main]
   pull_request:
 
+# pull_request has no branch filter, so a PR author's own checked-out code runs as `make test` /
+# `make smoke` below. `contents: read` is all any job needs, and persist-credentials: false keeps
+# that (now read-only) token out of .git/config entirely, rather than trusting a repo setting this
+# file can't show. tests/test_ci_permissions.sh guards both.
+permissions:
+  contents: read
+
 jobs:
   static:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
       - name: Install build deps
         run: sudo apt-get update && sudo apt-get install -y gettext-base python3-yaml
       - run: make validate
@@ -22,6 +31,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
       - name: Install build deps
         run: sudo apt-get update && sudo apt-get install -y gettext-base python3-yaml
       - run: make smoke
