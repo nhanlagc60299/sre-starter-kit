@@ -45,7 +45,14 @@ ask_pct DISK_WARN_PCT "Disk free % warning threshold" "15"
 ask_pct DISK_CRIT_PCT "Disk free % critical threshold" "5"
 ask PROM_RETENTION_TIME "Prometheus retention" "15d"
 ask LOKI_RETENTION_PERIOD "Loki retention" "168h"
-ask GRAFANA_ADMIN_PASSWORD "Grafana admin password" "change-me"
+ask GRAFANA_ADMIN_PASSWORD "Grafana admin password" ""
+# Empty on a first run (no previous value to keep): generate one rather than shipping the public
+# default 'change-me'. Same CSPRNG idiom as the triage webhook token below, hex so it is easy to
+# read back out of .env if you ever need to.
+if [ -z "$GRAFANA_ADMIN_PASSWORD" ]; then
+  GRAFANA_ADMIN_PASSWORD=$(od -An -tx1 -N24 /dev/urandom | tr -d ' \n')
+  echo "Generated a random Grafana admin password (see .env, GRAFANA_ADMIN_PASSWORD)."
+fi
 # Keep the current setting as the default so a re-run does not silently re-enable it.
 case "${MODULE_SECURITY:-true}" in true) sec_default=y ;; *) sec_default=n ;; esac
 ask MODULE_SECURITY_ANS "Enable SSH early-warning alerts? (y/n)" "$sec_default"

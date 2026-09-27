@@ -177,4 +177,28 @@ grep -qxF "COMPOSE_PROFILES='cadvisor'" "$tmp10/.env"
 grep -qxF "TRIAGE_WEBHOOK_URL='http://localhost:9/'" "$tmp10/.env"
 grep -qxF "TRIAGE_WEBHOOK_TOKEN=''" "$tmp10/.env" || { echo "FAIL: TRIAGE_WEBHOOK_TOKEN was not cleared when triage was turned off"; exit 1; }
 
+# --- Grafana admin password: a first run (no .env) with an empty answer must not silently keep
+#     the published 'change-me' default. It must generate a real, long, random one instead, and
+#     tell the operator where to find it rather than printing it. ---
+tmp11=$(mktemp -d); trap 'rm -rf "$tmp" "$tmp7" "$tmp8" "$tmp8b" "$tmp9" "$tmp10" "$tmp11"' EXIT
+cp -r core scripts .env.example "$tmp11/"
+# 17 answers: project, slack, 9 blanks (telegram token/chat id/teams/services-end/disk warn/disk
+# crit/prom ret/loki ret/grafana pw BLANK), security n, 4 blanks (container sock/cadvisor/discord/
+# email), triage n
+out11=$(printf 'acme\nhttp://localhost:9/\n\n\n\n\n\n\n\n\n\nn\n\n\n\n\nn\n' \
+  | ( cd "$tmp11" && bash scripts/init.sh ) )
+echo "$out11" | grep -qF '.env, GRAFANA_ADMIN_PASSWORD' \
+  || { echo "FAIL: wizard did not say where a generated Grafana password lives (.env, GRAFANA_ADMIN_PASSWORD)"; exit 1; }
+pw1=$(sed -n "s/^GRAFANA_ADMIN_PASSWORD='\(.*\)'\$/\1/p" "$tmp11/.env")
+[ "$pw1" != "change-me" ] || { echo "FAIL: first-run empty answer kept the published 'change-me' default"; exit 1; }
+[ -n "$pw1" ] || { echo "FAIL: first-run empty answer wrote an empty Grafana password"; exit 1; }
+[ "${#pw1}" -ge 20 ] || { echo "FAIL: generated Grafana password is shorter than 20 characters (${#pw1})"; exit 1; }
+[[ "$pw1" =~ ^[0-9a-f]+$ ]] || { echo "FAIL: generated Grafana password '$pw1' is not from the hex CSPRNG idiom (od -tx1 /dev/urandom)"; exit 1; }
+echo "$out11" | grep -qF "$pw1" && { echo "FAIL: wizard printed the generated password itself to stdout"; exit 1; }
+
+# --- re-run with an existing .env: a blank answer keeps the value just generated (unchanged) ---
+printf '\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n' | ( cd "$tmp11" && bash scripts/init.sh >/dev/null )
+pw2=$(sed -n "s/^GRAFANA_ADMIN_PASSWORD='\(.*\)'\$/\1/p" "$tmp11/.env")
+[ "$pw2" = "$pw1" ] || { echo "FAIL: a blank answer on a re-run did not keep the existing Grafana password"; exit 1; }
+
 echo "test_init OK"

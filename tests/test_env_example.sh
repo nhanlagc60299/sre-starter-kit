@@ -18,6 +18,9 @@ bad=$(grep -nE '^[A-Za-z_][A-Za-z0-9_]*=[[:space:]]*#' .env.example || true)
 tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
 cp -r core scripts compose .env.example "$tmp/"
 cp .env.example "$tmp/.env"          # unmodified, exactly what a copy-paste install gives you
+# .env.example ships GRAFANA_ADMIN_PASSWORD empty on purpose (render.sh refuses it, checked below);
+# set a real one here so the receiver checks that follow fail for the reason they say they do.
+sed -i.bak 's/^GRAFANA_ADMIN_PASSWORD=.*/GRAFANA_ADMIN_PASSWORD=fixture-pw/' "$tmp/.env" && rm -f "$tmp/.env.bak"
 
 out=$( cd "$tmp" && bash scripts/render.sh 2>&1 ) && { echo "FAIL: render succeeded with no receiver configured"; exit 1; }
 case "$out" in
@@ -27,6 +30,18 @@ esac
 
 sed -i.bak 's#^SLACK_WEBHOOK_URL=.*#SLACK_WEBHOOK_URL=http://localhost:9/#' "$tmp/.env" && rm -f "$tmp/.env.bak"
 ( cd "$tmp" && bash scripts/render.sh >/dev/null ) || { echo "FAIL: render failed with a webhook set"; exit 1; }
+
+# GRAFANA_ADMIN_PASSWORD must never be empty, nor .env.example's own published default. Checked here
+# because a plain `cp .env.example .env` is exactly the shape that used to ship 'change-me' silently.
+for bad_pw in change-me ""; do
+  sed -i.bak "s/^GRAFANA_ADMIN_PASSWORD=.*/GRAFANA_ADMIN_PASSWORD=$bad_pw/" "$tmp/.env" && rm -f "$tmp/.env.bak"
+  out=$( cd "$tmp" && bash scripts/render.sh 2>&1 ) && { echo "FAIL: render accepted GRAFANA_ADMIN_PASSWORD='$bad_pw'"; exit 1; }
+  case "$out" in
+    *"GRAFANA_ADMIN_PASSWORD"*) ;;
+    *) echo "FAIL: wrong error message for GRAFANA_ADMIN_PASSWORD='$bad_pw': $out"; exit 1 ;;
+  esac
+done
+sed -i.bak 's/^GRAFANA_ADMIN_PASSWORD=.*/GRAFANA_ADMIN_PASSWORD=fixture-pw/' "$tmp/.env" && rm -f "$tmp/.env.bak"   # restore for the checks below
 ${CONTAINER_ENGINE:-docker} run --rm -v "$tmp/build/alertmanager:/c" --entrypoint amtool prom/alertmanager:v0.28.1 check-config /c/alertmanager.yml
 
 # I6 live check: the triage-agent's own `environment:` block reads this straight from .env

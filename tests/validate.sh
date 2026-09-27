@@ -53,7 +53,7 @@ bash tests/test_alertmanager.sh >/dev/null || fail=1
 bash tests/test_loki.sh >/dev/null || fail=1
 # 5. routing: a critical alert must reach both critical and webhook-triage
 tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
-sed 's#^SLACK_WEBHOOK_URL=.*#SLACK_WEBHOOK_URL=http://localhost:9/#' .env.example > "$tmp/.env"; cp -r core "$tmp/core"
+sed 's#^SLACK_WEBHOOK_URL=.*#SLACK_WEBHOOK_URL=http://localhost:9/#; s/^GRAFANA_ADMIN_PASSWORD=.*/GRAFANA_ADMIN_PASSWORD=fixture-pw/' .env.example > "$tmp/.env"; cp -r core "$tmp/core"
 ( cd "$tmp" && bash "$OLDPWD/scripts/render.sh" >/dev/null )
 ${CONTAINER_ENGINE:-docker} run --rm -v "$tmp/build/alertmanager:/c" --entrypoint amtool prom/alertmanager:v0.28.1 config routes test --config.file=/c/alertmanager.yml --verify.receivers=critical,webhook-triage severity=critical alertname=X >/dev/null || { echo "routing: critical does not reach critical+webhook-triage"; fail=1; }
 # 6. the two sample runbooks are real files with the Pro runbook shape, and ALERTS.md links to them

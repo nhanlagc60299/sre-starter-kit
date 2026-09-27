@@ -8,6 +8,14 @@ set -a; . "$ROOT/.env"; set +a
 # blocks are stripped below, but SOME receiver has to exist or every alert is dropped on the floor.
 # Guarded on the template so the minimal render fixture in tests/ is unaffected.
 if [ -f "$ROOT/core/alertmanager/alertmanager.yml.tpl" ]; then
+  # A Grafana nobody can log into safely is a stack shipped broken on purpose: refuse the published
+  # default and an unset value the same way the wizard now refuses to keep either silently. Guarded
+  # on the template, like the checks below, so the minimal render fixture in tests/ (no .env key at
+  # all) is unaffected.
+  if [ -z "${GRAFANA_ADMIN_PASSWORD:-}" ] || [ "${GRAFANA_ADMIN_PASSWORD:-}" = "change-me" ]; then
+    echo "ERROR: GRAFANA_ADMIN_PASSWORD must be set in .env and must not be the published default 'change-me'. Run 'make init' or set a real password by hand." >&2
+    exit 1
+  fi
   if [ -n "${TELEGRAM_BOT_TOKEN:-}" ] && [ -z "${TELEGRAM_CHAT_ID:-}" ]; then
     echo "ERROR: TELEGRAM_BOT_TOKEN is set but TELEGRAM_CHAT_ID is empty." >&2
     exit 1

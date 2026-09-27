@@ -15,6 +15,7 @@ render:          ## .env + core/*.tpl -> build/
 
 up: render       ## start the stack (re-renders build/ and reloads the running config)
 	@$(COMPOSE) up -d
+	@bash scripts/rotate-grafana-password.sh
 	@$(MAKE) --no-print-directory reload
 
 reload:          ## make Prometheus/Alertmanager/Alloy re-read build/ (compose does not watch bind mounts)

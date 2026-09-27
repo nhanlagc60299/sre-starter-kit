@@ -16,7 +16,11 @@ make up        # http://localhost:3000  (admin / your password)
 
 Re-run `make init` any time; previous answers are the defaults. A blank answer on re-run keeps the previous value; to clear a value, edit `.env` directly.
 
-`make up` re-renders `build/` from `.env` and reloads Prometheus, Alertmanager and Alloy in place, so it is also the command to run after any config change.
+`make up` re-renders `build/` from `.env` and reloads Prometheus, Alertmanager and Alloy in place, so it is also the command to run after any config change. Changing the Grafana admin password this way reaches
+the already-running Grafana too: `make up` resets the persisted admin password to match `.env`
+(`GF_SECURITY_ADMIN_PASSWORD` alone only takes effect the first time Grafana creates that account, not on
+a later change). There is no published default to leave in place: `make init` generates a random one for
+you if you don't set your own.
 
 **Podman hosts:** set `NODE_EXPORTER_TARGET` (see "Exposure" — rootless Podman cannot scrape
 node-exporter at all, and you lose every host metric and infra alert if you skip this), set
