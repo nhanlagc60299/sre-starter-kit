@@ -316,6 +316,29 @@ class PackTests(unittest.TestCase):
         line = "GET https://maps.googleapis.com/x?key=AIzaDummyDummyDummyDummyDummyDummy123"
         self.assertNotIn("AIzaDummyDummyDummyDummyDummyDummy123", self.agent.redact(line))
 
+    def test_run2_shape_query_param_matches_go_json_escaped_ampersand(self):
+        # fix round 1 #4: Go's encoding/json HTML-escapes "&" to the six literal characters
+        # backslash-u-0-0-2-6 by default, so a JSON-encoded log line carries that instead of a bare
+        # "&" in front of "sig=". Built with a plain (non-raw) string: "\\u0026" here is the normal
+        # Python escape for one backslash followed by literal "u0026" - the six characters Go emits.
+        line = '{"url":"https://x/path?a=1' + "\\u0026" + 'sig=DummySig0123456789abcdef"}'
+        self.assertNotIn("DummySig0123456789abcdef", self.agent.redact(line))
+
+    def test_run2_shape_query_param_matches_html_escaped_ampersand(self):
+        # fix round 1 #4: an HTML/XML-escaped query string carries "&amp;" instead of "&".
+        line = "GET https://maps.googleapis.com/x?a=1&amp;key=AIzaDummyDummyDummyDummyDummyDummy123"
+        self.assertNotIn("AIzaDummyDummyDummyDummyDummyDummy123", self.agent.redact(line))
+
+    def test_run2_shape_query_param_value_is_not_truncated_past_the_old_2048_bound(self):
+        # fix round 1 #5: the value is the last element (nothing follows it to backtrack against),
+        # so it is unbounded like the URL-password and Negotiate-token values - a signature longer
+        # than the old {1,2048} bound must be redacted whole, not just its first 2048 characters.
+        long_sig = "d" * 3000
+        line = "GET /o?sig=" + long_sig
+        out = self.agent.redact(line)
+        self.assertNotIn("d" * 100, out)
+        self.assertIn("[redacted]", out)
+
     def test_run2_shape_headerless_pem_body_line_is_redacted(self):
         # a PEM body line with no -----BEGIN/END----- around it at all - the earlier PEM rule only
         # fires off the header, which is absent here.
@@ -333,6 +356,16 @@ class PackTests(unittest.TestCase):
 
     def test_run2_negative_control_password_reset_prose_survives(self):
         s = "password reset failed for user bob"
+        self.assertEqual(self.agent.redact(s), s)
+
+    def test_run2_negative_control_aws_secret_access_key_not_set_survives(self):
+        # fix round 1 #3: the AWS whitespace-separator rule must only redact a secret-shaped value
+        # (16+ base64-alphabet characters) - "not" is 3 characters, nowhere near that.
+        s = "aws_secret_access_key not set"
+        self.assertEqual(self.agent.redact(s), s)
+
+    def test_run2_negative_control_aws_session_token_expired_prose_survives(self):
+        s = "aws_session_token expired for role deploy"
         self.assertEqual(self.agent.redact(s), s)
 
     def test_run2_negative_control_sha256_hex_digest_survives(self):
@@ -356,11 +389,21 @@ class PackTests(unittest.TestCase):
         s = "docker logs --tail 50 web-1"
         self.assertEqual(self.agent.redact(s), s)
 
+    def test_run2_keyword_separator_allows_more_than_16_spaces(self):
+        # fix round 1 #2: [ \t]{0,16} became [ \t]* - a value padded past 16 spaces/tabs (a
+        # fixed-width log format, `column -t`) must still be redacted, not just up to the old bound.
+        line = "password:" + " " * 17 + "hunter2dummy"
+        self.assertNotIn("hunter2dummy", self.agent.redact(line))
+
     def test_run2_new_patterns_are_not_quadratic_on_a_repeated_prefix(self):
         # each new pattern's own prefix, repeated with no terminator - the same shape that made the
         # old bearer/authorization/user:pass@ patterns backtrack O(n^2) (see the test above this one
-        # in spirit, test_default_patterns_are_not_quadratic_on_a_repeated_prefix).
-        cases = (r'\"password\":' * 8000, "&sig=" * 8000, "aws_secret_access_key " * 8000, "MII" + "A" * 200000)
+        # in spirit, test_default_patterns_are_not_quadratic_on_a_repeated_prefix). "MII" + "A"*N on
+        # its own cannot exercise the PEM-body rule's bound (the trailing "={0,2}" is optional, so it
+        # never needs to backtrack at all, on any input); "MII/"*N does, because every repeat starts a
+        # fresh attempt over the whole remaining string - keep both, they test different things.
+        cases = (r'\"password\":' * 8000, "&sig=" * 8000, "aws_secret_access_key " * 8000,
+                 "MII" + "A" * 200000, "MII/" * 10000, "password:" + " " * 50000 + "x")
         for s in cases:
             start = time.monotonic()
             self.agent._redact(s, self.agent.DEFAULT_REDACT)

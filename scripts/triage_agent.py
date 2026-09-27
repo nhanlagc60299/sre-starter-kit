@@ -108,16 +108,24 @@ DEFAULT_REDACT = [
     #
     # The separator itself allows an optional backslash around each quote (\"password\": ...) so an
     # escaped JSON blob nested inside another JSON-encoded log line (security audit run-2) is caught
-    # the same as a plain one; [ \t]{0,16}, not \s, so it can never cross a "\n" the way the bearer/
+    # the same as a plain one; [ \t]*, not \s, so it can never cross a "\n" the way the bearer/
     # authorization/x-api-key patterns below do (post_note() redacts line by line precisely because
-    # those three still can).
-    (r'(?i)((?:password|passwd|pwd|secret|token|api[_-]?key|access[_-]?key|private[_-]?key|client[_-]?secret))(\\?["\']?[ \t]{0,16}[:=][ \t]{0,16}\\?["\']?)' + _REDACT_VALUE,
+    # those three still can). Unbounded, not {0,16}: a value emitted with more than 16 spaces/tabs of
+    # padding around the separator (a fixed-width log format, `column -t`) must still be redacted;
+    # measured linear, since it only ever backtracks over the run of spaces actually present, not a
+    # fixed worst case, and a run of spaces has none of the fixed keyword letters to restart a match at.
+    (r'(?i)((?:password|passwd|pwd|secret|token|api[_-]?key|access[_-]?key|private[_-]?key|client[_-]?secret))(\\?["\']?[ \t]*[:=][ \t]*\\?["\']?)' + _REDACT_VALUE,
      r"\1\2[redacted]"),
     # Same two keywords, but no ":"/"=" at all - `aws configure set aws_secret_access_key <value>`
     # and the matching session-token flag separate keyword and value with whitespace only. Restricted
     # to these two AWS-specific names on purpose: a whitespace separator on the bare password/secret/
-    # token keywords above would redact ordinary prose ("password reset failed for user bob").
-    (r"(?i)(aws_secret_access_key|aws_session_token)([ \t]{1,16})" + _REDACT_VALUE, r"\1\2[redacted]"),
+    # token keywords above would redact ordinary prose ("password reset failed for user bob"). The
+    # value itself is restricted to a secret-shaped run (base64-alphabet, 16+ chars) rather than
+    # _REDACT_VALUE's "any non-whitespace run": _REDACT_VALUE alone would also redact "not set" or
+    # "expired for role deploy" as if they were the secret. It is the last element (nothing follows
+    # it to backtrack against), so {16,} is unbounded on the high end like the URL-password and
+    # Negotiate-token values below, not capped.
+    (r"(?i)(aws_secret_access_key|aws_session_token)([ \t]{1,16})[A-Za-z0-9/+=]{16,}", r"\1\2[redacted]"),
     (r"(?i)bearer\s+\S+", "Bearer [redacted]"),
     # Every quantifier from here on is bounded, except a last element a real credential can outgrow
     # (a Negotiate token runs to KBs): nothing follows it to backtrack for, and a bound there leaves
@@ -150,10 +158,16 @@ DEFAULT_REDACT = [
     (r"(?<![\w-])eyJ[\w-]{1,4096}\.eyJ[\w-]{1,8192}\.[\w-]{0,2048}", "[jwt-redacted]"),
     # Signed-URL / SAS / STS query parameters: an Azure SAS or Teams workflow "sig=", an AWS
     # presigned "X-Amz-Signature=" or "X-Amz-Security-Token=", and a bare API key passed as "key="
-    # (Google Maps and others). Bounded to 2048 and excludes "&"/"#" so it stops at the next
-    # parameter or fragment; requiring the leading "?"/"&" is what keeps "keyboard=1" from matching
-    # the "key" alternative - "key" must be the whole parameter name, not a prefix of it.
-    (r"(?i)([?&](?:sig|x-amz-signature|x-amz-security-token|key)=)[^&\s\"'#]{1,2048}", r"\1[redacted]"),
+    # (Google Maps and others) - the separator before the keyword is a literal "?"/"&" or one of the
+    # two shapes a "&" is commonly escaped into before it ever reaches this log line: the six literal
+    # characters backslash-u-0-0-2-6 (Go's encoding/json HTML-escapes "&" by default) and "&amp;"
+    # (HTML/XML entity encoding). Requiring that leading separator (in any of its forms) is what
+    # keeps "keyboard=1" from matching the "key" alternative - "key" must be the whole parameter
+    # name, not a prefix of it. The value excludes
+    # "&"/"#" so it stops at the next parameter or fragment, but is otherwise unbounded: it is the
+    # last element (nothing follows it to backtrack against), same as the URL-password and
+    # Negotiate-token values above, not capped at some fixed length.
+    (r"(?i)((?:[?&]|\\u0026|&amp;)(?:sig|x-amz-signature|x-amz-security-token|key)=)[^&\s\"'#]+", r"\1[redacted]"),
     # bounded quantifiers: an unbounded [\w.+-]+@[\w-]+\.[\w.-]+ backtracks O(n^2) on a long line with
     # an "@" but no "." after it (an attacker-controlled log line, easily tens of KB)
     (r"[\w.+-]{1,64}@[\w-]{1,63}(?:\.[\w-]{1,63})+", "[email]"),
