@@ -289,6 +289,83 @@ class PackTests(unittest.TestCase):
         finally:
             os.environ["TRIAGE_REDACT"] = ""
 
+    # --- security audit run-2: redaction shapes that still leaked (dummy secrets, real shapes) -----
+
+    def test_run2_shape_escaped_json_in_json_password_is_redacted(self):
+        # a log line that embeds an escaped JSON blob (\"password\": rather than a bare "password":)
+        # - the keyword rule's separator did not accept a backslash before the quote.
+        line = r'{"msg":"login failed {\"password\":\"hunter2dummy\"}"}'
+        self.assertNotIn("hunter2dummy", self.agent.redact(line))
+
+    def test_run2_shape_aws_secret_access_key_whitespace_separator_is_redacted(self):
+        # `aws configure set aws_secret_access_key <value>` - keyword and value separated by
+        # whitespace only, no ":"/"=" at all.
+        line = "aws configure set aws_secret_access_key wJalrDUMMYDUMMYDUMMYDUMMYKEY"
+        self.assertNotIn("wJalrDUMMYDUMMYDUMMYDUMMYKEY", self.agent.redact(line))
+
+    def test_run2_shape_azure_sas_signature_is_redacted(self):
+        line = ("POST https://x.logic.azure.com/workflows/x/triggers/manual/paths/invoke"
+                "?api-version=2016-06-01&sp=%2Ftriggers&sv=1.0&sig=DummySig0123456789abcdef")
+        self.assertNotIn("DummySig0123456789abcdef", self.agent.redact(line))
+
+    def test_run2_shape_aws_presigned_x_amz_signature_is_redacted(self):
+        line = "GET /o?X-Amz-Credential=AKIADUMMYDUMMYDUMMY1&X-Amz-Signature=deadbeefdummy"
+        self.assertNotIn("deadbeefdummy", self.agent.redact(line))
+
+    def test_run2_shape_google_api_key_query_param_is_redacted(self):
+        line = "GET https://maps.googleapis.com/x?key=AIzaDummyDummyDummyDummyDummyDummy123"
+        self.assertNotIn("AIzaDummyDummyDummyDummyDummyDummy123", self.agent.redact(line))
+
+    def test_run2_shape_headerless_pem_body_line_is_redacted(self):
+        # a PEM body line with no -----BEGIN/END----- around it at all - the earlier PEM rule only
+        # fires off the header, which is absent here.
+        line = "MIIEvDUMMYDUMMYDUMMYbase64bodyAAAAAAAAAAAAAAAAAAAAAAAA"
+        self.assertNotIn(line, self.agent.redact(line))
+
+    def test_run2_shape_headerless_base64_body_line_without_MII_prefix_is_redacted(self):
+        # a continuation line of a multi-line PEM body with no "MII" prefix of its own: exactly 64
+        # base64 characters, at least one of them uppercase.
+        line = "A" + "b" * 63
+        self.assertEqual(len(line), 64)
+        self.assertNotEqual(self.agent.redact(line), line)
+
+    # --- negative controls: these must survive redact() unchanged ----------------------------------
+
+    def test_run2_negative_control_password_reset_prose_survives(self):
+        s = "password reset failed for user bob"
+        self.assertEqual(self.agent.redact(s), s)
+
+    def test_run2_negative_control_sha256_hex_digest_survives(self):
+        # 64 lowercase hex characters - must not be mistaken for the new base64-body rule, which
+        # requires an uppercase letter precisely so a hex digest is never caught by it.
+        s = "a1b2c3d4" * 8
+        self.assertEqual(len(s), 64)
+        self.assertEqual(self.agent.redact(s), s)
+
+    def test_run2_negative_control_keyboard_param_is_not_mistaken_for_key(self):
+        # the new key= rule must match only a whole parameter named "key", not one that merely starts
+        # with those three letters.
+        s = "GET /search?q=monkey&keyboard=1"
+        self.assertEqual(self.agent.redact(s), s)
+
+    def test_run2_negative_control_signature_prose_survives(self):
+        s = "the signature was valid"
+        self.assertEqual(self.agent.redact(s), s)
+
+    def test_run2_negative_control_ordinary_check_first_line_survives(self):
+        s = "docker logs --tail 50 web-1"
+        self.assertEqual(self.agent.redact(s), s)
+
+    def test_run2_new_patterns_are_not_quadratic_on_a_repeated_prefix(self):
+        # each new pattern's own prefix, repeated with no terminator - the same shape that made the
+        # old bearer/authorization/user:pass@ patterns backtrack O(n^2) (see the test above this one
+        # in spirit, test_default_patterns_are_not_quadratic_on_a_repeated_prefix).
+        cases = (r'\"password\":' * 8000, "&sig=" * 8000, "aws_secret_access_key " * 8000, "MII" + "A" * 200000)
+        for s in cases:
+            start = time.monotonic()
+            self.agent._redact(s, self.agent.DEFAULT_REDACT)
+            self.assertLess(time.monotonic() - start, 1.0, s[:20])
+
     def test_unreachable_source_is_reported_not_raised(self):
         Fake.routes["/loki/api/v1/query_range"] = (500, {"error": "boom"})
         del Fake.routes["/api/annotations"]
@@ -636,6 +713,19 @@ class Sink(BaseHTTPRequestHandler):
     def log_message(self, *a): pass
 
 
+def _fenced_lines(md):
+    """Lines that landed inside a ``` ... ``` code fence of a formatted note - used to prove a
+    second redact() pass never pulls text that followed a fence-opening line into the fence."""
+    out, inside = [], False
+    for l in md.split("\n"):
+        if l.startswith("```"):
+            inside = not inside
+            continue
+        if inside:
+            out.append(l)
+    return out
+
+
 def _start_sink():
     srv = ThreadingHTTPServer(("127.0.0.1", 0), Sink)
     threading.Thread(target=srv.serve_forever, daemon=True).start()
@@ -786,6 +876,53 @@ class PostTests(unittest.TestCase):
         self.assertEqual(len(slack), 1)
         for path, body, _ in Sink.posts:
             self.assertNotIn("ZHVtbXk6ZHVtbXlwYXNz", body, path)
+
+    # --- security audit run-2: the second redact() pass used to run over the whole rendered note in
+    # one shot, and \s in bearer/authorization/x-api-key patterns crosses the "\n" between a guarded
+    # check_first line and whatever follows it, dropping that newline in the replacement - the
+    # model's next line then lands inside format_note()'s command fence.
+
+    def _run2_fence_case(self, check_first_line, not_seen_tail):
+        text = "Check first (from runbook)\n  %s\nNot seen: %s; MARKER-OUTSIDE" % (check_first_line, not_seen_tail)
+        self.agent.post_note(text)
+        for path in ("/slack", "/discord"):
+            bodies = [b for p, b, _ in Sink.posts if p == path]
+            self.assertEqual(len(bodies), 1, path)
+            payload = json.loads(bodies[0])
+            md = payload.get("text") or payload.get("content")
+            fenced = _fenced_lines(md)
+            self.assertFalse(any("MARKER-OUTSIDE" in l for l in fenced), (path, md))
+        return text
+
+    def test_run2_second_redact_pass_does_not_pull_a_line_into_the_fence_via_bearer(self):
+        self._run2_fence_case("docker logs --tail 50 bearer", "disk ok")
+
+    def test_run2_second_redact_pass_does_not_pull_a_line_into_the_fence_via_x_api_key(self):
+        self._run2_fence_case("kubectl -n default logs x-api-key:", "pods ok")
+
+    def test_run2_second_redact_pass_does_not_pull_a_line_into_the_fence_via_authorization(self):
+        self._run2_fence_case("ssh authorization: x", "ok")
+
+    def test_run2_post_note_redaction_preserves_line_count(self):
+        # the fix redacts line by line and rejoins with "\n" - the text handed to format_note() must
+        # have exactly as many newlines as the text post_note() started with, for every case above
+        # that used to trigger the line-merging bug.
+        texts = [
+            "Check first (from runbook)\n  docker logs --tail 50 bearer\nNot seen: disk ok; MARKER-OUTSIDE",
+            "Check first (from runbook)\n  kubectl -n default logs x-api-key:\nNot seen: pods ok; MARKER-OUTSIDE",
+            "Check first (from runbook)\n  ssh authorization: x\nNot seen: ok; MARKER-OUTSIDE",
+        ]
+        for text in texts:
+            captured = []
+            original_format_note = self.agent.format_note
+            self.agent.format_note = lambda t, flavor, _c=captured, _f=original_format_note: (_c.append(t), _f(t, flavor))[1]
+            try:
+                self.agent.post_note(text)
+            finally:
+                self.agent.format_note = original_format_note
+            self.assertTrue(captured, text)
+            for t in captured:
+                self.assertEqual(t.count("\n"), text.count("\n"), text)
 
     def test_slack_failure_does_not_stop_discord(self):
         # a receiver failing must not abort the loop - point Slack at a path that 500s and confirm

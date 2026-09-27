@@ -81,6 +81,16 @@ DEFAULT_REDACT = [
     # optional END group never makes it backtrack; a truncated key with no END still loses its body.
     (r"-----BEGIN [A-Z ]{0,32}PRIVATE KEY-----[A-Za-z0-9+/=\s\\]{0,8192}(?:-----END [A-Z ]{0,32}PRIVATE KEY-----)?",
      "[private-key-redacted]"),
+    # A PEM body that lost its -----BEGIN/END----- header/footer, or never had one in this log line -
+    # "MII" is the DER SEQUENCE tag every RSA/EC/PKCS8 key or cert starts with once base64-encoded.
+    # Bounded to 4096 like the rule above; the trailing "={0,2}" is optional padding, not required, so
+    # a body with none still matches whole.
+    (r"\bMII[A-Za-z0-9+/]{20,4096}={0,2}", "[pem-redacted]"),
+    # A lone base64 body line with no "MII" prefix of its own - a later line of a multi-line PEM once
+    # the first has already matched above, or a body pasted without its first line. Exactly 64 base64
+    # characters (PEM's own wrap width) containing at least one uppercase letter: that requirement is
+    # what keeps a 64-character lowercase hex digest (sha256, common in ordinary logs) out of this.
+    (r"(?m)^(?=[^\n]{0,63}[A-Z])[A-Za-z0-9+/]{64}$", "[pem-redacted]"),
     # The keyword must directly precede the separator - that trailing requirement alone is what
     # separates "safe" from "secret": max_tokens=, token_count=, tokenizer_latency=, secretary_id=,
     # passwordless_login= and pwd_check_interval= all have the keyword followed by more identifier
@@ -95,8 +105,19 @@ DEFAULT_REDACT = [
     # keyword to stop that - which fixed the false positives but then missed real secrets whose field
     # name is glued onto the keyword with no boundary at all (oldpassword=, apitoken=, mytoken=). The
     # trailing-separator requirement turned out to be the only check that needed to exist.
-    (r'(?i)((?:password|passwd|pwd|secret|token|api[_-]?key|access[_-]?key|private[_-]?key|client[_-]?secret))(["\']?\s*[:=]\s*["\']?)' + _REDACT_VALUE,
+    #
+    # The separator itself allows an optional backslash around each quote (\"password\": ...) so an
+    # escaped JSON blob nested inside another JSON-encoded log line (security audit run-2) is caught
+    # the same as a plain one; [ \t]{0,16}, not \s, so it can never cross a "\n" the way the bearer/
+    # authorization/x-api-key patterns below do (post_note() redacts line by line precisely because
+    # those three still can).
+    (r'(?i)((?:password|passwd|pwd|secret|token|api[_-]?key|access[_-]?key|private[_-]?key|client[_-]?secret))(\\?["\']?[ \t]{0,16}[:=][ \t]{0,16}\\?["\']?)' + _REDACT_VALUE,
      r"\1\2[redacted]"),
+    # Same two keywords, but no ":"/"=" at all - `aws configure set aws_secret_access_key <value>`
+    # and the matching session-token flag separate keyword and value with whitespace only. Restricted
+    # to these two AWS-specific names on purpose: a whitespace separator on the bare password/secret/
+    # token keywords above would redact ordinary prose ("password reset failed for user bob").
+    (r"(?i)(aws_secret_access_key|aws_session_token)([ \t]{1,16})" + _REDACT_VALUE, r"\1\2[redacted]"),
     (r"(?i)bearer\s+\S+", "Bearer [redacted]"),
     # Every quantifier from here on is bounded, except a last element a real credential can outgrow
     # (a Negotiate token runs to KBs): nothing follows it to backtrack for, and a bound there leaves
@@ -127,6 +148,12 @@ DEFAULT_REDACT = [
     # lookbehind, not \b: "-" is not \w, so "eyJ-eyJ-..." would give \b a start at every "eyJ" and each
     # would rescan the rest of the run
     (r"(?<![\w-])eyJ[\w-]{1,4096}\.eyJ[\w-]{1,8192}\.[\w-]{0,2048}", "[jwt-redacted]"),
+    # Signed-URL / SAS / STS query parameters: an Azure SAS or Teams workflow "sig=", an AWS
+    # presigned "X-Amz-Signature=" or "X-Amz-Security-Token=", and a bare API key passed as "key="
+    # (Google Maps and others). Bounded to 2048 and excludes "&"/"#" so it stops at the next
+    # parameter or fragment; requiring the leading "?"/"&" is what keeps "keyboard=1" from matching
+    # the "key" alternative - "key" must be the whole parameter name, not a prefix of it.
+    (r"(?i)([?&](?:sig|x-amz-signature|x-amz-security-token|key)=)[^&\s\"'#]{1,2048}", r"\1[redacted]"),
     # bounded quantifiers: an unbounded [\w.+-]+@[\w-]+\.[\w.-]+ backtracks O(n^2) on a long line with
     # an "@" but no "." after it (an attacker-controlled log line, easily tens of KB)
     (r"[\w.+-]{1,64}@[\w-]{1,63}(?:\.[\w-]{1,63})+", "[email]"),
@@ -582,7 +609,11 @@ def post_note(text):
     into the alert channel: a noisy triage is worse than a missing one. Each receiver is attempted
     independently so one failing (or unconfigured) receiver never stops the others. Returns True if
     at least one receiver accepted the note."""
-    text = redact(text)   # second pass: the model may quote anything the pack's redaction missed
+    # second pass: the model may quote anything the pack's redaction missed. Line by line, not
+    # redact(text) over the whole note in one shot - a pattern whose \s crosses a "\n" (bearer,
+    # authorization, x-api-key) drops that newline in its replacement, which used to merge the line
+    # after a guarded check_first command into format_note()'s code fence (security audit run-2).
+    text = "\n".join(redact(l) for l in text.split("\n"))
     oks = []
     def attempt(name, fn):
         try:

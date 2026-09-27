@@ -28,7 +28,11 @@ Prometheus (9090), Alertmanager (9093) and Loki (3100) have **no authentication*
 reach the port can read your metrics and logs and silence your alerts. Grafana (3000) has a password.
 So every published port binds to `127.0.0.1` by default (`BIND_ADDR` in `.env`) — with one
 exception, node-exporter, below. The triage agent (9096) is never published, and accepts alerts only
-with `TRIAGE_WEBHOOK_TOKEN` once it is set (`make init` generates it; see AI triage).
+with `TRIAGE_WEBHOOK_TOKEN` once it is set (`make init` generates it; see AI triage). That token
+authenticates only the Alertmanager-to-agent hop: Alertmanager's own API has no authentication, so
+anyone who can reach it can still trigger triage runs with labels they choose, up to
+`TRIAGE_MAX_RUNS_PER_HOUR` -- restrict who can send it alerts with Alertmanager's own
+`--web.config.file` basic auth or a NetworkPolicy.
 
 To reach Grafana from your laptop, tunnel instead of opening the port:
 
@@ -98,21 +102,27 @@ password) readable by other local users — run the kit on a host you control.
 Answer `y` to the triage question in `make init` and the kit runs a small agent
 (`scripts/triage_agent.py`, standard-library Python) that receives a copy of every critical alert. It
 gathers the alert's rule and current values from Prometheus, the last error lines from Loki, other
-firing alerts, recent deploy annotations and the alert's runbook section, and redacts passwords,
-tokens and emails before any of it is written anywhere.
+firing alerts, recent deploy annotations and the alert's runbook section, and makes a best-effort
+pass at redacting common credential shapes (passwords and API keys, `Authorization`/`Bearer`/`Cookie`
+headers, signed-URL parameters, PEM keys, emails) before any of it is written anywhere. It cannot
+catch a passphrase containing spaces or a secret described in prose (`api key is X`) -- keep those out
+of alert text and logs.
 
 `TRIAGE_DRY_RUN=true` is the default, and nothing leaves your network in that mode: the context pack
 is only printed to the agent's own log (`docker compose logs triage-agent`). The free tier runs the
 agent in dry run only; the note itself (the model call, with your own Anthropic key) is a Pro feature.
 
-`TRIAGE_REDACT` takes extra regexes (separated by `;;`) to strip from log lines before anything is
-sent.
+`TRIAGE_REDACT` adds your own regexes (separated by `;;`) to strip from log lines before anything is
+sent, on top of the built-in shapes above.
 
 Alertmanager authenticates to the agent with `TRIAGE_WEBHOOK_TOKEN`. `make init` generates one (hex)
 when you turn triage on and keeps it on every re-run; `render.sh` adds it to the `webhook-triage`
 receiver as a Bearer credential, and the agent answers 401 to any alert that does not carry it. Empty
 means no header and no check. Use ASCII only — `render.sh` refuses anything else, because such a
-token could never match. `TRIAGE_MAX_RUNS_PER_HOUR` caps triage runs in any rolling hour (empty = 30,
+token could never match. This only authenticates the Alertmanager-to-agent hop, though: Alertmanager's
+own API has no authentication, so anyone who can reach it can still trigger a triage run with labels
+of their choosing, up to the cap below — restrict who may send it alerts with Alertmanager's
+`--web.config.file` basic auth or a NetworkPolicy. `TRIAGE_MAX_RUNS_PER_HOUR` caps triage runs in any rolling hour (empty = 30,
 `0` = unlimited), so a burst of alert groups cannot turn into a burst of dry-run packs. A run the cap
 refuses logs `skip: hourly triage run cap reached`, and its alert group is still marked triaged, so a
 repeat of it within the hour is skipped too.
