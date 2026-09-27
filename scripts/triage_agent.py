@@ -472,7 +472,12 @@ def run_allowed(now=None):
     """Aggregate budget: at most TRIAGE_MAX_RUNS_PER_HOUR triage runs in any rolling hour (empty or
     garbage = 30, 0 = unlimited), so a flood of distinct groups cannot buy unbounded model calls."""
     raw = ENV("TRIAGE_MAX_RUNS_PER_HOUR", "")
-    limit = int(raw) if raw.strip().isdigit() else 30
+    try:
+        limit = int(raw)       # not str.isdigit(): "²".isdigit() is True and int("²") raises
+    except ValueError:
+        limit = 30
+    if limit < 0:
+        limit = 30
     if limit == 0:
         return True
     now = now or time.time()
@@ -636,7 +641,7 @@ def post_note(text):
 def process(payload):
     key = payload.get("groupKey") or json.dumps(payload.get("groupLabels", {}), sort_keys=True)
     # the dedup map outlives the request by an hour: hold a fixed-size digest, never the sender-sized key
-    if DEDUP.seen(hashlib.sha256(str(key).encode()).hexdigest()):
+    if DEDUP.seen(hashlib.sha256(str(key).encode("utf-8", "surrogatepass")).hexdigest()):
         log("skip: group already triaged within %ds: %s" % (DEDUP_SECONDS, json.dumps(key))); return
     if not run_allowed():
         log("skip: hourly triage run cap reached"); return

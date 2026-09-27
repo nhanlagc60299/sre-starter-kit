@@ -1224,6 +1224,22 @@ class IngressTests(unittest.TestCase):
             now = time.time()
             self.assertEqual([self.agent.run_allowed(now=now) for _ in range(31)], [True] * 30 + [False])
 
+    def test_run_cap_garbage_defaults_to_30(self):
+        # R16b: "²".isdigit() is True but int("²") raises - in every process thread
+        for raw in ("²", "-5", "abc"):
+            self.agent._RUNS.clear()
+            with mock.patch.dict(os.environ, {"TRIAGE_MAX_RUNS_PER_HOUR": raw}):
+                now = time.time()
+                self.assertEqual([self.agent.run_allowed(now=now) for _ in range(31)], [True] * 30 + [False], raw)
+
+    def test_lone_surrogate_group_key_is_deduped_not_a_crash(self):
+        # R16a: json.loads('"\\ud800"') succeeds, and str.encode() then raised UnicodeEncodeError
+        key = json.loads('"\\ud800"')
+        with mock.patch.object(self.agent, "build_pack", return_value={"sources": {}}) as bp, mock.patch("builtins.print"):
+            self.agent.process(dict(WEBHOOK, groupKey=key))
+            self.agent.process(dict(WEBHOOK, groupKey=key))
+        self.assertEqual(bp.call_count, 1)
+
     def test_dedup_stores_a_digest_not_the_sender_sized_group_key(self):
         # 2 MiB is over the 1 MiB body cap, so this drives process() directly: the dedup map must hold
         # a fixed-size digest whatever reaches it. The skip log line still names the raw key (R1),
