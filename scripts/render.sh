@@ -12,8 +12,13 @@ if [ -f "$ROOT/core/alertmanager/alertmanager.yml.tpl" ]; then
   # default and an unset value the same way the wizard now refuses to keep either silently. Guarded
   # on the template, like the checks below, so the minimal render fixture in tests/ (no .env key at
   # all) is unaffected.
-  if [ -z "${GRAFANA_ADMIN_PASSWORD:-}" ] || [ "${GRAFANA_ADMIN_PASSWORD:-}" = "change-me" ]; then
-    echo "ERROR: GRAFANA_ADMIN_PASSWORD must be set in .env and must not be the published default 'change-me'. Run 'make init' or set a real password by hand." >&2
+  # Grafana's own `grafana cli admin reset-admin-password` refuses anything under 4 characters
+  # ("the new password doesn't meet the password policy criteria", verified against
+  # grafana/grafana:12.0.0); a shorter value here would render cleanly and then leave compose
+  # rotation silently unapplied. Refuse it at the same place as empty/change-me rather than let it
+  # surface two steps later. Length only, never the value itself.
+  if [ -z "${GRAFANA_ADMIN_PASSWORD:-}" ] || [ "${GRAFANA_ADMIN_PASSWORD:-}" = "change-me" ] || [ "${#GRAFANA_ADMIN_PASSWORD}" -lt 4 ]; then
+    echo "ERROR: GRAFANA_ADMIN_PASSWORD must be set in .env, at least 4 characters (Grafana's own minimum), and must not be the published default 'change-me'. Run 'make init' or set a real password by hand." >&2
     exit 1
   fi
   if [ -n "${TELEGRAM_BOT_TOKEN:-}" ] && [ -z "${TELEGRAM_CHAT_ID:-}" ]; then

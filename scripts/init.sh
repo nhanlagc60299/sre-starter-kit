@@ -45,11 +45,11 @@ ask_pct DISK_WARN_PCT "Disk free % warning threshold" "15"
 ask_pct DISK_CRIT_PCT "Disk free % critical threshold" "5"
 ask PROM_RETENTION_TIME "Prometheus retention" "15d"
 ask LOKI_RETENTION_PERIOD "Loki retention" "168h"
-ask GRAFANA_ADMIN_PASSWORD "Grafana admin password" ""
-# Empty on a first run (no previous value to keep): generate one rather than shipping the public
-# default 'change-me'. Same CSPRNG idiom as the triage webhook token below, hex so it is easy to
-# read back out of .env if you ever need to.
-if [ -z "$GRAFANA_ADMIN_PASSWORD" ]; then
+ask_secret GRAFANA_ADMIN_PASSWORD "Grafana admin password"
+# Empty on a first run (no previous value to keep) or still the public default from an .env
+# written before this fix: generate one rather than keeping either. Same CSPRNG idiom as the
+# triage webhook token below, hex so it is easy to read back out of .env if you ever need to.
+if [ -z "$GRAFANA_ADMIN_PASSWORD" ] || [ "$GRAFANA_ADMIN_PASSWORD" = "change-me" ]; then
   GRAFANA_ADMIN_PASSWORD=$(od -An -tx1 -N24 /dev/urandom | tr -d ' \n')
   echo "Generated a random Grafana admin password (see .env, GRAFANA_ADMIN_PASSWORD)."
 fi

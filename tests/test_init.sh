@@ -201,4 +201,28 @@ printf '\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n' | ( cd "$tmp11" && bash scripts/init.sh 
 pw2=$(sed -n "s/^GRAFANA_ADMIN_PASSWORD='\(.*\)'\$/\1/p" "$tmp11/.env")
 [ "$pw2" = "$pw1" ] || { echo "FAIL: a blank answer on a re-run did not keep the existing Grafana password"; exit 1; }
 
+# --- an existing .env with the OLD 'change-me' default (written before this fix) must not be
+#     perpetuated on a re-run: treat it like empty and generate a real one -------------------
+tmp13=$(mktemp -d); trap 'rm -rf "$tmp" "$tmp7" "$tmp8" "$tmp8b" "$tmp9" "$tmp10" "$tmp11" "$tmp12" "$tmp13"' EXIT
+cp -r core scripts .env.example "$tmp13/"
+printf "GRAFANA_ADMIN_PASSWORD='change-me'\nSLACK_WEBHOOK_URL='http://localhost:9/'\n" > "$tmp13/.env"
+printf '\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n' | ( cd "$tmp13" && bash scripts/init.sh >/dev/null )
+pw3=$(sed -n "s/^GRAFANA_ADMIN_PASSWORD='\(.*\)'\$/\1/p" "$tmp13/.env")
+[ "$pw3" != "change-me" ] || { echo "FAIL: a re-run on an old .env kept the existing 'change-me' value"; exit 1; }
+[ "${#pw3}" -ge 20 ] || { echo "FAIL: re-run on an old change-me .env generated a password shorter than 20 characters (${#pw3})"; exit 1; }
+
+# --- the first-run prompt must say [empty], never [unchanged] --------------------------------
+# ask_secret's own read -p prompt is invisible to a plain stdout/stderr capture in some
+# environments (it can go straight to the controlling terminal), so this traces the wizard with
+# `bash -x` and greps ITS OWN trace of that same read command, after $shown has been substituted
+# into it -- xtrace always writes to fd 2, which a plain capture does not have to compete with.
+tmp12=$(mktemp -d); trap 'rm -rf "$tmp" "$tmp7" "$tmp8" "$tmp8b" "$tmp9" "$tmp10" "$tmp11" "$tmp12"' EXIT
+cp -r core scripts .env.example "$tmp12/"
+trace=$(printf 'acme\nhttp://localhost:9/\n\n\n\n\n\n\n\n\n\nn\n\n\n\n\nn\n' \
+  | ( cd "$tmp12" && bash -x scripts/init.sh ) 2>&1 1>/dev/null)
+echo "$trace" | grep -qF "read -rs -p 'Grafana admin password [unchanged]" \
+  && { echo "FAIL: first-run Grafana password prompt showed [unchanged] instead of [empty]"; exit 1; }
+echo "$trace" | grep -qF "read -rs -p 'Grafana admin password [empty]" \
+  || { echo "FAIL: first-run Grafana password prompt did not show [empty]: $(echo "$trace" | grep 'Grafana admin password' || echo NONE)"; exit 1; }
+
 echo "test_init OK"

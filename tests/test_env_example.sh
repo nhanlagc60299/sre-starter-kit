@@ -33,7 +33,7 @@ sed -i.bak 's#^SLACK_WEBHOOK_URL=.*#SLACK_WEBHOOK_URL=http://localhost:9/#' "$tm
 
 # GRAFANA_ADMIN_PASSWORD must never be empty, nor .env.example's own published default. Checked here
 # because a plain `cp .env.example .env` is exactly the shape that used to ship 'change-me' silently.
-for bad_pw in change-me ""; do
+for bad_pw in change-me "" abc; do
   sed -i.bak "s/^GRAFANA_ADMIN_PASSWORD=.*/GRAFANA_ADMIN_PASSWORD=$bad_pw/" "$tmp/.env" && rm -f "$tmp/.env.bak"
   out=$( cd "$tmp" && bash scripts/render.sh 2>&1 ) && { echo "FAIL: render accepted GRAFANA_ADMIN_PASSWORD='$bad_pw'"; exit 1; }
   case "$out" in
