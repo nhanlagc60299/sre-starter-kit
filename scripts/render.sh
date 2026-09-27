@@ -143,6 +143,21 @@ if [ -f "$AM" ] && [ -n "${ALERT_EMAIL_TO:-}" ]; then
         headers: { Subject: '[${PROJECT_NAME:-}] {{ .CommonLabels.alertname }} ({{ .Status }})' }"
   done
 fi
+# The triage agent answers 401 unless Alertmanager sends TRIAGE_WEBHOOK_TOKEN. Empty = no header, no check.
+# The agent compares UTF-8 bytes against a latin-1-decoded header, so only ASCII can ever match: refuse
+# anything else here rather than ship a config whose every triage delivery is rejected.
+if [ -f "$AM" ] && [ -n "${TRIAGE_WEBHOOK_TOKEN:-}" ]; then
+  python3 - "$AM" "$TRIAGE_WEBHOOK_TOKEN" <<'PY'
+import re,sys
+p,tok=sys.argv[1:]; s=open(p).read(); m="        # TRIAGE_WEBHOOK_AUTH"
+if not re.fullmatch(r"[!-~]+", tok):
+    sys.exit("ERROR: TRIAGE_WEBHOOK_TOKEN must be printable ASCII with no spaces (e.g. the hex 'make init' generates).")
+if m not in s:
+    sys.exit("ERROR: marker '%s' not found in %s - core/alertmanager/alertmanager.yml.tpl must keep it." % (m.strip(),p))
+auth="        http_config:\n          authorization:\n            type: Bearer\n            credentials: '%s'\n" % tok.replace("'","''")
+open(p,"w").write(s.replace(m, auth+m))
+PY
+fi
 # 4. security module off -> drop only its rules; the log alerts in logs.yml are not part of the module
 [ "${MODULE_SECURITY:-true}" = true ] || rm -f "$ROOT/build/loki/rules/fake/security.yml"
 

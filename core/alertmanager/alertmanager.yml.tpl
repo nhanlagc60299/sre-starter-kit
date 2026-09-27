@@ -56,6 +56,8 @@ receivers:
     # RECEIVERS_WARNING_EXTRA
   - name: webhook-triage
     # Reserved: point TRIAGE_WEBHOOK_URL at an AI triage service to receive a copy of every critical alert.
+    # With TRIAGE_WEBHOOK_TOKEN set, render.sh adds http_config.authorization at the marker.
     webhook_configs:
       - url: ${TRIAGE_WEBHOOK_URL}
         send_resolved: false
+        # TRIAGE_WEBHOOK_AUTH

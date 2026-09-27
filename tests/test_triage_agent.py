@@ -2,7 +2,7 @@
 """Unit tests for scripts/triage_agent.py against fake Prometheus/Loki/Alertmanager/Grafana servers.
 Every fixture below is the JSON shape the real service returns (verified live by tests/smoke.sh);
 if a live shape ever differs, fix the fixture here, never the agent to match the fixture."""
-import importlib.util, json, os, smtplib, sys, tempfile, threading, time, types, unittest, urllib.parse, urllib.request
+import importlib.util, json, os, smtplib, socket, ssl, sys, tempfile, threading, time, types, unittest, urllib.parse, urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from unittest import mock
 
@@ -220,6 +220,50 @@ class PackTests(unittest.TestCase):
         self.agent.redact(malicious)
         elapsed = time.monotonic() - start
         self.assertLess(elapsed, 2.0, "redact() must not be quadratic on an attacker-controlled line")
+
+    def test_credential_shapes_the_kit_itself_uses_are_redacted(self):
+        # security run-1 v01: every one of these went through redact() unchanged (the PEM one only
+        # partly) and on to the model provider and the chat note. Dummy secrets, real shapes -
+        # including the kit's own documented DISCORD_WEBHOOK_URL and Telegram bot-URL forms.
+        cases = {
+            '{"headers":{"Authorization":"Basic ZHVtbXk6ZHVtbXlwYXNz"}}': "ZHVtbXk6ZHVtbXlwYXNz",
+            "POST https://discord.com/api/webhooks/111/DummyTok failed": "DummyTok",
+            "GET https://api.telegram.org/bot123:Dummy/sendMessage": "123:Dummy",
+            "creds AKIADUMMYDUMMYDUMMY1 rejected": "AKIADUMMYDUMMYDUMMY1",
+            "Cookie: sid=dummy": "dummy",
+            "redis://:dummypass@cache": "dummypass",
+            "clone with ghp_" + "Dummy1" * 5: "Dummy1" * 5,
+            "jwt eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJkdW1teSJ9.DummySig": "eyJzdWIiOiJkdW1teSJ9.DummySig",
+            "private_key=-----BEGIN RSA PRIVATE KEY----- MIIDummyBody -----END RSA PRIVATE KEY-----": "MIIDummyBody",
+            "-----BEGIN PRIVATE KEY-----\nMIIDummyLine1\nMIIDummyLine2\n-----END PRIVATE KEY-----": "MIIDummyLine",
+            # a URL password containing "/" - the reason the bounded URL pattern keeps its classes
+            "postgres://u:pa/ss@db": "pa/ss",
+        }
+        for original, secret in cases.items():
+            self.assertNotIn(secret, self.agent.redact(original), original)
+
+    def test_long_credentials_are_redacted_whole_not_just_their_first_bytes(self):
+        # bounding a quantifier must not cap how much of a real credential gets redacted: a Kerberos
+        # Negotiate token runs to KBs, and a long URL password must not slip past the user:pass@ rule
+        negotiate = "Y" * 1500
+        for original in ("Authorization: Negotiate " + negotiate,
+                         '{"Authorization":"Negotiate %s"}' % negotiate):
+            self.assertNotIn("YYYY", self.agent.redact(original), original[:30])
+        pw = "p" * 300
+        for original in ("https://u:%s@host/x" % pw, "redis://:%s@cache" % pw):
+            self.assertNotIn("pppp", self.agent.redact(original), original[:20])
+
+    def test_default_patterns_are_not_quadratic_on_a_repeated_prefix(self):
+        # security run-1 v20: the Authorization and user:pass@ patterns backtracked O(n^2) on their
+        # own prefix repeated with no terminator - 3.3 s and 0.5 s here, GIL held throughout
+        for s in ("authorization:" * 8000, "://a:" * 8000):
+            start = time.monotonic()
+            self.agent._redact(s, self.agent.DEFAULT_REDACT)
+            self.assertLess(time.monotonic() - start, 0.1, s[:20])
+
+    def test_each_string_is_capped_before_any_regex_runs(self):
+        # trim() never shortens a single annotation, so without this a 100 KB one reaches every pattern
+        self.assertEqual(len(self.agent._redact("x" * 100000, [])), self.agent.HARD_CAP_BYTES)
 
     def test_cap_lines_bounds_total_characters_not_just_line_count(self):
         # a single unwrapped 500KB line passes a line-count cap trivially
@@ -555,6 +599,28 @@ def _unfenced(s):
     return s[len(FENCE_OPEN):-len(FENCE_CLOSE)]
 
 
+# Values crafted to forge a `triage-trace {...}` line the AI Triage Grafana dashboard would parse
+# as real: a real newline, a bare space, and (run-1 fix round 1, Ruling R7) a `"` positioned to end
+# json.dumps's quoted string early if log() also doubled the backslash that escape introduced.
+FORGED_TRACE_TEXTS = ('k\ntriage-trace {"outcome":"posted"}', 'k triage-trace {"outcome":"posted"}',
+                      'a" triage-trace {"outcome":"posted"}')
+
+
+def _decode_json_value_after(tc, line, prefix, expect):
+    """`line` must be `prefix` followed by exactly one JSON string that decodes back to `expect`,
+    with the rest of the line returned as-is. A stand-in substring check (e.g. asserting
+    '"outcome":"posted"' is absent) is not enough: it misses the case where an embedded `"` in the
+    untrusted value ends the JSON string early and leaves the remainder - possibly a forged
+    ` triage-trace {...}` - as unquoted trailing text (security-audit run-1 fix round 1, Ruling R7).
+    raw_decode() is the same thing a real JSON parser would do, so this proves the actual property:
+    the whole untrusted value round-trips as one JSON value, nothing more, nothing less."""
+    tc.assertTrue(line.startswith(prefix), line)
+    rest = line[len(prefix):]
+    value, end = json.JSONDecoder().raw_decode(rest)
+    tc.assertEqual(value, expect, line)
+    return rest[end:]
+
+
 class Sink(BaseHTTPRequestHandler):
     """Fake receivers (Slack/Discord/Telegram/email-via-webhook all just POST somewhere) on one
     server, started once at module level - shared by every test that posts a note, including
@@ -660,6 +726,45 @@ class PostTests(unittest.TestCase):
         finally:
             os.environ.update({"ALERT_EMAIL_TO": "", "SMTP_HOST": "", "SMTP_USER": "", "SMTP_PASSWORD": ""})
 
+    def test_starttls_verifies_the_server_certificate(self):
+        # security-audit run-1 v24: starttls() with no SSL context is an unverified context on
+        # CPython >= 3.12, so an on-path attacker can intercept the SMTP login in the clear.
+        os.environ.update({"ALERT_EMAIL_TO": "ops@example.com", "SMTP_HOST": "smtp.example.test:25",
+                           "SMTP_USER": "bob", "SMTP_PASSWORD": "secret"})
+        try:
+            with mock.patch("smtplib.SMTP") as MockSMTP:
+                conn = MockSMTP.return_value.__enter__.return_value
+                self.agent.post_note("Triage: x")
+                conn.starttls.assert_called_once()
+                _, kwargs = conn.starttls.call_args
+                ctx = kwargs.get("context")
+                self.assertIsNotNone(ctx, "starttls() must be called with an explicit context")
+                self.assertEqual(ctx.verify_mode, ssl.CERT_REQUIRED)
+                self.assertTrue(ctx.check_hostname)
+                conn.login.assert_called_once_with("bob", "secret")
+                conn.send_message.assert_called_once()
+        finally:
+            os.environ.update({"ALERT_EMAIL_TO": "", "SMTP_HOST": "", "SMTP_USER": "", "SMTP_PASSWORD": ""})
+
+    def test_starttls_cert_verification_failure_does_not_send(self):
+        # Ruling R8b (run-1 fix round 1): a server presenting a bad/self-signed cert must not result
+        # in a login or a send - ssl.create_default_context() makes starttls() itself raise
+        # SSLCertVerificationError when verification fails; post_note() must swallow that like any
+        # other receiver failure and report the note as not delivered, not raise or silently send.
+        os.environ.update({"ALERT_EMAIL_TO": "ops@example.com", "SMTP_HOST": "smtp.example.test:25",
+                           "SMTP_USER": "bob", "SMTP_PASSWORD": "secret",
+                           "SLACK_WEBHOOK_URL": "", "DISCORD_WEBHOOK_URL": ""})   # isolate to email only
+        try:
+            with mock.patch("smtplib.SMTP") as MockSMTP:
+                conn = MockSMTP.return_value.__enter__.return_value
+                conn.starttls.side_effect = ssl.SSLCertVerificationError("certificate verify failed")
+                self.assertIs(self.agent.post_note("Triage: x"), False)
+                conn.login.assert_not_called()
+                conn.send_message.assert_not_called()
+        finally:
+            os.environ.update({"ALERT_EMAIL_TO": "", "SMTP_HOST": "", "SMTP_USER": "", "SMTP_PASSWORD": "",
+                               "SLACK_WEBHOOK_URL": self.base + "/slack", "DISCORD_WEBHOOK_URL": self.base + "/discord"})
+
     def test_post_note_says_whether_anything_accepted_the_note(self):
         # process() turns this return value into the trace's outcome - "posted" vs "post-failed" -
         # and the AI Triage dashboard counts those. A post_note that always returned True would
@@ -672,6 +777,15 @@ class PostTests(unittest.TestCase):
         finally:
             os.environ.update({"SLACK_WEBHOOK_URL": self.base + "/slack",
                                "DISCORD_WEBHOOK_URL": self.base + "/discord"})
+
+    def test_note_is_redacted_again_before_posting(self):
+        # the model quotes log lines as evidence; whatever the pack's redaction missed must not
+        # reach the chat channel on the strength of the model's choice to quote it
+        self.agent.post_note('Triage: x\nevidence: {"Authorization":"Basic ZHVtbXk6ZHVtbXlwYXNz"}')
+        slack = [b for p, b, _ in Sink.posts if p == "/slack"]
+        self.assertEqual(len(slack), 1)
+        for path, body, _ in Sink.posts:
+            self.assertNotIn("ZHVtbXk6ZHVtbXlwYXNz", body, path)
 
     def test_slack_failure_does_not_stop_discord(self):
         # a receiver failing must not abort the loop - point Slack at a path that 500s and confirm
@@ -906,6 +1020,28 @@ class EngineHookTests(unittest.TestCase):
         self.assertEqual(len(self.calls), 1)
         self.assertEqual(SINK.posts, [])
 
+    def test_engine_raised_exception_message_is_escaped_to_prevent_a_forged_trace_line(self):
+        # Ruling R8a (run-1 fix round 1): "triage: engine raised ..." interpolates the exception's
+        # text without json.dumps, so an engine that raises with attacker-influenced text (e.g. an
+        # upstream error message it relays verbatim) could forge a dashboard trace line the same way
+        # the groupKey and last_error() cases could.
+        import io, contextlib
+        prefix = "triage-agent: triage: engine raised RuntimeError: "
+        for i, msg in enumerate(FORGED_TRACE_TEXTS):
+            def boom(pack, timeout, env, post=None, msg=msg):
+                self.calls.append((pack, timeout)); raise RuntimeError(msg)
+            sys.modules["triage_engine"].triage = boom
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                self.agent.process(dict(WEBHOOK, groupKey="engine-raised-test-%d" % i))
+            out = buf.getvalue()
+            # isolate the log() line among build_pack's own "source unreachable" noise (real network
+            # calls against a closed test server); a real newline in msg must not split it into two
+            matches = [l for l in out.splitlines() if l.startswith(prefix)]
+            self.assertEqual(len(matches), 1, out)
+            trailing = _decode_json_value_after(self, matches[0], prefix, msg)
+            self.assertEqual(trailing, "", "nothing may follow the JSON-quoted exception text: " + out)
+
     def test_no_engine_module_logs_pack_only(self):
         sys.modules.pop("triage_engine"); sys.modules["triage_engine"] = None   # import raises ImportError
         agent = load_agent(SINK.base, tempfile.mkdtemp())
@@ -965,6 +1101,181 @@ class EngineHookTests(unittest.TestCase):
         del self.fake.run
         self.agent.process(WEBHOOK)
         self.assertEqual(len(self.calls), 1); self.assertEqual(len(SINK.posts), 1)
+
+    def test_last_error_is_escaped_to_prevent_a_forged_trace_line(self):
+        # security-audit run-1 v19: the engine's last_error() is logged raw in the "no note" branch,
+        # so a value crafted to look like `triage-trace {...}` could forge a dashboard entry the
+        # same way an untrusted groupKey could.
+        import io, contextlib
+        self.result = None
+        prefix = "triage-agent: triage: no note ("
+        for i, value in enumerate(FORGED_TRACE_TEXTS):
+            self.fake.last_error = (lambda v: (lambda: v))(value)
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                self.agent.process(dict(WEBHOOK, groupKey="last-error-test-%d" % i))
+            out = buf.getvalue()
+            no_note_line = next(l for l in out.splitlines() if l.startswith(prefix))
+            trailing = _decode_json_value_after(self, no_note_line, prefix, value)
+            self.assertEqual(trailing, ")", no_note_line)
+            # exactly one genuine trace line is expected - the real one process() always prints last;
+            # a real newline or unescaped quote smuggled through last_error() must not add or
+            # corrupt it
+            trace_lines = [l for l in out.splitlines() if l.startswith("triage-trace ")]
+            self.assertEqual(len(trace_lines), 1, out)
+            self.assertEqual(json.loads(trace_lines[0][len("triage-trace "):])["outcome"], "no-note")
+
+
+class IngressTests(unittest.TestCase):
+    """The webhook port is reachable by anything that can reach the agent: an oversized or dishonest
+    Content-Length, an idle socket, an unauthenticated POST, a flood of distinct groups and a huge
+    groupKey must each be bounded before they cost memory, a thread or a model call. Real serve(0)
+    over loopback; every upstream URL points at a closed port so nothing real is ever fetched."""
+    def setUp(self):
+        s = socket.socket(); s.bind(("127.0.0.1", 0)); closed = s.getsockname()[1]; s.close()
+        self.agent = load_agent("http://127.0.0.1:%d" % closed, tempfile.mkdtemp())
+        self.srv, self.base = self.agent.serve(port=0)
+        self.port = self.srv.server_address[1]
+        self.addCleanup(self.srv.server_close); self.addCleanup(self.srv.shutdown)   # LIFO: shutdown, then close
+
+    def _raw(self, head, body=b"", wait=3.0):
+        """Send raw bytes; return (response bytes, seconds until the server closed) - None if still open."""
+        c = socket.create_connection(("127.0.0.1", self.port), timeout=wait)
+        try:
+            c.sendall(head + body); start = time.monotonic(); out = b""
+            try:
+                while True:
+                    chunk = c.recv(65536)
+                    if not chunk: return out, time.monotonic() - start
+                    out += chunk
+            except socket.timeout:
+                return out, None
+        finally:
+            c.close()
+
+    def _head(self, length):
+        return ("POST /alert HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\nContent-Length: %s\r\n\r\n" % length).encode()
+
+    def _post(self, headers=None):
+        req = urllib.request.Request(self.base + "/alert", data=json.dumps(WEBHOOK).encode(),
+                                     headers=dict({"Content-Type": "application/json"}, **(headers or {})))
+        try: return urllib.request.urlopen(req, timeout=5).status
+        except urllib.error.HTTPError as e: e.close(); return e.code
+
+    def test_oversized_content_length_is_413_without_reading_the_body(self):
+        with mock.patch.object(self.agent, "process") as proc:
+            out, _ = self._raw(self._head(2097152))     # headers only: the 2 MiB body never arrives
+        self.assertTrue(out.startswith(b"HTTP/1.0 413"), "expected an immediate 413, got %r" % out[:40])
+        proc.assert_not_called()
+
+    def test_negative_content_length_is_400_immediately(self):
+        out, _ = self._raw(self._head(-1))
+        self.assertTrue(out.startswith(b"HTTP/1.0 400"), "expected an immediate 400, got %r" % out[:40])
+
+    def test_idle_socket_is_closed_within_the_handler_timeout(self):
+        self.assertEqual(self.agent.Handler.timeout, 10, "the handler must carry a socket timeout by default")
+        with mock.patch.object(self.agent.Handler, "timeout", 1), mock.patch.object(self.agent, "process") as proc:
+            out, closed_after = self._raw(self._head(100), b"{", wait=4)
+        self.assertIsNotNone(closed_after, "a 1-of-100-bytes body must not hold the socket open")
+        self.assertLess(closed_after, 2.5)
+        proc.assert_not_called()
+
+    def test_webhook_token_is_required_when_set(self):
+        with mock.patch.dict(os.environ, {"TRIAGE_WEBHOOK_TOKEN": "t0k"}), mock.patch.object(self.agent, "process") as proc:
+            self.assertEqual(self._post(), 401)
+            self.assertEqual(self._post({"Authorization": "Bearer wrong"}), 401)
+            proc.assert_not_called()
+            self.assertEqual(self._post({"Authorization": "Bearer t0k"}), 200)
+
+    def test_empty_webhook_token_means_no_check(self):
+        with mock.patch.dict(os.environ, {"TRIAGE_WEBHOOK_TOKEN": ""}), mock.patch.object(self.agent, "process"):
+            self.assertEqual(self._post(), 200)
+
+    def _process_three_groups(self):
+        import io, contextlib
+        buf = io.StringIO()
+        with mock.patch.object(self.agent, "build_pack", return_value={"sources": {}}) as bp, contextlib.redirect_stdout(buf):
+            for i in range(3):
+                self.agent.process(dict(WEBHOOK, groupKey="run-cap-%d" % i))
+        return bp.call_count, buf.getvalue()
+
+    def test_hourly_run_cap_stops_the_third_distinct_group(self):
+        with mock.patch.dict(os.environ, {"TRIAGE_MAX_RUNS_PER_HOUR": "2"}):
+            calls, out = self._process_three_groups()
+            self.assertEqual(calls, 2)
+            self.assertIn("triage-agent: skip: hourly triage run cap reached", out)
+            self.assertTrue(self.agent.run_allowed(now=time.time() + 3601), "runs older than an hour must age out")
+
+    def test_a_deduped_repeat_does_not_spend_a_run(self):
+        with mock.patch.dict(os.environ, {"TRIAGE_MAX_RUNS_PER_HOUR": "2"}), \
+                mock.patch.object(self.agent, "build_pack", return_value={"sources": {}}) as bp, mock.patch("builtins.print"):
+            for key in ("repeat", "repeat", "other"):
+                self.agent.process(dict(WEBHOOK, groupKey=key))
+        self.assertEqual(bp.call_count, 2)
+
+    def test_run_cap_zero_is_unlimited(self):
+        with mock.patch.dict(os.environ, {"TRIAGE_MAX_RUNS_PER_HOUR": "0"}):
+            calls, out = self._process_three_groups()
+        self.assertEqual(calls, 3)
+        self.assertNotIn("run cap reached", out)
+
+    def test_run_cap_defaults_to_30(self):
+        with mock.patch.dict(os.environ, {"TRIAGE_MAX_RUNS_PER_HOUR": ""}):
+            now = time.time()
+            self.assertEqual([self.agent.run_allowed(now=now) for _ in range(31)], [True] * 30 + [False])
+
+    def test_dedup_stores_a_digest_not_the_sender_sized_group_key(self):
+        # 2 MiB is over the 1 MiB body cap, so this drives process() directly: the dedup map must hold
+        # a fixed-size digest whatever reaches it. The skip log line still names the raw key (R1),
+        # JSON-escaped (v19) so it cannot inject a line of its own.
+        import io, contextlib
+        buf = io.StringIO()
+        with mock.patch.object(self.agent, "build_pack", return_value={"sources": {}}), contextlib.redirect_stdout(buf):
+            self.agent.process(dict(WEBHOOK, groupKey="k" * (2 << 20)))
+            self.agent.process(dict(WEBHOOK, groupKey="raw-key-for-the-log"))
+            self.agent.process(dict(WEBHOOK, groupKey="raw-key-for-the-log"))
+        self.assertEqual(len(self.agent.DEDUP.stamp), 2)
+        self.assertTrue(all(len(k) == 64 for k in self.agent.DEDUP.stamp), [len(k) for k in self.agent.DEDUP.stamp])
+        self.assertIn('skip: group already triaged within 3600s: ' + json.dumps("raw-key-for-the-log"), buf.getvalue())
+
+    def test_process_escapes_forged_trace_in_dedup_skip_log(self):
+        # security-audit run-1 v19: an unauthenticated POST controls groupKey, and process() used to
+        # log it raw through log() (no escaping). R1 (Task 1) keeps the RAW groupKey in `key` for
+        # these log lines (only its digest goes into DEDUP), so the fix has to escape it here, not
+        # stop logging it.
+        import io, contextlib
+        prefix = "triage-agent: skip: group already triaged within 3600s: "
+        for key in FORGED_TRACE_TEXTS:
+            with mock.patch.object(self.agent, "build_pack", return_value={"sources": {}}):
+                with contextlib.redirect_stdout(io.StringIO()):
+                    self.agent.process(dict(WEBHOOK, groupKey=key))   # 1st call: seeds DEDUP, noise discarded
+                buf = io.StringIO()
+                with contextlib.redirect_stdout(buf):
+                    self.agent.process(dict(WEBHOOK, groupKey=key))   # 2nd call: hits the dedup-skip log line
+            out = buf.getvalue()
+            self.assertEqual(len(out.splitlines()), 1, out)   # a real newline in the key must not split the line
+            trailing = _decode_json_value_after(self, out.splitlines()[0], prefix, key)
+            self.assertEqual(trailing, "", "nothing may follow the JSON-quoted key: " + out)
+
+    def test_process_escapes_forged_trace_in_build_pack_failure_log(self):
+        # same forgery, through the build_pack-failed log line (key + exception).
+        import io, contextlib
+
+        def boom(payload):
+            raise RuntimeError("boom")
+        self.agent.build_pack = boom
+        prefix = "triage-agent: build_pack failed for "
+        sep = ": RuntimeError: "
+        for key in FORGED_TRACE_TEXTS:
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                self.agent.process(dict(WEBHOOK, groupKey=key))
+            out = buf.getvalue()
+            self.assertEqual(len(out.splitlines()), 1, out)
+            after_key = _decode_json_value_after(self, out.splitlines()[0], prefix, key)
+            self.assertTrue(after_key.startswith(sep), out)
+            trailing = _decode_json_value_after(self, after_key[len(sep):], "", "boom")
+            self.assertEqual(trailing, "", "nothing may follow the JSON-quoted exception text: " + out)
 
 
 if __name__ == "__main__":

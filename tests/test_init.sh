@@ -161,15 +161,20 @@ printf 'acme\nhttp://localhost:9/\n\n\n\n\n\n\n\n\ns3cret\ny\n\ny\n\n\n\ny\n' \
 grep -qxF "COMPOSE_PROFILES='cadvisor,triage'" "$tmp10/.env"
 grep -qxF "TRIAGE_WEBHOOK_URL='http://triage-agent:9096/alert'" "$tmp10/.env"
 grep -qxF "TRIAGE_DRY_RUN='true'" "$tmp10/.env"   # free tier: always dry run, even after y
+# not asked (no new wizard question): a hex token is generated when triage turns on and none exists yet
+tok1=$(sed -n "s/^TRIAGE_WEBHOOK_TOKEN='\(.*\)'$/\1/p" "$tmp10/.env")
+[[ "$tok1" =~ ^[0-9a-f]{48}$ ]] || { echo "FAIL: no 48-hex TRIAGE_WEBHOOK_TOKEN generated when triage turned on, got '$tok1'"; exit 1; }
 
 # re-run with every answer blank: all 18 questions default, and the triage default must come back "y"
 printf '%.0s\n' $(seq 1 18) | ( cd "$tmp10" && bash scripts/init.sh >/dev/null )
 grep -qxF "COMPOSE_PROFILES='cadvisor,triage'" "$tmp10/.env"
 grep -qxF "TRIAGE_WEBHOOK_URL='http://triage-agent:9096/alert'" "$tmp10/.env"
+grep -qxF "TRIAGE_WEBHOOK_TOKEN='$tok1'" "$tmp10/.env" || { echo "FAIL: TRIAGE_WEBHOOK_TOKEN was not kept across a re-run"; exit 1; }
 
 # re-run answering "n" to triage (17 blanks then n) removes the profile and resets the webhook
 printf '\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\nn\n' | ( cd "$tmp10" && bash scripts/init.sh >/dev/null )
 grep -qxF "COMPOSE_PROFILES='cadvisor'" "$tmp10/.env"
 grep -qxF "TRIAGE_WEBHOOK_URL='http://localhost:9/'" "$tmp10/.env"
+grep -qxF "TRIAGE_WEBHOOK_TOKEN=''" "$tmp10/.env" || { echo "FAIL: TRIAGE_WEBHOOK_TOKEN was not cleared when triage was turned off"; exit 1; }
 
 echo "test_init OK"

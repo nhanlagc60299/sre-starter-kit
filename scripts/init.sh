@@ -73,8 +73,11 @@ case "${TRIAGE_WEBHOOK_URL:-}" in http://triage-agent:9096/alert) tri_default=y 
 ask TRIAGE_ANS "Enable the triage agent? Free tier: dry-run context packs in the agent log, no AI notes (y/n)" "$tri_default"
 case "$TRIAGE_ANS" in y|Y|yes|YES)
   COMPOSE_PROFILES="${COMPOSE_PROFILES:+$COMPOSE_PROFILES,}triage"
-  TRIAGE_WEBHOOK_URL=http://triage-agent:9096/alert ;;
-*) TRIAGE_WEBHOOK_URL=http://localhost:9/ ;;
+  TRIAGE_WEBHOOK_URL=http://triage-agent:9096/alert
+  # The secret Alertmanager sends the agent (render.sh adds it to webhook-triage). Not asked: kept
+  # when set, generated otherwise. Hex, because the agent compares it as bytes and needs ASCII.
+  [ -n "${TRIAGE_WEBHOOK_TOKEN:-}" ] || TRIAGE_WEBHOOK_TOKEN=$(od -An -tx1 -N24 /dev/urandom | tr -d ' \n') ;;
+*) TRIAGE_WEBHOOK_URL=http://localhost:9/; TRIAGE_WEBHOOK_TOKEN= ;;
 esac
 TRIAGE_DRY_RUN=true
 # Telegram needs both the bot token and the chat id to actually notify anyone; the token alone
@@ -100,6 +103,8 @@ SMTP_PASSWORD=$(q "${SMTP_PASSWORD:-}")
 TRIAGE_WEBHOOK_URL=$(q "${TRIAGE_WEBHOOK_URL:-http://localhost:9/}")
 TRIAGE_DRY_RUN=$(q "${TRIAGE_DRY_RUN:-true}")
 TRIAGE_REDACT=$(q "${TRIAGE_REDACT:-}")
+TRIAGE_WEBHOOK_TOKEN=$(q "${TRIAGE_WEBHOOK_TOKEN:-}")
+TRIAGE_MAX_RUNS_PER_HOUR=$(q "${TRIAGE_MAX_RUNS_PER_HOUR:-}")
 SERVICES=$(q "${SERVICES:-}")
 DISK_WARN_PCT=$(q "$DISK_WARN_PCT")
 DISK_CRIT_PCT=$(q "$DISK_CRIT_PCT")

@@ -33,7 +33,9 @@ ${CONTAINER_ENGINE:-docker} run --rm -v "$tmp/build/alertmanager:/c" --entrypoin
 # (compose/docker-compose.yml), so this is the actual parser that mattered -- confirm it is really
 # an empty string, not the comment text, under `--profile triage config`.
 cfg=$( cd "$tmp" && ${CONTAINER_ENGINE:-docker} compose --profile triage --env-file .env -f compose/docker-compose.yml config )
-[[ "$cfg" == *'TRIAGE_REDACT: ""'* ]] || { echo "FAIL: TRIAGE_REDACT is not an empty string under --profile triage config"; exit 1; }
+for k in TRIAGE_REDACT TRIAGE_WEBHOOK_TOKEN TRIAGE_MAX_RUNS_PER_HOUR; do
+  [[ "$cfg" == *"$k: \"\""* ]] || { echo "FAIL: $k is not an empty string under --profile triage config"; exit 1; }
+done
 
 # The Slack link on every alert is Alertmanager's external URL. Unset, it is the container's
 # hostname, which nobody can click. compose reads the key straight from .env.

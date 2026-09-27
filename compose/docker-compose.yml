@@ -117,6 +117,9 @@ services:
       SMTP_FROM: "${SMTP_FROM:-}"
       SMTP_USER: "${SMTP_USER:-}"
       SMTP_PASSWORD: "${SMTP_PASSWORD:-}"
+      # Alertmanager sends this token (render.sh puts it in webhook-triage); empty = no check.
+      TRIAGE_WEBHOOK_TOKEN: "${TRIAGE_WEBHOOK_TOKEN:-}"
+      TRIAGE_MAX_RUNS_PER_HOUR: "${TRIAGE_MAX_RUNS_PER_HOUR:-}"
     # No port published: Alertmanager reaches it at triage-agent:9096 inside the compose network.
 
 volumes: { prom-data: {}, am-data: {}, loki-data: {}, alloy-data: {}, grafana-data: {} }

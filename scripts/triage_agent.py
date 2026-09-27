@@ -4,7 +4,7 @@ redacts it, and either prints it (dry run, the default) or hands it to triage_en
 the Anthropic Messages API with your own key, and posts the returned note. Standard library only, on
 purpose: anyone can read this file end to end and know exactly what leaves their network. Only GETs
 against the kit's services."""
-import base64, json, os, re, threading, time, urllib.error, urllib.parse, urllib.request
+import base64, hashlib, hmac, json, os, re, threading, time, urllib.error, urllib.parse, urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 try:
@@ -38,6 +38,7 @@ FENCE_OPEN, FENCE_CLOSE = "```\n", "\n```"   # a code fence; format_note() puts 
                                               # it never sees a fence - see post_note()'s telegram().
 FENCE_CHARS = len(FENCE_OPEN) + len(FENCE_CLOSE)
 ENV = os.environ.get
+MAX_BODY = 1 << 20         # bytes; a webhook body over this is refused with 413 before any of it is read
 # The pack is what the model reads: cap it in tokens so an internal model with a small context window
 # never gets a prompt it cannot hold. 4 bytes per token is conservative for ASCII JSON; the floor keeps
 # a runbook and one rule in the pack; HARD_CAP_BYTES stays the never-exceed ceiling.
@@ -75,6 +76,11 @@ TELEGRAM_API = "https://api.telegram.org/bot%s/sendMessage"
 # quoted JSON value or a comma-separated field instead of swallowing whatever follows.
 _REDACT_VALUE = r'[^\s"\',;)]+'
 DEFAULT_REDACT = [
+    # PEM first: the keyword rule below would otherwise eat "private_key=-----BEGIN" and leave the
+    # body. The body class (base64, whitespace, a literal "\n" from a JSON log) stops at "-", so the
+    # optional END group never makes it backtrack; a truncated key with no END still loses its body.
+    (r"-----BEGIN [A-Z ]{0,32}PRIVATE KEY-----[A-Za-z0-9+/=\s\\]{0,8192}(?:-----END [A-Z ]{0,32}PRIVATE KEY-----)?",
+     "[private-key-redacted]"),
     # The keyword must directly precede the separator - that trailing requirement alone is what
     # separates "safe" from "secret": max_tokens=, token_count=, tokenizer_latency=, secretary_id=,
     # passwordless_login= and pwd_check_interval= all have the keyword followed by more identifier
@@ -92,20 +98,54 @@ DEFAULT_REDACT = [
     (r'(?i)((?:password|passwd|pwd|secret|token|api[_-]?key|access[_-]?key|private[_-]?key|client[_-]?secret))(["\']?\s*[:=]\s*["\']?)' + _REDACT_VALUE,
      r"\1\2[redacted]"),
     (r"(?i)bearer\s+\S+", "Bearer [redacted]"),
-    (r"(?i)(?<![A-Za-z0-9])authorization:\s*\S+\s+\S+", "Authorization: [redacted]"),
+    # Every quantifier from here on is bounded, except a last element a real credential can outgrow
+    # (a Negotiate token runs to KBs): nothing follows it to backtrack for, and a bound there leaves
+    # the credential's tail in the clear. The two below were "\S+\s+\S+" and "[^/\s:]+:[^@\s]+@": on
+    # their own prefix repeated with no terminator ("authorization:" * 8000) each backtracked O(n^2) -
+    # seconds of GIL on one webhook. Only the quantifiers changed; the classes stay, because narrowing
+    # the URL one (say, excluding "/") stops redacting pa/ss passwords. The URL password bound is 1024,
+    # not less: "@" follows it, so it cannot be unbounded, and a longer password is not redacted at all.
+    (r"(?i)(?<![A-Za-z0-9])authorization:\s*\S{1,512}\s+\S+", "Authorization: [redacted]"),
+    # quoted/escaped/"="-separated Authorization and Cookie values: "Authorization":"Basic ..." in a
+    # JSON header dump, Cookie: a=1; b=2. The value runs to the closing quote or end of line. The
+    # lookahead leaves a bare header the rule above already redacted (and whatever follows it) alone.
+    (r"(?i)(?<![A-Za-z0-9])(authorization|cookie)(\\?[\"']?\s{0,16}[:=]\s{0,16}\\?[\"']?)(?!\s{0,16}\[redacted\])[^\"'\n]+",
+     r"\1\2[redacted]"),
     (r"(?i)https?://hooks\.(?:slack\.com|discord(?:app)?\.com)/" + _REDACT_VALUE, "[webhook-url-redacted]"),
-    (r"://[^/\s:]+:[^@\s]+@", "://[redacted]@"),          # user:pass@ in URLs - must run before the
-                                                            # email pattern, or "user:pass@host" reads
-                                                            # as an email and eats the hostname with it
+    # the DISCORD_WEBHOOK_URL form .env.example documents, and the Telegram bot token in its API URL
+    (r"(?i)https?://(?:ptb\.|canary\.)?discord(?:app)?\.com/api/webhooks/[^\s\"',;)]{1,512}", "[webhook-url-redacted]"),
+    (r"(?i)api\.telegram\.org/bot[^/\s]{1,256}", "api.telegram.org/bot[redacted]"),
+    (r"://[^/\s:]{1,256}:[^@\s]{1,1024}@", "://[redacted]@"),  # user:pass@ in URLs - must run before
+    (r"://:[^@\s]{1,1024}@", "://[redacted]@"),               # the email pattern, or "user:pass@host"
+                                                              # reads as an email and eats the hostname;
+                                                              # the second is redis://:pass@ (no user)
     (r"(?i)x-api-key:\s*\S+", "x-api-key: [redacted]"),
     (r"sk-ant-[A-Za-z0-9_-]+", "[anthropic-key-redacted]"),
+    (r"\b(?:AKIA|ASIA)[0-9A-Z]{16}\b", "[aws-key-redacted]"),
+    (r"\b(?:gh[pousr]_[A-Za-z0-9]{20,255}|xox[abprs]-[A-Za-z0-9-]{1,255}|sk-[A-Za-z0-9_-]{16,255}|sk_live_[A-Za-z0-9]{1,255})",
+     "[token-redacted]"),
+    # lookbehind, not \b: "-" is not \w, so "eyJ-eyJ-..." would give \b a start at every "eyJ" and each
+    # would rescan the rest of the run
+    (r"(?<![\w-])eyJ[\w-]{1,4096}\.eyJ[\w-]{1,8192}\.[\w-]{0,2048}", "[jwt-redacted]"),
     # bounded quantifiers: an unbounded [\w.+-]+@[\w-]+\.[\w.-]+ backtracks O(n^2) on a long line with
     # an "@" but no "." after it (an attacker-controlled log line, easily tens of KB)
     (r"[\w.+-]{1,64}@[\w-]{1,63}(?:\.[\w-]{1,63})+", "[email]"),
 ]
 
 
-def log(msg): print("triage-agent: " + msg, flush=True)
+def log(msg):
+    """print() with the message's raw \\r/\\n escaped so it can never split into more than one
+    stdout line - a second line could start with `triage-trace {`, which the AI Triage Grafana
+    dashboard's scraper would mistake for a genuine trace (security-audit run-1 v19). Untrusted
+    values are additionally wrapped in json.dumps at the call site; do NOT also escape backslash
+    here. json.dumps already turns every `"` into `\\"` and every `\\` into `\\\\`; re-escaping those
+    backslashes a second time here would turn a `\\"` into `\\\\"`, which a JSON parser reads as an
+    escaped backslash followed by an UNESCAPED quote - closing the string early and leaving the rest
+    of the value as unquoted trailing text (run-1 fix round 1, Ruling R7). A raw \\r/\\n is the only
+    thing that can still split a line once the untrusted value has already been through json.dumps,
+    since json.dumps itself turns any real \\r/\\n in the value into the two literal characters
+    \\\\r/\\\\n - never an actual control character."""
+    print("triage-agent: " + msg.replace("\r", "\\r").replace("\n", "\\n"), flush=True)
 
 
 class Budget:
@@ -292,6 +332,7 @@ def redact(obj):
 
 def _redact(obj, pats):
     if isinstance(obj, str):
+        obj = obj[:HARD_CAP_BYTES]   # one string bigger than the whole pack budget is never useful context
         for pat, rep in pats:
             obj = re.sub(pat, rep, obj)
         return obj
@@ -424,6 +465,23 @@ class Dedup:
 
 
 DEDUP = Dedup()
+_RUNS, _RUNS_LOCK = [], threading.Lock()
+
+
+def run_allowed(now=None):
+    """Aggregate budget: at most TRIAGE_MAX_RUNS_PER_HOUR triage runs in any rolling hour (empty or
+    garbage = 30, 0 = unlimited), so a flood of distinct groups cannot buy unbounded model calls."""
+    raw = ENV("TRIAGE_MAX_RUNS_PER_HOUR", "")
+    limit = int(raw) if raw.strip().isdigit() else 30
+    if limit == 0:
+        return True
+    now = now or time.time()
+    with _RUNS_LOCK:
+        _RUNS[:] = [t for t in _RUNS if now - t < 3600]
+        if len(_RUNS) >= limit:
+            return False
+        _RUNS.append(now)
+        return True
 
 
 def post_json(url, body, headers=None, timeout=45):
@@ -519,6 +577,7 @@ def post_note(text):
     into the alert channel: a noisy triage is worse than a missing one. Each receiver is attempted
     independently so one failing (or unconfigured) receiver never stops the others. Returns True if
     at least one receiver accepted the note."""
+    text = redact(text)   # second pass: the model may quote anything the pack's redaction missed
     oks = []
     def attempt(name, fn):
         try:
@@ -548,7 +607,7 @@ def post_note(text):
         attempt("telegram", telegram)
     if ENV("ALERT_EMAIL_TO") and ENV("SMTP_HOST"):
         def mail():
-            import smtplib
+            import smtplib, ssl
             from email.message import EmailMessage
             m = EmailMessage()
             m["Subject"] = text.splitlines()[0][:120] if text else "Triage note"
@@ -556,7 +615,10 @@ def post_note(text):
             host, _, port = ENV("SMTP_HOST").partition(":")
             with smtplib.SMTP(host, int(port or 587), timeout=10) as s:
                 try:
-                    s.starttls()
+                    # ssl.create_default_context() verifies the server certificate and hostname;
+                    # starttls() with no context is an unverified context on CPython >= 3.12, which
+                    # would hand the SMTP login to an on-path attacker (security-audit run-1 v24).
+                    s.starttls(context=ssl.create_default_context())
                 except smtplib.SMTPNotSupportedError:
                     # .env.example documents an unauthenticated relay on your own network as a valid
                     # setup, and those commonly don't offer STARTTLS at all. That's fine when there's
@@ -573,8 +635,11 @@ def post_note(text):
 
 def process(payload):
     key = payload.get("groupKey") or json.dumps(payload.get("groupLabels", {}), sort_keys=True)
-    if DEDUP.seen(key):
-        log("skip: group already triaged within %ds: %s" % (DEDUP_SECONDS, key)); return
+    # the dedup map outlives the request by an hour: hold a fixed-size digest, never the sender-sized key
+    if DEDUP.seen(hashlib.sha256(str(key).encode()).hexdigest()):
+        log("skip: group already triaged within %ds: %s" % (DEDUP_SECONDS, json.dumps(key))); return
+    if not run_allowed():
+        log("skip: hourly triage run cap reached"); return
     budget = Budget(TOTAL_TRIAGE_BUDGET)
     try:
         pack = build_pack(payload)
@@ -582,7 +647,7 @@ def process(payload):
         # DEDUP.seen() above already marked this key seen; on failure we deliberately leave that mark
         # in place rather than undo it, so a repeatedly-firing alert is skipped for DEDUP_SECONDS
         # instead of hammering a broken upstream on every Alertmanager repeat.
-        log("build_pack failed for %s: %s: %s" % (key, e.__class__.__name__, e)); return
+        log("build_pack failed for %s: %s: %s" % (json.dumps(key), e.__class__.__name__, json.dumps(str(e)))); return
     if ENV("TRIAGE_DRY_RUN", "true").lower() == "true":
         log("dry run pack (%d bytes, sources %s)" % (len(json.dumps(pack)), json.dumps(pack["sources"])))
         print(json.dumps(pack), flush=True); return
@@ -601,25 +666,35 @@ def process(payload):
     try:
         results = run(payload, pack, remaining, os.environ, tools=run_tool) if run else [(triage_engine.triage(pack, remaining, os.environ), {"task": "triage"})]
     except Exception as e:  # noqa: BLE001 - an engine bug must not kill this worker thread
-        log("triage: engine raised %s: %s" % (e.__class__.__name__, e)); return
+        log("triage: engine raised %s: %s" % (e.__class__.__name__, json.dumps(str(e)))); return
     for text, trace in results:
         if text:
             ok = post_note(text)
             trace["outcome"] = "posted" if ok else "post-failed"
         else:
             trace["outcome"] = "no-note"
-            log("triage: no note (%s)" % getattr(triage_engine, "last_error", lambda: "")())
+            log("triage: no note (%s)" % json.dumps(getattr(triage_engine, "last_error", lambda: "")()))
         print("triage-trace " + json.dumps(trace, sort_keys=True), flush=True)
 
 
 class Handler(BaseHTTPRequestHandler):
+    timeout = 10   # seconds of socket idle before the connection is dropped; a stalled sender cannot pin a thread
+
     def do_GET(self):
         self.send_response(200 if self.path == "/healthz" else 404); self.end_headers()
 
     def do_POST(self):
         if self.path != "/alert":
             self.send_response(404); self.end_headers(); return
-        n = int(self.headers.get("Content-Length", "0"))
+        tok = ENV("TRIAGE_WEBHOOK_TOKEN", "")    # empty = no check, the pre-token behaviour
+        if tok and not hmac.compare_digest(self.headers.get("Authorization", "").encode(), ("Bearer " + tok).encode()):
+            self.send_response(401); self.end_headers(); return
+        try:
+            n = int(self.headers.get("Content-Length", "0"))
+        except ValueError:
+            n = -1
+        if n < 0 or n > MAX_BODY:                # refused before a single body byte is read
+            self.send_response(413 if n > MAX_BODY else 400); self.end_headers(); return
         try:
             payload = json.loads(self.rfile.read(n).decode() or "{}")
         except ValueError:
