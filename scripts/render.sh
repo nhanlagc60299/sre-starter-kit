@@ -46,6 +46,19 @@ fi
 # The dashboard link on every alert; defaults here for a .env written before the key existed.
 : "${GRAFANA_EXTERNAL_URL:=http://localhost:3000}"
 export NODE_EXPORTER_TARGET GRAFANA_EXTERNAL_URL
+# Task 13: the sanitizer piped after every label/annotation-derived action reaching a chat/email
+# notification (see core/alertmanager/alertmanager.yml.tpl and the receiver blocks below). Not a
+# customer setting -- it reuses the same ${VAR} substitution render.sh already does for
+# GRAFANA_EXTERNAL_URL etc. so the templates stay short. reReplaceAll is Alertmanager's only
+# string-replace template func (regex-based; there is no plain `replace`). Order matters: & first,
+# so the </> entities below are not themselves re-escaped by the earlier step. Replacements are
+# visible, not silently dropped: &,<,> become the HTML entities Slack's own escaping convention
+# already renders as literal characters; [ and ] become full-width look-alikes so masked-link syntax
+# breaks; @ and ` become full-width look-alikes so an @everyone/@here/<@U...> mention or a code fence
+# can't fire. "[[]" / "[]]" are the POSIX bracket-expression idiom for a literal [ / ] (a leading ]
+# is literal inside a class); verified against prom/alertmanager:v0.28.1's amtool template render.
+SANITIZE='reReplaceAll "&" "&amp;" | reReplaceAll "<" "&lt;" | reReplaceAll ">" "&gt;" | reReplaceAll "[[]" "［" | reReplaceAll "[]]" "］" | reReplaceAll "@" "＠" | reReplaceAll "`" "｀"'
+export SANITIZE
 # Refresh build/ IN PLACE, never `rm -rf build`: compose bind-mounts build/prometheus, build/alertmanager,
 # build/loki/config.alloy and friends, and on Linux a bind mount follows the inode. Wiping the tree left
 # every running container reading the deleted copy, so `make reload` HUPed Prometheus into its own stale
@@ -54,7 +67,7 @@ export NODE_EXPORTER_TARGET GRAFANA_EXTERNAL_URL
 mkdir -p "$ROOT/build"
 _mark=$(mktemp); trap 'rm -f "$_mark"' EXIT   # every file written by this run is newer than it
 # Only substitute variables that are defined in .env, so Prometheus/Alloy $labels etc. survive.
-VARS="$(grep -oE '^[A-Z_][A-Z0-9_]*=' "$ROOT/.env" | sed 's/=$//' | sed 's/^/\$/' | tr '\n' ' ') \$NODE_EXPORTER_TARGET \$GRAFANA_EXTERNAL_URL"
+VARS="$(grep -oE '^[A-Z_][A-Z0-9_]*=' "$ROOT/.env" | sed 's/=$//' | sed 's/^/\$/' | tr '\n' ' ') \$NODE_EXPORTER_TARGET \$GRAFANA_EXTERNAL_URL \$SANITIZE"
 while IFS= read -r -d '' f; do
   rel="${f#$ROOT/core/}"
   out="$ROOT/build/$rel"
@@ -118,7 +131,7 @@ if [ -f "$AM" ] && [ -n "${TELEGRAM_BOT_TOKEN:-}" ]; then
         chat_id: ${TELEGRAM_CHAT_ID:-}
         parse_mode: ''
         send_resolved: true
-        message: '[${PROJECT_NAME:-}] {{ .CommonLabels.alertname }}: {{ range .Alerts }}{{ .Annotations.summary }} runbook: {{ .Annotations.runbook_url }} dashboard: ${GRAFANA_EXTERNAL_URL}/d/{{ .Annotations.dashboard }} {{ end }}'"
+        message: '[${PROJECT_NAME:-}] {{ .CommonLabels.alertname | ${SANITIZE} }}: {{ range .Alerts }}{{ .Annotations.summary | ${SANITIZE} }} runbook: {{ .Annotations.runbook_url | ${SANITIZE} }} dashboard: ${GRAFANA_EXTERNAL_URL}/d/{{ .Annotations.dashboard | ${SANITIZE} }} {{ end }}'"
   done
 fi
 if [ -f "$AM" ] && [ -n "${TEAMS_WEBHOOK_URL:-}" ]; then
@@ -126,17 +139,19 @@ if [ -f "$AM" ] && [ -n "${TEAMS_WEBHOOK_URL:-}" ]; then
     add "$m" "    msteamsv2_configs:
       - webhook_url: ${TEAMS_WEBHOOK_URL:-}
         send_resolved: true
-        title: '[${PROJECT_NAME:-}] {{ .CommonLabels.alertname }}'
-        text: '{{ range .Alerts }}{{ .Annotations.summary }} [runbook]({{ .Annotations.runbook_url }}) [dashboard](${GRAFANA_EXTERNAL_URL}/d/{{ .Annotations.dashboard }}) {{ end }}'"
+        title: '[${PROJECT_NAME:-}] {{ .CommonLabels.alertname | ${SANITIZE} }}'
+        text: '{{ range .Alerts }}{{ .Annotations.summary | ${SANITIZE} }} [runbook]({{ .Annotations.runbook_url | ${SANITIZE} }}) [dashboard](${GRAFANA_EXTERNAL_URL}/d/{{ .Annotations.dashboard | ${SANITIZE} }}) {{ end }}'"
   done
 fi
 if [ -f "$AM" ] && [ -n "${DISCORD_WEBHOOK_URL:-}" ]; then
+  # Alertmanager's discord_config (v0.28.1) has no allowed_mentions field to set -- checked against
+  # the upstream config docs; message is the only thing to sanitize here.
   for m in RECEIVERS_CRITICAL_EXTRA RECEIVERS_WARNING_EXTRA; do
     add "$m" "    discord_configs:
       - webhook_url: ${DISCORD_WEBHOOK_URL:-}
         send_resolved: true
-        title: '[${PROJECT_NAME:-}] {{ .CommonLabels.alertname }}'
-        message: '{{ range .Alerts }}{{ .Annotations.summary }} [runbook](<{{ .Annotations.runbook_url }}>) [dashboard](<${GRAFANA_EXTERNAL_URL}/d/{{ .Annotations.dashboard }}>) {{ end }}'"
+        title: '[${PROJECT_NAME:-}] {{ .CommonLabels.alertname | ${SANITIZE} }}'
+        message: '{{ range .Alerts }}{{ .Annotations.summary | ${SANITIZE} }} [runbook](<{{ .Annotations.runbook_url | ${SANITIZE} }}>) [dashboard](<${GRAFANA_EXTERNAL_URL}/d/{{ .Annotations.dashboard | ${SANITIZE} }}>) {{ end }}'"
   done
 fi
 if [ -f "$AM" ] && [ -n "${ALERT_EMAIL_TO:-}" ]; then
@@ -153,7 +168,7 @@ if [ -f "$AM" ] && [ -n "${ALERT_EMAIL_TO:-}" ]; then
         from: ${SMTP_FROM:-}
         smarthost: ${SMTP_HOST:-}${auth}
         send_resolved: true
-        headers: { Subject: '[${PROJECT_NAME:-}] {{ .CommonLabels.alertname }} ({{ .Status }})' }"
+        headers: { Subject: '[${PROJECT_NAME:-}] {{ .CommonLabels.alertname | ${SANITIZE} }} ({{ .Status }})' }"
   done
 fi
 # The triage agent answers 401 unless Alertmanager sends TRIAGE_WEBHOOK_TOKEN. Empty = no header, no check.

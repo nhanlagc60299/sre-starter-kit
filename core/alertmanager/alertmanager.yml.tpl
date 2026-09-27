@@ -34,24 +34,33 @@ inhibit_rules:
     target_matchers: [ 'alertname="ElevatedErrorRate"' ]
     equal: [service]
 
+# ${SANITIZE} is a fixed pipe chain (defined once in scripts/render.sh) substituted the same way as
+# ${PROJECT_NAME} above. It must follow every action that interpolates CommonLabels/Labels/
+# GroupLabels/Annotations/CommonAnnotations below and in the receiver blocks scripts/render.sh adds,
+# because those values can come from a lower-trust producer (an AWS Name tag, a Pushgateway push, a
+# StatsD packet, a postgres_exporter identifier -- Pro modules, but this template is shared) and
+# reach Slack/Discord/Teams/Telegram/email with the operator's webhook identity. ${PROJECT_NAME},
+# ${GRAFANA_EXTERNAL_URL} etc. are operator-authored and never need it.
 receivers:
   - name: critical
     slack_configs:
       - api_url: ${SLACK_WEBHOOK_URL}
         send_resolved: true
-        title: ':red_circle: [${PROJECT_NAME}] {{ .CommonLabels.alertname }}'
+        link_names: false # never resolve @name into a Slack ID; defense in depth, the text below is already sanitized
+        title: ':red_circle: [${PROJECT_NAME}] {{ .CommonLabels.alertname | ${SANITIZE} }}'
         text: >-
-          {{ range .Alerts }}*{{ .Annotations.summary }}*
-          <{{ .Annotations.runbook_url }}|runbook> · <${GRAFANA_EXTERNAL_URL}/d/{{ .Annotations.dashboard }}|dashboard>
+          {{ range .Alerts }}*{{ .Annotations.summary | ${SANITIZE} }}*
+          <{{ .Annotations.runbook_url | ${SANITIZE} }}|runbook> · <${GRAFANA_EXTERNAL_URL}/d/{{ .Annotations.dashboard | ${SANITIZE} }}|dashboard>
           {{ end }}
     # RECEIVERS_CRITICAL_EXTRA
   - name: warning
     slack_configs:
       - api_url: ${SLACK_WEBHOOK_URL}
         send_resolved: true
-        title: ':large_yellow_circle: [${PROJECT_NAME}] {{ .CommonLabels.alertname }}'
+        link_names: false # see the critical receiver above
+        title: ':large_yellow_circle: [${PROJECT_NAME}] {{ .CommonLabels.alertname | ${SANITIZE} }}'
         text: >-
-          {{ range .Alerts }}{{ .Annotations.summary }} <{{ .Annotations.runbook_url }}|runbook> · <${GRAFANA_EXTERNAL_URL}/d/{{ .Annotations.dashboard }}|dashboard>
+          {{ range .Alerts }}{{ .Annotations.summary | ${SANITIZE} }} <{{ .Annotations.runbook_url | ${SANITIZE} }}|runbook> · <${GRAFANA_EXTERNAL_URL}/d/{{ .Annotations.dashboard | ${SANITIZE} }}|dashboard>
           {{ end }}
     # RECEIVERS_WARNING_EXTRA
   - name: webhook-triage
