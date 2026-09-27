@@ -27,9 +27,9 @@ if out=$( cd "$tmp" && bash "$OLDPWD/scripts/render.sh" 2>&1 ); then echo "FAIL:
 [[ "$out" == *"TRIAGE_WEBHOOK_TOKEN"* ]] || { echo "FAIL: non-ASCII token refused without naming the key: $out"; exit 1; }
 
 # Task 13: AWS Name tags, Pushgateway/StatsD/postgres_exporter labels reach these same annotation
-# fields unescaped from lower-trust producers. Every notification title/text/message action that
-# interpolates CommonLabels/Labels/GroupLabels/Annotations/CommonAnnotations must be piped through
-# Alertmanager's reReplaceAll sanitizer, for every receiver this kit renders. Fresh fixture,
+# fields unescaped from lower-trust producers. Every notification title/text/message/fallback action
+# that interpolates CommonLabels/Labels/GroupLabels/Annotations.summary/CommonAnnotations must be
+# piped through the right reReplaceAll sanitizer, for every receiver this kit renders. Fresh fixture,
 # independent of the .env accumulated above (which ends deliberately poisoned by the non-ASCII-token
 # negative test just above).
 tmp2=$(mktemp -d); trap 'rm -rf "$tmp" "$tmp2"' EXIT
@@ -46,50 +46,122 @@ ENV
 cp -r core "$tmp2/core"
 ( cd "$tmp2" && bash "$OLDPWD/scripts/render.sh" >/dev/null )
 ${CONTAINER_ENGINE:-docker} run --rm -v "$tmp2/build/alertmanager:/c" --entrypoint amtool prom/alertmanager:v0.28.1 check-config /c/alertmanager.yml
-python3 - "$tmp2/build/alertmanager/alertmanager.yml" <<'PYSAN' || { echo "FAIL: an unsanitized label/annotation action reaches a notification field"; exit 1; }
+
+# Fix round 1 review: (1) the Slack &/</> entity chain must never reach Discord/Teams/Telegram/email
+# (it showed up literally as "&gt;"); (2) .Annotations.runbook_url/.dashboard are operator-authored
+# and must go through NEITHER chain, in ANY receiver, or a query string in a dashboard link breaks;
+# (3) Slack's fallback (used by clients that can't render the full message) must be explicitly
+# sanitized too, since Alertmanager's own default fallback prints raw GroupLabels/CommonLabels.
+python3 - "$tmp2/build/alertmanager/alertmanager.yml" "$tmp2/combined.txt" <<'PYSAN' || { echo "FAIL: sanitizer shape is wrong"; exit 1; }
 import re, sys, yaml
 cfg = yaml.safe_load(open(sys.argv[1]))
 ACTION = re.compile(r"\{\{.*?\}\}", re.S)
-SENSITIVE = re.compile(r"\.(CommonLabels|Labels|GroupLabels|Annotations|CommonAnnotations)\b")
-bad = []
+ALWAYS_SENSITIVE = re.compile(r"\.(CommonLabels|Labels|GroupLabels|CommonAnnotations)\b")
+ANNOT = re.compile(r"\.Annotations\.(\w+)")
+EXEMPT_ANNOT = {"runbook_url", "dashboard"}
 by = {r["name"]: r for r in cfg["receivers"]}
+bad = []
+fields = {}  # key -> raw (pre-amtool) field text, for the runtime render step below
 for r in cfg["receivers"]:
     for kind in ("slack_configs", "discord_configs", "msteamsv2_configs", "telegram_configs", "email_configs"):
         for c in r.get(kind, []):
-            fields = [(f, c[f]) for f in ("title", "text", "message") if f in c]
+            flds = [(f, c[f]) for f in ("title", "text", "message", "fallback") if f in c]
             subj = c.get("headers", {}).get("Subject")
             if subj:
-                fields.append(("headers.Subject", subj))
-            for fname, text in fields:
+                flds.append(("headers.Subject", subj))
+            for fname, text in flds:
+                key = "%s.%s.%s" % (r["name"], kind, fname)
+                fields[key] = text
                 for action in ACTION.findall(text):
-                    if SENSITIVE.search(action) and "reReplaceAll" not in action:
-                        bad.append((r["name"], kind, fname, action))
+                    annot = ANNOT.findall(action)
+                    needs_sanitizer = bool(ALWAYS_SENSITIVE.search(action)) or any(a not in EXEMPT_ANNOT for a in annot)
+                    exempt_only = annot and all(a in EXEMPT_ANNOT for a in annot) and not ALWAYS_SENSITIVE.search(action)
+                    if needs_sanitizer:
+                        if "reReplaceAll" not in action:
+                            bad.append((key, "missing sanitizer", action))
+                        elif kind == "slack_configs":
+                            if "&amp;" not in action:
+                                bad.append((key, "Slack field is missing the entity chain", action))
+                        else:
+                            if "&amp;" in action or "&lt;" in action or "&gt;" in action:
+                                bad.append((key, "non-Slack field carries the Slack entity chain (garbles outside Slack)", action))
+                    elif exempt_only and "reReplaceAll" in action:
+                        bad.append((key, "runbook_url/dashboard must NOT be sanitized", action))
 if bad:
     for b in bad:
-        print("UNSANITIZED:", b)
+        print("BAD SANITIZER SHAPE:", b)
     sys.exit(1)
 for rname in ("critical", "warning"):
-    assert by[rname]["slack_configs"][0].get("link_names") is False, (rname, "link_names not explicitly disabled")
+    sc = by[rname]["slack_configs"][0]
+    assert sc.get("link_names") is False, (rname, "link_names not explicitly disabled")
+    assert sc.get("fallback"), (rname, "Slack fallback not set")
 assert by["critical"].get("discord_configs") and by["critical"].get("msteamsv2_configs") and by["critical"].get("telegram_configs") and by["critical"].get("email_configs"), "fixture did not render every optional receiver"
-print("all label/annotation actions sanitized")
+# Combined template text for the runtime render step: every field once, delimited so the rendered
+# output can be split back apart per field.
+with open(sys.argv[2], "w") as f:
+    for key, text in fields.items():
+        f.write("===%s===\n%s\n" % (key, text))
+print("sanitizer shape OK: two chains, runbook_url/dashboard exempt, fallback set, link_names disabled")
 PYSAN
-# Runtime proof, not just a source-level shape check: render the ACTUAL critical-Slack text field
-# through amtool with a hostile annotation value (an AWS Name tag / Pushgateway job / StatsD dag_id /
-# postgres relname could all put this in .Annotations.summary) and show the output is inert.
-crit_text=$(python3 - "$tmp2/build/alertmanager/alertmanager.yml" <<'PY'
-import sys, yaml
-cfg = yaml.safe_load(open(sys.argv[1]))
-by = {r["name"]: r for r in cfg["receivers"]}
-print(by["critical"]["slack_configs"][0]["text"], end="")
-PY
-)
+
+# Runtime proof over EVERY notification field of every receiver, not just a source-level shape
+# check: one hostile case (must render inert everywhere) and one ordinary case (an AWS Name tag /
+# Pushgateway job / StatsD dag_id / postgres relname could carry either into .Annotations.summary,
+# .CommonLabels.alertname or .GroupLabels.alertname). Batched into one amtool call per case via
+# "===key===" delimiters, split back apart below -- one container start per case, not one per field.
+# runbook_url uses this repo's own public URL shape (docs/ALERTS.md#<anchor>), not the private Pro
+# repo's runbooks/<Name>.md.
 cat > "$tmp2/hostile.json" <<'JSON'
-{"Alerts":[{"Status":"firing","Labels":{},"Annotations":{"summary":"<!channel> [click](https://evil.test) @everyone","runbook_url":"https://github.com/nhanlagc60299/sre-starter-kit-pro/blob/main/runbooks/Test.md","dashboard":"abc"}}],"GroupLabels":{},"CommonLabels":{"alertname":"Test"},"CommonAnnotations":{},"ExternalURL":""}
+{"Status":"firing","Receiver":"critical","Alerts":[{"Status":"firing","Labels":{},"Annotations":{"summary":"<!channel> <@U123> <https://evil.invalid|runbook> [click](https://evil.invalid) @everyone `x` &lt;!here&gt;","runbook_url":"https://github.com/nhanlagc60299/sre-starter-kit/blob/main/docs/ALERTS.md#test","dashboard":"abc"}}],"GroupLabels":{"alertname":"<!channel>"},"CommonLabels":{"alertname":"<!channel> [x](https://evil.invalid) @here"},"CommonAnnotations":{},"ExternalURL":"http://am.invalid"}
 JSON
-out=$(${CONTAINER_ENGINE:-docker} run --rm -v "$tmp2:/c" --entrypoint amtool prom/alertmanager:v0.28.1 template render --template.glob="/c/*.nonexistent" --template.data=/c/hostile.json --template.text="$crit_text")
-echo "$out" | grep -q '<!channel>' && { echo "FAIL: <!channel> survived unescaped in the rendered Slack text: $out"; exit 1; }
-echo "$out" | grep -qE '\[click\]\(' && { echo "FAIL: a masked link survived in the rendered Slack text: $out"; exit 1; }
-echo "$out" | grep -q '@everyone' && { echo "FAIL: @everyone survived unescaped in the rendered Slack text: $out"; exit 1; }
-echo "amtool template render: hostile label/annotation text is inert -> $out"
+cat > "$tmp2/ordinary.json" <<'JSON'
+{"Status":"firing","Receiver":"critical","Alerts":[{"Status":"firing","Labels":{"alertname":"ServiceDown"},"Annotations":{"summary":"Container web restarted >3 times in 15m; Service api is DOWN (https://api.example.invalid/health?a=1&b=2)","runbook_url":"https://github.com/nhanlagc60299/sre-starter-kit/blob/main/docs/ALERTS.md#servicedown","dashboard":"sre-app?orgId=1&var-service=api&from=now-1h"}}],"GroupLabels":{"alertname":"ServiceDown"},"CommonLabels":{"alertname":"ServiceDown"},"CommonAnnotations":{},"ExternalURL":"http://am.invalid"}
+JSON
+combined=$(cat "$tmp2/combined.txt")
+hostile_out=$(${CONTAINER_ENGINE:-docker} run --rm -v "$tmp2:/c" --entrypoint amtool prom/alertmanager:v0.28.1 template render --template.glob="/c/*.nonexistent" --template.data=/c/hostile.json --template.text="$combined")
+ordinary_out=$(${CONTAINER_ENGINE:-docker} run --rm -v "$tmp2:/c" --entrypoint amtool prom/alertmanager:v0.28.1 template render --template.glob="/c/*.nonexistent" --template.data=/c/ordinary.json --template.text="$combined")
+printf '%s' "$hostile_out" > "$tmp2/hostile.out"
+printf '%s' "$ordinary_out" > "$tmp2/ordinary.out"
+python3 - "$tmp2/combined.txt" "$tmp2/hostile.out" "$tmp2/ordinary.out" <<'PYRENDER' || { echo "FAIL: a rendered notification field failed the hostile or ordinary check"; exit 1; }
+import re, sys
+
+def split_by_key(path):
+    text = open(path).read()
+    parts = re.split(r"===([^=]+)===\n", text)[1:]  # drop leading empty chunk before first marker
+    return {parts[i]: parts[i + 1] for i in range(0, len(parts), 2)}
+
+fields = split_by_key(sys.argv[1])          # key -> raw (pre-render) template text
+hostile = split_by_key(sys.argv[2])         # key -> hostile-case rendered text
+ordinary = split_by_key(sys.argv[3])        # key -> ordinary-case rendered text
+RUNBOOK_URL = "https://github.com/nhanlagc60299/sre-starter-kit/blob/main/docs/ALERTS.md#servicedown"
+DASHBOARD = "sre-app?orgId=1&var-service=api&from=now-1h"
+bad = []
+for key, text in fields.items():
+    is_slack = ".slack_configs." in key
+    h, o = hostile[key], ordinary[key]
+    if ".Annotations.summary" in text or ".CommonLabels.alertname" in text or ".GroupLabels.alertname" in text:
+        # Each check targets ONE rule independently (an attacker-chosen token like "click"/"x" that
+        # never appears in our own [runbook](...)/[dashboard](...) markup), so deleting any single
+        # rule -- not just both bracket rules together -- fails a check.
+        if "[click" in h or "[x](" in h: bad.append((key, "'[' survived (masked-link open bracket)", h))
+        if "click]" in h or "x](" in h: bad.append((key, "']' survived (masked-link close bracket)", h))
+        if "@everyone" in h: bad.append((key, "'@' survived (mention)", h))
+        if "@here" in h: bad.append((key, "'@' survived (mention)", h))
+        if "`x`" in h: bad.append((key, "'`' survived (code fence)", h))
+        if is_slack:
+            if "<!channel" in h or "<@U123" in h: bad.append((key, "'<' survived on Slack", h))
+            if "U123>" in h: bad.append((key, "'>' survived on Slack", h))
+    if ".Annotations.summary" in text and not is_slack:
+        if ">3 times" not in o: bad.append((key, "ordinary '>3 times' was garbled outside Slack", o))
+    if ".Annotations.dashboard" in text:
+        if DASHBOARD not in o: bad.append((key, "dashboard query string was corrupted", o))
+    if ".Annotations.runbook_url" in text:
+        if RUNBOOK_URL not in o: bad.append((key, "runbook_url was corrupted", o))
+if bad:
+    for b in bad:
+        print("FIELD CHECK FAILED:", b)
+    sys.exit(1)
+print("amtool template render: every field is inert on the hostile case and intact on the ordinary case")
+PYRENDER
 
 echo "test_alertmanager OK"
