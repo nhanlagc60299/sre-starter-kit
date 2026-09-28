@@ -46,7 +46,7 @@ fi
 # The dashboard link on every alert; defaults here for a .env written before the key existed.
 : "${GRAFANA_EXTERNAL_URL:=http://localhost:3000}"
 export NODE_EXPORTER_TARGET GRAFANA_EXTERNAL_URL
-# Task 13: two sanitizer chains piped after every label/annotation-derived action reaching a
+# Two sanitizer chains piped after every label/annotation-derived action reaching a
 # chat/email notification (see core/alertmanager/alertmanager.yml.tpl and the receiver blocks
 # below). Not a customer setting -- reuses the same ${VAR} substitution render.sh already does for
 # GRAFANA_EXTERNAL_URL etc. so the templates stay short. reReplaceAll is Alertmanager's only
@@ -63,7 +63,14 @@ export NODE_EXPORTER_TARGET GRAFANA_EXTERNAL_URL
 # round 1 review) -- ordinary label/annotation text must render the same as before this change.
 SLACK_SANITIZE='reReplaceAll "&" "&amp;" | reReplaceAll "<" "&lt;" | reReplaceAll ">" "&gt;" | reReplaceAll "[[]" "［" | reReplaceAll "[]]" "］" | reReplaceAll "@" "＠" | reReplaceAll "`" "｀"'
 OTHER_SANITIZE='reReplaceAll "[[]" "［" | reReplaceAll "[]]" "］" | reReplaceAll "@" "＠" | reReplaceAll "`" "｀"'
-export SLACK_SANITIZE OTHER_SANITIZE
+# .Annotations.runbook_url/.dashboard are rule-authored, but anyone who can POST to
+# Alertmanager's unauthenticated API sets them too ("x|y> <!channel> <z" would ping a Slack channel).
+# They get their own chain that strips only what leaves a link -- [, <, >, | everywhere, plus ) on
+# the markdown receivers (Discord/Teams/Telegram) -- and never the text chains above, so a
+# query string's & (and ? and =) survives intact. "[[<>|]" is one bracket expression, [ literal inside.
+LINK_SANITIZE='reReplaceAll "[[<>|]" ""'
+MD_LINK_SANITIZE='reReplaceAll "[[<>|)]" ""'
+export SLACK_SANITIZE OTHER_SANITIZE LINK_SANITIZE MD_LINK_SANITIZE
 # Refresh build/ IN PLACE, never `rm -rf build`: compose bind-mounts build/prometheus, build/alertmanager,
 # build/loki/config.alloy and friends, and on Linux a bind mount follows the inode. Wiping the tree left
 # every running container reading the deleted copy, so `make reload` HUPed Prometheus into its own stale
@@ -72,7 +79,7 @@ export SLACK_SANITIZE OTHER_SANITIZE
 mkdir -p "$ROOT/build"
 _mark=$(mktemp); trap 'rm -f "$_mark"' EXIT   # every file written by this run is newer than it
 # Only substitute variables that are defined in .env, so Prometheus/Alloy $labels etc. survive.
-VARS="$(grep -oE '^[A-Z_][A-Z0-9_]*=' "$ROOT/.env" | sed 's/=$//' | sed 's/^/\$/' | tr '\n' ' ') \$NODE_EXPORTER_TARGET \$GRAFANA_EXTERNAL_URL \$SLACK_SANITIZE \$OTHER_SANITIZE"
+VARS="$(grep -oE '^[A-Z_][A-Z0-9_]*=' "$ROOT/.env" | sed 's/=$//' | sed 's/^/\$/' | tr '\n' ' ') \$NODE_EXPORTER_TARGET \$GRAFANA_EXTERNAL_URL \$SLACK_SANITIZE \$OTHER_SANITIZE \$LINK_SANITIZE \$MD_LINK_SANITIZE"
 while IFS= read -r -d '' f; do
   rel="${f#$ROOT/core/}"
   out="$ROOT/build/$rel"
@@ -136,7 +143,7 @@ if [ -f "$AM" ] && [ -n "${TELEGRAM_BOT_TOKEN:-}" ]; then
         chat_id: ${TELEGRAM_CHAT_ID:-}
         parse_mode: ''
         send_resolved: true
-        message: '[${PROJECT_NAME:-}] {{ .CommonLabels.alertname | ${OTHER_SANITIZE} }}: {{ range .Alerts }}{{ .Annotations.summary | ${OTHER_SANITIZE} }} runbook: {{ .Annotations.runbook_url }} dashboard: ${GRAFANA_EXTERNAL_URL}/d/{{ .Annotations.dashboard }} {{ end }}'"
+        message: '[${PROJECT_NAME:-}] {{ .CommonLabels.alertname | ${OTHER_SANITIZE} }}: {{ range .Alerts }}{{ .Annotations.summary | ${OTHER_SANITIZE} }} runbook: {{ .Annotations.runbook_url | ${MD_LINK_SANITIZE} }} dashboard: ${GRAFANA_EXTERNAL_URL}/d/{{ .Annotations.dashboard | ${MD_LINK_SANITIZE} }} {{ end }}'"
   done
 fi
 if [ -f "$AM" ] && [ -n "${TEAMS_WEBHOOK_URL:-}" ]; then
@@ -145,7 +152,7 @@ if [ -f "$AM" ] && [ -n "${TEAMS_WEBHOOK_URL:-}" ]; then
       - webhook_url: ${TEAMS_WEBHOOK_URL:-}
         send_resolved: true
         title: '[${PROJECT_NAME:-}] {{ .CommonLabels.alertname | ${OTHER_SANITIZE} }}'
-        text: '{{ range .Alerts }}{{ .Annotations.summary | ${OTHER_SANITIZE} }} [runbook]({{ .Annotations.runbook_url }}) [dashboard](${GRAFANA_EXTERNAL_URL}/d/{{ .Annotations.dashboard }}) {{ end }}'"
+        text: '{{ range .Alerts }}{{ .Annotations.summary | ${OTHER_SANITIZE} }} [runbook]({{ .Annotations.runbook_url | ${MD_LINK_SANITIZE} }}) [dashboard](${GRAFANA_EXTERNAL_URL}/d/{{ .Annotations.dashboard | ${MD_LINK_SANITIZE} }}) {{ end }}'"
   done
 fi
 if [ -f "$AM" ] && [ -n "${DISCORD_WEBHOOK_URL:-}" ]; then
@@ -156,7 +163,7 @@ if [ -f "$AM" ] && [ -n "${DISCORD_WEBHOOK_URL:-}" ]; then
       - webhook_url: ${DISCORD_WEBHOOK_URL:-}
         send_resolved: true
         title: '[${PROJECT_NAME:-}] {{ .CommonLabels.alertname | ${OTHER_SANITIZE} }}'
-        message: '{{ range .Alerts }}{{ .Annotations.summary | ${OTHER_SANITIZE} }} [runbook](<{{ .Annotations.runbook_url }}>) [dashboard](<${GRAFANA_EXTERNAL_URL}/d/{{ .Annotations.dashboard }}>) {{ end }}'"
+        message: '{{ range .Alerts }}{{ .Annotations.summary | ${OTHER_SANITIZE} }} [runbook](<{{ .Annotations.runbook_url | ${MD_LINK_SANITIZE} }}>) [dashboard](<${GRAFANA_EXTERNAL_URL}/d/{{ .Annotations.dashboard | ${MD_LINK_SANITIZE} }}>) {{ end }}'"
   done
 fi
 if [ -f "$AM" ] && [ -n "${ALERT_EMAIL_TO:-}" ]; then

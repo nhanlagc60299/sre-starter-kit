@@ -556,14 +556,22 @@ def format_note(text, flavor):
     (whitespace trimmed, blank lines dropped), so a note from a newer engine degrades to plain
     lines, never to a lost post. Telegram and email
     keep the plain text: Telegram gets no parse_mode (an unescaped "_" would 400 the post)."""
+    # three backticks anywhere in a line would close the command fence early (or open one outside
+    # it), putting the lines after it back into live markdown. Only a hostile line has them.
+    unfence = lambda t: re.sub(r"`{3,}", lambda m: "\u200b".join(m.group()), t)
     if flavor == "slack":
         b = lambda t: "*%s*" % t
         # Slack reads <, > and & as markup (links, mentions, entities): a runbook's `<service>`
         # placeholder would vanish into a link. Escape them everywhere, fence included.
-        esc = lambda t: t.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+        esc = lambda t: unfence(t.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;"))
+        cmd = esc
     else:
         b = lambda t: "**%s**" % t
-        esc = lambda t: t
+        # Discord renders [label](url) as a masked link, so model text could show "Reset SSO" over
+        # any URL. Full-width brackets outside the fence; commands inside it are code, not markdown,
+        # and stay byte-exact so they can be copied and run.
+        esc = lambda t: unfence(t).replace("[", "\uff3b").replace("]", "\uff3d")
+        cmd = unfence
     i = lambda t: "_%s_" % t
     out, in_cmds = [], False
     for line in text.splitlines():
@@ -571,7 +579,7 @@ def format_note(text, flavor):
         if not st:
             continue
         if in_cmds and line.startswith("  "):
-            out.append(esc(st)); continue
+            out.append(cmd(st)); continue
         if in_cmds:
             out.append("```"); in_cmds = False
         if st.startswith("Triage: "):

@@ -26,7 +26,7 @@ printf 'TRIAGE_WEBHOOK_TOKEN=t\303\266k\n' >> "$tmp/.env"   # "tök", UTF-8
 if out=$( cd "$tmp" && bash "$OLDPWD/scripts/render.sh" 2>&1 ); then echo "FAIL: render accepted a non-ASCII TRIAGE_WEBHOOK_TOKEN"; exit 1; fi
 [[ "$out" == *"TRIAGE_WEBHOOK_TOKEN"* ]] || { echo "FAIL: non-ASCII token refused without naming the key: $out"; exit 1; }
 
-# Task 13: AWS Name tags, Pushgateway/StatsD/postgres_exporter labels reach these same annotation
+# AWS Name tags, Pushgateway/StatsD/postgres_exporter labels reach these same annotation
 # fields unescaped from lower-trust producers. Every notification title/text/message/fallback action
 # that interpolates CommonLabels/Labels/GroupLabels/Annotations.summary/CommonAnnotations must be
 # piped through the right reReplaceAll sanitizer, for every receiver this kit renders. Fresh fixture,
@@ -47,7 +47,7 @@ cp -r core "$tmp2/core"
 ( cd "$tmp2" && bash "$OLDPWD/scripts/render.sh" >/dev/null )
 ${CONTAINER_ENGINE:-docker} run --rm -v "$tmp2/build/alertmanager:/c" --entrypoint amtool prom/alertmanager:v0.28.1 check-config /c/alertmanager.yml
 
-# Fix round 1 review: (1) the Slack &/</> entity chain must never reach Discord/Teams/Telegram/email
+# Three rules, each from a defect found in review: (1) the Slack &/</> entity chain must never reach Discord/Teams/Telegram/email
 # (it showed up literally as "&gt;"); (2) .Annotations.runbook_url/.dashboard are operator-authored
 # and must go through NEITHER chain, in ANY receiver, or a query string in a dashboard link breaks;
 # (3) Slack's fallback (used by clients that can't render the full message) must be explicitly
@@ -59,6 +59,12 @@ ACTION = re.compile(r"\{\{.*?\}\}", re.S)
 ALWAYS_SENSITIVE = re.compile(r"\.(CommonLabels|Labels|GroupLabels|CommonAnnotations)\b")
 ANNOT = re.compile(r"\.Annotations\.(\w+)")
 EXEMPT_ANNOT = {"runbook_url", "dashboard"}
+# anyone who can POST to Alertmanager's API sets runbook_url/dashboard, so they carry a link
+# chain that strips only what breaks out of a link ([<>| everywhere, ) too on markdown receivers),
+# never the text chain -- a query string's & must survive.
+LINK = 'reReplaceAll "[[<>|]" ""'
+MD_LINK = 'reReplaceAll "[[<>|)]" ""'
+MD_KINDS = {"discord_configs", "msteamsv2_configs", "telegram_configs"}
 by = {r["name"]: r for r in cfg["receivers"]}
 bad = []
 fields = {}  # key -> raw (pre-amtool) field text, for the runtime render step below
@@ -85,8 +91,10 @@ for r in cfg["receivers"]:
                         else:
                             if "&amp;" in action or "&lt;" in action or "&gt;" in action:
                                 bad.append((key, "non-Slack field carries the Slack entity chain (garbles outside Slack)", action))
-                    elif exempt_only and "reReplaceAll" in action:
-                        bad.append((key, "runbook_url/dashboard must NOT be sanitized", action))
+                    elif exempt_only:
+                        want = MD_LINK if kind in MD_KINDS else LINK
+                        if want not in action or "＠" in action or "&amp;" in action:
+                            bad.append((key, "runbook_url/dashboard must carry only the link chain", action))
 if bad:
     for b in bad:
         print("BAD SANITIZER SHAPE:", b)
@@ -101,7 +109,7 @@ assert by["critical"].get("discord_configs") and by["critical"].get("msteamsv2_c
 with open(sys.argv[2], "w") as f:
     for key, text in fields.items():
         f.write("===%s===\n%s\n" % (key, text))
-print("sanitizer shape OK: two chains, runbook_url/dashboard exempt, fallback set, link_names disabled")
+print("sanitizer shape OK: two text chains, link chains on runbook_url/dashboard, fallback set, link_names disabled")
 PYSAN
 
 # Runtime proof over EVERY notification field of every receiver, not just a source-level shape
@@ -115,14 +123,20 @@ cat > "$tmp2/hostile.json" <<'JSON'
 {"Status":"firing","Receiver":"critical","Alerts":[{"Status":"firing","Labels":{},"Annotations":{"summary":"<!channel> <@U123> <https://evil.invalid|runbook> [click](https://evil.invalid) @everyone `x` &lt;!here&gt;","runbook_url":"https://github.com/nhanlagc60299/sre-starter-kit/blob/main/docs/ALERTS.md#test","dashboard":"abc"}}],"GroupLabels":{"alertname":"<!channel>"},"CommonLabels":{"alertname":"<!channel> [x](https://evil.invalid) @here"},"CommonAnnotations":{},"ExternalURL":"http://am.invalid"}
 JSON
 cat > "$tmp2/ordinary.json" <<'JSON'
-{"Status":"firing","Receiver":"critical","Alerts":[{"Status":"firing","Labels":{"alertname":"ServiceDown"},"Annotations":{"summary":"Container web restarted >3 times in 15m; Service api is DOWN (https://api.example.invalid/health?a=1&b=2)","runbook_url":"https://github.com/nhanlagc60299/sre-starter-kit/blob/main/docs/ALERTS.md#servicedown","dashboard":"sre-app?orgId=1&var-service=api&from=now-1h"}}],"GroupLabels":{"alertname":"ServiceDown"},"CommonLabels":{"alertname":"ServiceDown"},"CommonAnnotations":{},"ExternalURL":"http://am.invalid"}
+{"Status":"firing","Receiver":"critical","Alerts":[{"Status":"firing","Labels":{"alertname":"ServiceDown"},"Annotations":{"summary":"Container web restarted >3 times in 15m; Service api is DOWN (https://api.example.invalid/health?a=1&b=2)","runbook_url":"https://github.com/nhanlagc60299/sre-starter-kit/blob/main/docs/ALERTS.md#servicedown","dashboard":"sre-app?a=1&b=2"}}],"GroupLabels":{"alertname":"ServiceDown"},"CommonLabels":{"alertname":"ServiceDown"},"CommonAnnotations":{},"ExternalURL":"http://am.invalid"}
 JSON
 combined=$(cat "$tmp2/combined.txt")
 hostile_out=$(${CONTAINER_ENGINE:-docker} run --rm -v "$tmp2:/c" --entrypoint amtool prom/alertmanager:v0.28.1 template render --template.glob="/c/*.nonexistent" --template.data=/c/hostile.json --template.text="$combined")
 ordinary_out=$(${CONTAINER_ENGINE:-docker} run --rm -v "$tmp2:/c" --entrypoint amtool prom/alertmanager:v0.28.1 template render --template.glob="/c/*.nonexistent" --template.data=/c/ordinary.json --template.text="$combined")
 printf '%s' "$hostile_out" > "$tmp2/hostile.out"
 printf '%s' "$ordinary_out" > "$tmp2/ordinary.out"
-python3 - "$tmp2/combined.txt" "$tmp2/hostile.out" "$tmp2/ordinary.out" <<'PYRENDER' || { echo "FAIL: a rendered notification field failed the hostile or ordinary check"; exit 1; }
+# a link-annotation value that tries to leave its link -- "|" relabels and ">" closes a Slack
+# link, "<!channel>" pings, ")" closes a markdown link and "[b](...)" opens a new one.
+cat > "$tmp2/links.json" <<'JSON'
+{"Status":"firing","Receiver":"critical","Alerts":[{"Status":"firing","Labels":{"alertname":"Test"},"Annotations":{"summary":"ok","runbook_url":"x|y> <!channel> <z","dashboard":"a)[b](https://evil.invalid)"}}],"GroupLabels":{"alertname":"Test"},"CommonLabels":{"alertname":"Test"},"CommonAnnotations":{},"ExternalURL":"http://am.invalid"}
+JSON
+${CONTAINER_ENGINE:-docker} run --rm -v "$tmp2:/c" --entrypoint amtool prom/alertmanager:v0.28.1 template render --template.glob="/c/*.nonexistent" --template.data=/c/links.json --template.text="$combined" > "$tmp2/links.out"
+python3 - "$tmp2/combined.txt" "$tmp2/hostile.out" "$tmp2/ordinary.out" "$tmp2/links.out" <<'PYRENDER' || { echo "FAIL: a rendered notification field failed the hostile or ordinary check"; exit 1; }
 import re, sys
 
 def split_by_key(path):
@@ -133,8 +147,9 @@ def split_by_key(path):
 fields = split_by_key(sys.argv[1])          # key -> raw (pre-render) template text
 hostile = split_by_key(sys.argv[2])         # key -> hostile-case rendered text
 ordinary = split_by_key(sys.argv[3])        # key -> ordinary-case rendered text
+links = split_by_key(sys.argv[4])           # key -> hostile runbook_url/dashboard rendered text
 RUNBOOK_URL = "https://github.com/nhanlagc60299/sre-starter-kit/blob/main/docs/ALERTS.md#servicedown"
-DASHBOARD = "sre-app?orgId=1&var-service=api&from=now-1h"
+DASHBOARD = "sre-app?a=1&b=2"
 bad = []
 for key, text in fields.items():
     is_slack = ".slack_configs." in key
@@ -157,6 +172,14 @@ for key, text in fields.items():
         if DASHBOARD not in o: bad.append((key, "dashboard query string was corrupted", o))
     if ".Annotations.runbook_url" in text:
         if RUNBOOK_URL not in o: bad.append((key, "runbook_url was corrupted", o))
+    if ".Annotations.runbook_url" in text or ".Annotations.dashboard" in text:
+        # one check per stripped character, so deleting any single one from a chain fails
+        l = links[key]
+        if "[b" in l: bad.append((key, "'[' survived in a link annotation", l))
+        if "x|y" in l: bad.append((key, "'|' survived in a link annotation", l))
+        if "y>" in l: bad.append((key, "'>' survived in a link annotation", l))
+        if "<!channel" in l or "<z" in l: bad.append((key, "'<' survived in a link annotation", l))
+        if not is_slack and "a)" in l: bad.append((key, "')' survived in a markdown link annotation", l))
 if bad:
     for b in bad:
         print("FIELD CHECK FAILED:", b)

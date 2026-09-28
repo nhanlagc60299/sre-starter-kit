@@ -1032,6 +1032,34 @@ class PostTests(unittest.TestCase):
         self.assertNotIn("**", md)
         self.assertTrue(md.endswith("_Trace: http://localhost:3000/d/sre-triage_"), md[-80:])
 
+    def test_format_note_discord_defuses_masked_links_outside_the_fence(self):
+        # model text is attacker-influenced: "[Reset SSO](https://evil)" would render on Discord as a
+        # masked link showing only "Reset SSO". Brackets become full-width outside the command fence;
+        # commands inside it are code, not markdown, and must stay byte-exact.
+        note = ("Triage: [Reset SSO](https://evil.invalid) down        (confidence: low)\n"
+                "Probable cause\n"
+                "  1. [Reset SSO](https://evil.invalid) — see [here](https://evil.invalid)\n"
+                "  2. a stray ``` would open a fence out here\n"
+                "Also firing: [x](https://evil.invalid)\n"
+                "Check first (from runbook)\n"
+                "  test -f [a](b) && echo ok\n"
+                "  echo ```\n"
+                "  [Reset SSO](https://evil.invalid)\n"
+                "Not seen: [y](https://evil.invalid)\n"
+                "Something new [z](https://evil.invalid)\n")
+        md = self.agent.format_note(note, "discord").splitlines()
+        fence = [n for n, l in enumerate(md) if l == "```"]
+        self.assertEqual(len(fence), 2, md)
+        inside, outside = md[fence[0] + 1:fence[1]], md[:fence[0]] + md[fence[1] + 1:]
+        for line in outside:
+            self.assertNotIn("[", line, line)
+            self.assertNotIn("]", line, line)
+            self.assertNotIn("```", line, line)
+        self.assertIn("［Reset SSO］(https://evil.invalid)", md[0])
+        self.assertEqual(inside[0], "test -f [a](b) && echo ok")        # byte-exact command
+        self.assertNotIn("```", inside[1])                               # cannot close the fence early
+        self.assertIn("[Reset SSO](https://evil.invalid)", inside[2])     # still inside the fence
+
     def test_format_note_passes_unknown_lines_through(self):
         md = self.agent.format_note("Triage: x        (confidence: low)\nSomething new\nTrace: http://localhost:3000/d/sre-triage", "discord").splitlines()
         self.assertEqual(md[1], "Something new")
