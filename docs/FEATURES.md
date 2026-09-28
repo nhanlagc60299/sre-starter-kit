@@ -52,10 +52,10 @@ the kit's own services only:
 - Grafana deploy annotations from the last two hours
 - the alert's runbook (Pro: the real `runbooks/<Alert>.md` file)
 
-It makes a best-effort pass at redacting common credential shapes (passwords and API keys,
-`Authorization`/`Bearer`/`Cookie` headers, signed-URL parameters, PEM keys, emails) -- it cannot
-catch a passphrase containing spaces or a secret described in prose, so keep those out of alert
-text and logs -- trims the pack to 40 KB, and in Pro
+It redacts what it recognises as a credential -- best-effort pattern matching that **will miss
+some secrets**: it removes values in common shapes such as `password=...`, `Authorization: Bearer
+...` or a PEM private key, and anything in another shape passes through (see the README's AI triage
+section) -- trims the pack to 40 KB, and in Pro
 asks Claude for a note with a fixed shape: probable causes with the number or log line each rests
 on, whether a deploy lines up, what to check first (only commands that appear verbatim in the
 runbook), and what it did not see. The note is at most 25 lines and ends with where to find the
@@ -89,7 +89,9 @@ billed to your own Anthropic account. There is no subscription and no server of 
 ## What is deliberately not in either tier
 
 - No hosted service, no data of yours on our side. The only thing that ever leaves your network is
-  the redacted triage pack, and only in Pro, and only to Anthropic with your key.
+  the redacted triage pack, and only in Pro, and only to the model provider you configure, with your
+  key. Redaction is best-effort, so that provider and your receivers are trusted recipients of the
+  alert's error log lines.
 - No on-call scheduling or escalation; PagerDuty and friends do that better.
 - No automatic remediation. The kit reads; people act.
 - No support for Alertmanagers outside the kit.
