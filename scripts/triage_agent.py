@@ -138,12 +138,20 @@ DEFAULT_REDACT = [
     (r'(?i)(?:([?&])([\w.-]{0,64}?))?(' + _KEYWORDS + r')(\\{0,3}["\']?[ \t]*(?:=>|[:=])[ \t]*\\{0,3}(["\'])?)(?(5)(?:\\.|(?!\5)[^\\\n])*|(?(1)[^\s&]+|\S+))',
      r"\1\2\3\4[redacted]"),
     # A name/value pair whose name says what the value is: a Kubernetes env entry, a parameter list
-    # ({"name":"DB_PASSWORD","value":"..."}). Anchored on the literal "name" key, every class bounded.
-    (r'(?i)("name"\s{0,16}:\s{0,16}"[^"\n]{0,128}(?:password|passwd|secret|token|key)[^"\n]{0,128}"\s{0,16},\s{0,16}"value"\s{0,16}:\s{0,16}")[^"\n]*',
+    # ({"name":"DB_PASSWORD","value":"..."}), also JSON-escaped (up to three backslashes before each
+    # quote, like the keyword rule). The name contains password/passwd/secret/token, or ends in a
+    # whole "key" segment (API_KEY, SECRET_KEY, ACCESS_KEY) - so MONKEY_COUNT, KEYCLOAK_URL and
+    # CACHE_KEY_PREFIX keep their values. The value is the keyword rule's quoted body, stepping over
+    # backslash escapes; it is the last element and its alternatives share no character. Anchored on
+    # the literal "name" key, every other class bounded.
+    (r'(?i)(\\{0,3}"name\\{0,3}"\s{0,16}:\s{0,16}\\{0,3}"'
+     r'(?:[\w.-]{0,64}(?:password|passwd|secret|token)[\w.-]{0,64}|(?:[\w.-]{0,64}[_.-])?key)'
+     r'\\{0,3}"\s{0,16},\s{0,16}\\{0,3}"value\\{0,3}"\s{0,16}:\s{0,16}\\{0,3}")(?:\\.|[^"\\\n])*',
      r"\1[redacted]"),
-    # A secret passed as a command-line flag with a space (--password x); "--password=x" is the
-    # keyword rule's. The flag must end at the separator, so --password-file/--token-ttl stay intact.
-    (r"(?i)(--(?:password|passwd|token|secret|api-key)[ =])\S+", r"\1[redacted]"),
+    # A secret passed as a command-line flag with spaces or tabs (--password x); "--password=x" is
+    # also the keyword rule's. The flag must end at the separator, so --password-file/--token-ttl
+    # stay intact.
+    (r"(?i)(--(?:password|passwd|token|secret|api-key)[ \t=]+)\S+", r"\1[redacted]"),
     # The same keywords as an XML element name: <password>value</password>, <db_pass>value</db_pass>.
     (r"(?i)(<[\w.:-]{0,64}(?:" + _KEYWORDS + r")>)[^<]*", r"\1[redacted]"),
     # Same two keywords, but no ":"/"=" at all - `aws configure set aws_secret_access_key <value>`

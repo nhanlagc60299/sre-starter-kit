@@ -482,6 +482,12 @@ class PackTests(unittest.TestCase):
         ("unquoted value with a quote inside", 'password=ab"cdTAIL', "TAIL"),
         ("unquoted value with an escaped quote inside", 'token=abc\\"TAIL', "TAIL"),
         ("unquoted value starting with <", "password: <TAILsecret", "TAIL"),
+        # fix round 2
+        ("name/value pair, escaped quote in the value", '{"name":"DB_PASSWORD","value":"ab\\"SECRET"}', "SECRET"),
+        ("name/value pair, JSON-escaped once", '{"log":"{\\"name\\":\\"DB_PASSWORD\\",\\"value\\":\\"hunter2dummy\\"}"}', "hunter2dummy"),
+        ("name/value pair, key as the last segment", '{"name":"STRIPE_API_KEY","value":"hunter2dummy"}', "hunter2dummy"),
+        ("CLI flag, two spaces", "mysql --password  hunter2dummy", "hunter2dummy"),
+        ("CLI flag, tab", "mysql --password\thunter2dummy", "hunter2dummy"),
     ]
 
     def test_run3_review_shapes_are_redacted(self):
@@ -502,13 +508,17 @@ class PackTests(unittest.TestCase):
 
     def test_run3_review_ordinary_text_near_the_new_rules_survives(self):
         for s in ('{"name":"DB_HOST","value":"db.internal"}', "--password-file /run/secrets/db", "--token-ttl 5m",
+                  '{"name":"MONKEY_COUNT","value":"12"}', '{"name":"KEYCLOAK_URL","value":"https://sso.internal"}',
+                  '{"name":"CACHE_KEY_PREFIX","value":"app:"}',
                   "secret_key_id=5", "use --secret-store vault"):
-            self.assertEqual(self.agent.redact(s), s)
+            with self.subTest(s):
+                self.assertEqual(self.agent.redact(s), s)
 
     def test_run3_review_patterns_are_not_quadratic_on_a_repeated_prefix(self):
         cases = ("SECRET_KEY_BASE=" * 8000, 'secret_key":"' * 6000, '{"name":"' * 8000, '{"name":"DB_PASSWORD","value":"' * 3000,
                  '"name":"' + "password" * 5000, "--password " * 8000, "--api-key=" * 8000, "?password=" * 8000,
-                 "&token=" * 8000, "%26sig%3D" * 8000, "&sig=%2" * 8000, "&" * 50000,
+                 "&token=" * 8000, "%26sig%3D" * 8000, '\\"name\\":\\"' * 6000, '{"name":"' + "_key" * 8000,
+                 '{"name":"DB_PASSWORD","value":"' + "\\" * 50000, "--password \t" * 8000, "&sig=%2" * 8000, "&" * 50000,
                  ("&" + "a" * 63) * 1000, ("?" + "x" * 63 + "password") * 800, "&password" * 8000)
         for c in cases:
             start = time.monotonic()
