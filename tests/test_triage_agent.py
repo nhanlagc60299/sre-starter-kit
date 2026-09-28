@@ -471,6 +471,50 @@ class PackTests(unittest.TestCase):
                   "GET /search?q=monkey&keyboard=1", "<user>bob</user>", "a => b", "sha256 " + "a1b2c3d4" * 8):
             self.assertEqual(self.agent.redact(s), s)
 
+    # --- run-3 review: shapes the first run-3 fix still let through -------------------------------
+    RUN3_REVIEW_SHAPES = [
+        ("Rails SECRET_KEY_BASE", "SECRET_KEY_BASE=hunter2dummy", "hunter2dummy"),
+        ("JSON secret_key", '{"secret_key": "hunter2dummy"}', "hunter2dummy"),
+        ("k8s env name/value pair", '{"name":"DB_PASSWORD","value":"hunter2dummy"}', "hunter2dummy"),
+        ("k8s env name/value pair, spaced", '{"name": "API_TOKEN", "value": "hunter2dummy"}', "hunter2dummy"),
+        ("CLI --password flag", "mysql --password hunter2dummy -h db", "hunter2dummy"),
+        ("CLI --api-key= flag", "tool --api-key=hunter2dummy", "hunter2dummy"),
+        ("unquoted value with a quote inside", 'password=ab"cdTAIL', "TAIL"),
+        ("unquoted value with an escaped quote inside", 'token=abc\\"TAIL', "TAIL"),
+        ("unquoted value starting with <", "password: <TAILsecret", "TAIL"),
+    ]
+
+    def test_run3_review_shapes_are_redacted(self):
+        for label, line, secret in self.RUN3_REVIEW_SHAPES:
+            with self.subTest(label):
+                self.assertNotIn(secret, self.agent.redact(line))
+
+    def test_run3_review_query_values_stop_at_the_next_parameter(self):
+        # a secret query parameter is redacted, the parameters after it are not
+        out = self.agent.redact("GET /login?user=bob&password=hunter2dummy&next=/home")
+        self.assertNotIn("hunter2dummy", out); self.assertIn("&next=/home", out)
+        out = self.agent.redact("GET /o?X-Amz-Signature=deadbeefdummy&x-id=GetObject")
+        self.assertNotIn("deadbeefdummy", out); self.assertIn("&x-id=GetObject", out)
+        out = self.agent.redact("GET /r?next=https%3A%2F%2Fx%2Fc%3Fsv%3D1%26sig%3DDummySasSig123%26sp%3Dr")
+        self.assertNotIn("DummySasSig123", out); self.assertIn("%26sp%3Dr", out)
+        # outside a query string an unquoted value still runs to whitespace
+        self.assertNotIn("TAIL", self.agent.redact("password=abcd&TAIL"))
+
+    def test_run3_review_ordinary_text_near_the_new_rules_survives(self):
+        for s in ('{"name":"DB_HOST","value":"db.internal"}', "--password-file /run/secrets/db", "--token-ttl 5m",
+                  "secret_key_id=5", "use --secret-store vault"):
+            self.assertEqual(self.agent.redact(s), s)
+
+    def test_run3_review_patterns_are_not_quadratic_on_a_repeated_prefix(self):
+        cases = ("SECRET_KEY_BASE=" * 8000, 'secret_key":"' * 6000, '{"name":"' * 8000, '{"name":"DB_PASSWORD","value":"' * 3000,
+                 '"name":"' + "password" * 5000, "--password " * 8000, "--api-key=" * 8000, "?password=" * 8000,
+                 "&token=" * 8000, "%26sig%3D" * 8000, "&sig=%2" * 8000, "&" * 50000,
+                 ("&" + "a" * 63) * 1000, ("?" + "x" * 63 + "password") * 800, "&password" * 8000)
+        for c in cases:
+            start = time.monotonic()
+            self.agent._redact(c, self.agent.DEFAULT_REDACT)
+            self.assertLess(time.monotonic() - start, 1.0, c[:24])
+
     def test_run3_new_patterns_are_not_quadratic_on_a_repeated_prefix(self):
         # one repeated-prefix case per pattern the run-3 fix added or widened
         cases = ("<password>" * 8000, '"password"=>' * 8000, r'\\\"password\\\":' * 6000, "pass=" * 8000,
@@ -1221,11 +1265,31 @@ class PostTests(unittest.TestCase):
             self.assertEqual(c.count("```") % 2, 0, "unbalanced fence in chunk: %r" % c[:60])
         self.assertIn("echo 059", "".join(chunks))
 
+    def test_slack_chunks_are_paced_one_second_apart_and_stop_on_an_error(self):
+        text = "Triage: " + "&" * 3000 + "        (confidence: low)"
+        with mock.patch.object(self.agent.time, "sleep") as sleep:
+            self.agent.post_note(text)
+        slack = [p for p, _, _ in Sink.posts if p == "/slack"]
+        self.assertGreater(len(slack), 2)
+        self.assertEqual([c.args for c in sleep.call_args_list], [(1,)] * (len(slack) - 1))
+        # a failing chunk ends the Slack loop: no further chunk, no further pause, Discord still sent
+        Sink.posts = []
+        os.environ["SLACK_WEBHOOK_URL"] = self.base + "/slack-down"
+        try:
+            with mock.patch.object(self.agent.time, "sleep") as sleep:
+                self.assertTrue(self.agent.post_note(text))
+        finally:
+            os.environ["SLACK_WEBHOOK_URL"] = self.base + "/slack"
+        self.assertEqual(len([p for p, _, _ in Sink.posts if p == "/slack-down"]), 1)
+        self.assertEqual(sleep.call_count, 0)
+        self.assertTrue([p for p, _, _ in Sink.posts if p == "/discord"])
+
     def test_slack_is_chunked_under_its_limit_after_escaping(self):
         # run-3: Slack got the whole note in one POST, and "&" grows fivefold once escaped
         text = ("Triage: " + "&" * 3000 + "        (confidence: low)\nCheck first (from runbook)\n"
                 + "\n".join("  echo %03d <%s>" % (n, "y" * 60) for n in range(80)) + "\nTrace: http://localhost:3000/d/sre-triage")
-        self.agent.post_note(text)
+        with mock.patch.object(self.agent.time, "sleep"):
+            self.agent.post_note(text)
         slack = [json.loads(b)["text"] for p, b, _ in Sink.posts if p == "/slack"]
         self.assertGreater(len(slack), 1)
         for c in slack:
@@ -1236,7 +1300,8 @@ class PostTests(unittest.TestCase):
         # redaction is per line, so no per-string cap bounds the note any more; post_note caps the
         # whole note (8000 characters) before any receiver formats it, and says so in the note
         huge = "\n".join(["Triage: x        (confidence: low)"] + ["Not seen: " + "e" * 39000] * 4)
-        self.agent.post_note(huge)
+        with mock.patch.object(self.agent.time, "sleep"):
+            self.agent.post_note(huge)
         for path in ("/slack", "/discord"):
             got = "".join(json.loads(b)["text" if path == "/slack" else "content"] for p, b, _ in Sink.posts if p == path)
             self.assertLess(len(got), 8500, path)

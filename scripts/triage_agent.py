@@ -80,7 +80,8 @@ TELEGRAM_API = "https://api.telegram.org/bot%s/sendMessage"
 # quoted JSON value or a comma-separated field instead of swallowing whatever follows.
 _REDACT_VALUE = r'[^\s"\',;)]+'
 # The secret-bearing field names the keyword rules below look for.
-_KEYWORDS = (r"password|passphrase|passwd|pwd|(?<![A-Za-z0-9])pass|secret|token|api[_-]?key|access[_-]?key"
+_KEYWORDS = (r"password|passphrase|passwd|pwd|(?<![A-Za-z0-9])pass|secret[_-]?key(?:[_-]?base)?|secret|token"
+             r"|api[_-]?key|access[_-]?key"
              r"|private[_-]?key|client[_-]?secret|account[_-]?key|subscription[_-]?key|signature")
 DEFAULT_REDACT = [
     # PEM first: the keyword rule below would otherwise eat "private_key=-----BEGIN" and leave the
@@ -122,17 +123,27 @@ DEFAULT_REDACT = [
     # doubly escaped \\\"password\\\": of JSON inside JSON inside JSON), and "=>" (Ruby hashes) as
     # well as ":"/"=". A value that opens with a quote runs to its own closing quote, stepping over
     # backslash escapes, so a ";", "," or escaped quote inside it no longer leaves a tail in the clear;
-    # an unquoted value runs to whitespace, a quote or "<". "pass" alone is anchored on its left so
-    # bypass=/compass= stay intact; the other keywords keep the old unanchored rule. Both value
-    # branches are the last element and their two alternatives share no character, so they cannot
-    # backtrack. [ \t]*, not \s, so it can never cross a "\n" the way the bearer/
+    # an unquoted value runs to whitespace, whatever it contains (over-redaction is the accepted
+    # price), except that a query parameter (a name ending in the keyword, right after "?" or "&",
+    # like ?password= or &X-Amz-Signature=) stops at the next "&" so the parameters after it survive;
+    # that name prefix is lazy and bounded to 64 characters. "pass" alone is anchored on its left so
+    # bypass=/compass= stay intact; the other keywords keep the old unanchored rule. Every value
+    # branch is the last element and the quoted one's two alternatives share no character, so they
+    # cannot backtrack. [ \t]*, not \s, so it can never cross a "\n" the way the bearer/
     # authorization/x-api-key patterns below do (post_note() redacts line by line precisely because
     # those three still can). Unbounded, not {0,16}: a value emitted with more than 16 spaces/tabs of
     # padding around the separator (a fixed-width log format, `column -t`) must still be redacted;
     # measured linear, since it only ever backtracks over the run of spaces actually present, not a
     # fixed worst case, and a run of spaces has none of the fixed keyword letters to restart a match at.
-    (r'(?i)(' + _KEYWORDS + r')(\\{0,3}["\']?[ \t]*(?:=>|[:=])[ \t]*\\{0,3}(["\'])?)(?(3)(?:\\.|(?!\3)[^\\\n])*|[^\s"\'<]+)',
-     r"\1\2[redacted]"),
+    (r'(?i)(?:([?&])([\w.-]{0,64}?))?(' + _KEYWORDS + r')(\\{0,3}["\']?[ \t]*(?:=>|[:=])[ \t]*\\{0,3}(["\'])?)(?(5)(?:\\.|(?!\5)[^\\\n])*|(?(1)[^\s&]+|\S+))',
+     r"\1\2\3\4[redacted]"),
+    # A name/value pair whose name says what the value is: a Kubernetes env entry, a parameter list
+    # ({"name":"DB_PASSWORD","value":"..."}). Anchored on the literal "name" key, every class bounded.
+    (r'(?i)("name"\s{0,16}:\s{0,16}"[^"\n]{0,128}(?:password|passwd|secret|token|key)[^"\n]{0,128}"\s{0,16},\s{0,16}"value"\s{0,16}:\s{0,16}")[^"\n]*',
+     r"\1[redacted]"),
+    # A secret passed as a command-line flag with a space (--password x); "--password=x" is the
+    # keyword rule's. The flag must end at the separator, so --password-file/--token-ttl stay intact.
+    (r"(?i)(--(?:password|passwd|token|secret|api-key)[ =])\S+", r"\1[redacted]"),
     # The same keywords as an XML element name: <password>value</password>, <db_pass>value</db_pass>.
     (r"(?i)(<[\w.:-]{0,64}(?:" + _KEYWORDS + r")>)[^<]*", r"\1[redacted]"),
     # Same two keywords, but no ":"/"=" at all - `aws configure set aws_secret_access_key <value>`
@@ -187,8 +198,9 @@ DEFAULT_REDACT = [
     # name, not a prefix of it. The value excludes
     # "&"/"#" so it stops at the next parameter or fragment, but is otherwise unbounded: it is the
     # last element (nothing follows it to backtrack against), same as the URL-password and
-    # Negotiate-token values above, not capped at some fixed length.
-    (r"(?i)((?:[?&]|\\u0026|&amp;|%26|%3F)(?:[\w-]{0,64}sig(?:nature)?|x-amz-security-token|key)(?:=|%3D))[^&\s\"'#]+", r"\1[redacted]"),
+    # Negotiate-token values above, not capped at some fixed length. It also stops at "%26", the next
+    # parameter of a signed URL nested URL-encoded inside another one.
+    (r"(?i)((?:[?&]|\\u0026|&amp;|%26|%3F)(?:[\w-]{0,64}sig(?:nature)?|x-amz-security-token|key)(?:=|%3D))(?:(?!%26)[^&\s\"'#])+", r"\1[redacted]"),
     # bounded quantifiers: an unbounded [\w.+-]+@[\w-]+\.[\w.-]+ backtracks O(n^2) on a long line with
     # an "@" but no "." after it (an attacker-controlled log line, easily tens of KB)
     (r"[\w.+-]{1,64}@[\w-]{1,63}(?:\.[\w-]{1,63})+", "[email]"),
@@ -710,8 +722,12 @@ def post_note(text):
             log("post to %s failed: %s" % (name, e.__class__.__name__)); oks.append(False)
     if ENV("SLACK_WEBHOOK_URL"):
         def slack():
-            # chunked like Discord, measured after escaping ("&" grows to "&amp;"); fences balanced
-            for chunk in _chunks_md(format_note(text, "slack"), SLACK_CHUNK_CHARS):
+            # chunked like Discord, measured after escaping ("&" grows to "&amp;"); fences balanced.
+            # One post per second, Slack's incoming-webhook rate. A failing chunk raises out of the
+            # loop, so nothing after it is sent and attempt() logs it.
+            for i, chunk in enumerate(_chunks_md(format_note(text, "slack"), SLACK_CHUNK_CHARS)):
+                if i:
+                    time.sleep(1)
                 post_json(ENV("SLACK_WEBHOOK_URL"), {"text": chunk}, timeout=10)
         attempt("slack", slack)
     if ENV("DISCORD_WEBHOOK_URL"):
