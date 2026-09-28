@@ -45,7 +45,16 @@ ask_pct DISK_WARN_PCT "Disk free % warning threshold" "15"
 ask_pct DISK_CRIT_PCT "Disk free % critical threshold" "5"
 ask PROM_RETENTION_TIME "Prometheus retention" "15d"
 ask LOKI_RETENTION_PERIOD "Loki retention" "168h"
-ask_secret GRAFANA_ADMIN_PASSWORD "Grafana admin password"
+# Re-asked in place (never a new question: the positional tests) until Grafana would accept it --
+# 4+ characters, its own `grafana cli admin reset-admin-password` minimum -- and it is not Grafana's
+# shipped default 'admin'. A refused value, typed or kept from an older .env, is dropped first, so
+# the next empty answer (or EOF) falls through to the generated password below instead of looping.
+while true; do
+  ask_secret GRAFANA_ADMIN_PASSWORD "Grafana admin password"
+  case "$GRAFANA_ADMIN_PASSWORD" in admin|?|??|???) ;; *) break ;; esac
+  echo "  Grafana needs at least 4 characters and not 'admin'; empty generates one"
+  GRAFANA_ADMIN_PASSWORD=
+done
 # Empty on a first run (no previous value to keep) or still the public default from an .env
 # written before this fix: generate one rather than keeping either. Same CSPRNG idiom as the
 # triage webhook token below, hex so it is easy to read back out of .env if you ever need to.

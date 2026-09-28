@@ -30,7 +30,9 @@ fi
 
 # Never run the CLI while Grafana's own process might still be migrating that same sqlite file: a
 # concurrent write while the server's own migration is in flight corrupted grafana.db irrecoverably
-# in testing (task-11-report.md). Wait for the server's own readiness signal before touching it a
+# in testing: on a fresh volume, a CLI run straight after `compose up -d` left the server
+# crash-looping on "migration failed ... no such column: dashboard.updated_by". Wait for the
+# server's own readiness signal before touching it a
 # second way, rather than retrying the CLI itself through that race.
 ready=false
 for _ in $(seq 1 30); do

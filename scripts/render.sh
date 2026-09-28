@@ -17,8 +17,9 @@ if [ -f "$ROOT/core/alertmanager/alertmanager.yml.tpl" ]; then
   # grafana/grafana:12.0.0); a shorter value here would render cleanly and then leave compose
   # rotation silently unapplied. Refuse it at the same place as empty/change-me rather than let it
   # surface two steps later. Length only, never the value itself.
-  if [ -z "${GRAFANA_ADMIN_PASSWORD:-}" ] || [ "${GRAFANA_ADMIN_PASSWORD:-}" = "change-me" ] || [ "${#GRAFANA_ADMIN_PASSWORD}" -lt 4 ]; then
-    echo "ERROR: GRAFANA_ADMIN_PASSWORD must be set in .env, at least 4 characters (Grafana's own minimum), and must not be the published default 'change-me'. Run 'make init' or set a real password by hand." >&2
+  # 'admin' is Grafana's own shipped default, as guessable as change-me.
+  if [ -z "${GRAFANA_ADMIN_PASSWORD:-}" ] || [ "${GRAFANA_ADMIN_PASSWORD:-}" = "change-me" ] || [ "${GRAFANA_ADMIN_PASSWORD:-}" = "admin" ] || [ "${#GRAFANA_ADMIN_PASSWORD}" -lt 4 ]; then
+    echo "ERROR: GRAFANA_ADMIN_PASSWORD must be set in .env, at least 4 characters (Grafana's own minimum), and must not be a published default ('change-me', or Grafana's own 'admin'). Run 'make init' or set a real password by hand." >&2
     exit 1
   fi
   if [ -n "${TELEGRAM_BOT_TOKEN:-}" ] && [ -z "${TELEGRAM_CHAT_ID:-}" ]; then

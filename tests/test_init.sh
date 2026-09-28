@@ -1,7 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 cd "$(dirname "$0")/.."
-tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
+# One trap for every temp dir in this file, installed before the first can leak: ${tmpN:-} is empty
+# until that section runs, and rm -rf "" is a no-op.
+tmp=$(mktemp -d)
+trap 'rm -rf "$tmp" "${tmp7:-}" "${tmp8:-}" "${tmp8b:-}" "${tmp9:-}" "${tmp10:-}" "${tmp11:-}" "${tmp12:-}" "${tmp13:-}" "${tmp14:-}"' EXIT
 cp -r core scripts .env.example "$tmp/"
 # answers: project, slack, telegram token, chat id, teams, services (2 then blank), disk warn, disk crit,
 # prom ret, loki ret, grafana pw, security y, container sock, cadvisor y, auth log path, discord blank,
@@ -85,7 +88,7 @@ ${CONTAINER_ENGINE:-docker} run --rm -v "$tmp/build/alertmanager:/c" --entrypoin
 # --- re-run 7: Discord + email with NO Slack. Fresh dir: the shared tmp already holds a Slack URL and a blank
 #     answer keeps it. 14 free answers (security n, so no auth-log question), then discord, email, smtp host,
 #     from, user, password.
-tmp7=$(mktemp -d); trap 'rm -rf "$tmp" "$tmp7" "${tmp8:-}"' EXIT
+tmp7=$(mktemp -d)
 cp -r core scripts .env.example "$tmp7/"
 printf 'acme\n\n\n\n\n\n\n\n\n\ns3cret\nn\n\nn\nhttps://discord.com/api/webhooks/1/x\nops@example.invalid,dev@example.invalid\nsmtp.example.invalid:587\nalerts@example.invalid\nalerts@example.invalid\nsmtp-pw\n' \
   | ( cd "$tmp7" && bash scripts/init.sh >/dev/null )
@@ -134,7 +137,7 @@ fi
 [ ! -e "$tmp8/.env" ] || { echo "FAIL: wizard wrote .env with no receiver"; exit 1; }
 
 # --- re-run 9b: a Telegram bot token with no chat id is not a usable receiver either ---
-tmp8b=$(mktemp -d); trap 'rm -rf "$tmp" "$tmp7" "$tmp8" "$tmp8b"' EXIT
+tmp8b=$(mktemp -d)
 cp -r core scripts .env.example "$tmp8b/"
 if printf 'acme\n\n123456:ABCDEF\n\n\n\n\n\n\n\ns3cret\nn\n\nn\n\n\n' | ( cd "$tmp8b" && bash scripts/init.sh >/dev/null 2>&1 ); then
   echo "FAIL: wizard accepted a Telegram token with no chat id and no other receiver"; exit 1
@@ -142,7 +145,7 @@ fi
 [ ! -e "$tmp8b/.env" ] || { echo "FAIL: wizard wrote .env with a Telegram token but no chat id"; exit 1; }
 
 # --- old answer files stop early: the new trailing questions must take defaults at EOF, not abort ---
-tmp9=$(mktemp -d); trap 'rm -rf "$tmp" "$tmp7" "$tmp8" "$tmp8b" "$tmp9" "${tmp10:-}"' EXIT
+tmp9=$(mktemp -d)
 cp -r core scripts .env.example "$tmp9/"
 printf 'acme\nhttp://localhost:9/\n\n\n\n\n\n\n\n\n\nn\n\nn\n' | ( cd "$tmp9" && bash scripts/init.sh >/dev/null )
 grep -qxF "DISCORD_WEBHOOK_URL=''" "$tmp9/.env"
@@ -180,7 +183,7 @@ grep -qxF "TRIAGE_WEBHOOK_TOKEN=''" "$tmp10/.env" || { echo "FAIL: TRIAGE_WEBHOO
 # --- Grafana admin password: a first run (no .env) with an empty answer must not silently keep
 #     the published 'change-me' default. It must generate a real, long, random one instead, and
 #     tell the operator where to find it rather than printing it. ---
-tmp11=$(mktemp -d); trap 'rm -rf "$tmp" "$tmp7" "$tmp8" "$tmp8b" "$tmp9" "$tmp10" "$tmp11"' EXIT
+tmp11=$(mktemp -d)
 cp -r core scripts .env.example "$tmp11/"
 # 17 answers: project, slack, 9 blanks (telegram token/chat id/teams/services-end/disk warn/disk
 # crit/prom ret/loki ret/grafana pw BLANK), security n, 4 blanks (container sock/cadvisor/discord/
@@ -203,7 +206,7 @@ pw2=$(sed -n "s/^GRAFANA_ADMIN_PASSWORD='\(.*\)'\$/\1/p" "$tmp11/.env")
 
 # --- an existing .env with the OLD 'change-me' default (written before this fix) must not be
 #     perpetuated on a re-run: treat it like empty and generate a real one -------------------
-tmp13=$(mktemp -d); trap 'rm -rf "$tmp" "$tmp7" "$tmp8" "$tmp8b" "$tmp9" "$tmp10" "$tmp11" "$tmp12" "$tmp13"' EXIT
+tmp13=$(mktemp -d)
 cp -r core scripts .env.example "$tmp13/"
 printf "GRAFANA_ADMIN_PASSWORD='change-me'\nSLACK_WEBHOOK_URL='http://localhost:9/'\n" > "$tmp13/.env"
 printf '\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n' | ( cd "$tmp13" && bash scripts/init.sh >/dev/null )
@@ -216,7 +219,7 @@ pw3=$(sed -n "s/^GRAFANA_ADMIN_PASSWORD='\(.*\)'\$/\1/p" "$tmp13/.env")
 # environments (it can go straight to the controlling terminal), so this traces the wizard with
 # `bash -x` and greps ITS OWN trace of that same read command, after $shown has been substituted
 # into it -- xtrace always writes to fd 2, which a plain capture does not have to compete with.
-tmp12=$(mktemp -d); trap 'rm -rf "$tmp" "$tmp7" "$tmp8" "$tmp8b" "$tmp9" "$tmp10" "$tmp11" "$tmp12"' EXIT
+tmp12=$(mktemp -d)
 cp -r core scripts .env.example "$tmp12/"
 trace=$(printf 'acme\nhttp://localhost:9/\n\n\n\n\n\n\n\n\n\nn\n\n\n\n\nn\n' \
   | ( cd "$tmp12" && bash -x scripts/init.sh ) 2>&1 1>/dev/null)
@@ -224,5 +227,21 @@ echo "$trace" | grep -qF "read -rs -p 'Grafana admin password [unchanged]" \
   && { echo "FAIL: first-run Grafana password prompt showed [unchanged] instead of [empty]"; exit 1; }
 echo "$trace" | grep -qF "read -rs -p 'Grafana admin password [empty]" \
   || { echo "FAIL: first-run Grafana password prompt did not show [empty]: $(echo "$trace" | grep 'Grafana admin password' || echo NONE)"; exit 1; }
+
+# --- a typed Grafana password Grafana itself would refuse (under 4 characters, or its own default
+#     'admin') is re-asked in place. No new question: the answer after the accepted one still lands
+#     on the security question, then cAdvisor ---
+tmp14=$(mktemp -d)
+cp -r core scripts .env.example "$tmp14/"
+printf 'acme\nhttp://localhost:9/\n\n\n\n\n\n\n\n\nabc\nadmin\ngood-pw\ny\n\ny\n\n\n\nn\n' | ( cd "$tmp14" && bash scripts/init.sh >/dev/null )
+grep -qxF "GRAFANA_ADMIN_PASSWORD='good-pw'" "$tmp14/.env" || { echo "FAIL: a short or 'admin' Grafana password was not re-asked"; exit 1; }
+grep -qxF "MODULE_SECURITY='true'" "$tmp14/.env" || { echo "FAIL: re-asking the password shifted the later answers"; exit 1; }
+grep -qxF "COMPOSE_PROFILES='cadvisor'" "$tmp14/.env" || { echo "FAIL: re-asking the password shifted the later answers"; exit 1; }
+# an .env from before this check holding a too-short value: a blank re-run must not keep it (render
+# would refuse it) and must not loop forever at EOF either -- it generates one, like change-me
+printf "GRAFANA_ADMIN_PASSWORD='abc'\nSLACK_WEBHOOK_URL='http://localhost:9/'\n" > "$tmp14/.env"
+printf '%.0s\n' $(seq 1 25) | ( cd "$tmp14" && bash scripts/init.sh >/dev/null )
+pw4=$(sed -n "s/^GRAFANA_ADMIN_PASSWORD='\(.*\)'\$/\1/p" "$tmp14/.env")
+[[ "$pw4" =~ ^[0-9a-f]{20,}$ ]] || { echo "FAIL: a blank re-run kept a too-short Grafana password instead of generating one"; exit 1; }
 
 echo "test_init OK"

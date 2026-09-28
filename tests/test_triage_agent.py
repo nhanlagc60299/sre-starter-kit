@@ -317,7 +317,7 @@ class PackTests(unittest.TestCase):
         self.assertNotIn("AIzaDummyDummyDummyDummyDummyDummy123", self.agent.redact(line))
 
     def test_run2_shape_query_param_matches_go_json_escaped_ampersand(self):
-        # fix round 1 #4: Go's encoding/json HTML-escapes "&" to the six literal characters
+        # Go's encoding/json HTML-escapes "&" to the six literal characters
         # backslash-u-0-0-2-6 by default, so a JSON-encoded log line carries that instead of a bare
         # "&" in front of "sig=". Built with a plain (non-raw) string: "\\u0026" here is the normal
         # Python escape for one backslash followed by literal "u0026" - the six characters Go emits.
@@ -325,12 +325,12 @@ class PackTests(unittest.TestCase):
         self.assertNotIn("DummySig0123456789abcdef", self.agent.redact(line))
 
     def test_run2_shape_query_param_matches_html_escaped_ampersand(self):
-        # fix round 1 #4: an HTML/XML-escaped query string carries "&amp;" instead of "&".
+        # an HTML/XML-escaped query string carries "&amp;" instead of "&".
         line = "GET https://maps.googleapis.com/x?a=1&amp;key=AIzaDummyDummyDummyDummyDummyDummy123"
         self.assertNotIn("AIzaDummyDummyDummyDummyDummyDummy123", self.agent.redact(line))
 
     def test_run2_shape_query_param_value_is_not_truncated_past_the_old_2048_bound(self):
-        # fix round 1 #5: the value is the last element (nothing follows it to backtrack against),
+        # the value is the last element (nothing follows it to backtrack against),
         # so it is unbounded like the URL-password and Negotiate-token values - a signature longer
         # than the old {1,2048} bound must be redacted whole, not just its first 2048 characters.
         long_sig = "d" * 3000
@@ -359,7 +359,7 @@ class PackTests(unittest.TestCase):
         self.assertEqual(self.agent.redact(s), s)
 
     def test_run2_negative_control_aws_secret_access_key_not_set_survives(self):
-        # fix round 1 #3: the AWS whitespace-separator rule must only redact a secret-shaped value
+        # the AWS whitespace-separator rule must only redact a secret-shaped value
         # (16+ base64-alphabet characters) - "not" is 3 characters, nowhere near that.
         s = "aws_secret_access_key not set"
         self.assertEqual(self.agent.redact(s), s)
@@ -390,7 +390,7 @@ class PackTests(unittest.TestCase):
         self.assertEqual(self.agent.redact(s), s)
 
     def test_run2_keyword_separator_allows_more_than_16_spaces(self):
-        # fix round 1 #2: [ \t]{0,16} became [ \t]* - a value padded past 16 spaces/tabs (a
+        # [ \t]{0,16} became [ \t]* - a value padded past 16 spaces/tabs (a
         # fixed-width log format, `column -t`) must still be redacted, not just up to the old bound.
         line = "password:" + " " * 17 + "hunter2dummy"
         self.assertNotIn("hunter2dummy", self.agent.redact(line))
