@@ -33,12 +33,16 @@ DEDUP_SECONDS = 3600       # the webhook-triage route has no repeat_interval of 
 RUNBOOK_MAX_LINES = 60
 DISCORD_CHUNK_CHARS = 2000   # Discord's own hard limit on message content length, in characters
 TELEGRAM_CHUNK_CHARS = 4096  # Telegram's own hard limit on sendMessage's text length, in characters
+SLACK_CHUNK_CHARS = 3500     # per Slack post, after its &/</> escaping; Slack documents 40,000 as its limit
+NOTE_MAX_CHARS = 8000        # the whole note, cut before any receiver formats it (a real note is ~1-2k)
 FENCE_OPEN, FENCE_CLOSE = "```\n", "\n```"   # a code fence; format_note() puts only the runbook
                                               # commands inside one. Telegram gets no parse_mode, so
                                               # it never sees a fence - see post_note()'s telegram().
 FENCE_CHARS = len(FENCE_OPEN) + len(FENCE_CLOSE)
 ENV = os.environ.get
 MAX_BODY = 1 << 20         # bytes; a webhook body over this is refused with 413 before any of it is read
+MAX_UPSTREAM_BYTES = 8 << 20   # bytes read from one upstream response; past it, the response is refused
+                               # unparsed (a model-chosen {__name__=~".+"} over 180m could be any size)
 # The pack is what the model reads: cap it in tokens so an internal model with a small context window
 # never gets a prompt it cannot hold. 4 bytes per token is conservative for ASCII JSON; the floor keeps
 # a runbook and one rule in the pack; HARD_CAP_BYTES stays the never-exceed ceiling.
@@ -75,22 +79,30 @@ TELEGRAM_API = "https://api.telegram.org/bot%s/sendMessage"
 # Value matcher excludes whitespace/quote/comma/semicolon/close-paren so it stops at the end of a
 # quoted JSON value or a comma-separated field instead of swallowing whatever follows.
 _REDACT_VALUE = r'[^\s"\',;)]+'
+# The secret-bearing field names the keyword rules below look for.
+_KEYWORDS = (r"password|passphrase|passwd|pwd|(?<![A-Za-z0-9])pass|secret|token|api[_-]?key|access[_-]?key"
+             r"|private[_-]?key|client[_-]?secret|account[_-]?key|subscription[_-]?key|signature")
 DEFAULT_REDACT = [
     # PEM first: the keyword rule below would otherwise eat "private_key=-----BEGIN" and leave the
     # body. The body class (base64, whitespace, a literal "\n" from a JSON log) stops at "-", so the
     # optional END group never makes it backtrack; a truncated key with no END still loses its body.
     (r"-----BEGIN [A-Z ]{0,32}PRIVATE KEY-----[A-Za-z0-9+/=\s\\]{0,8192}(?:-----END [A-Z ]{0,32}PRIVATE KEY-----)?",
      "[private-key-redacted]"),
+    # A whole PEM file base64-encoded once more (a Kubernetes Secret's data, a CI variable):
+    # "LS0tLS1CRUdJTi" is base64 of "-----BEGIN". Bounded like the rule above.
+    (r"LS0tLS1CRUdJTi[A-Za-z0-9+/]{0,8192}={0,2}", "[pem-redacted]"),
     # A PEM body that lost its -----BEGIN/END----- header/footer, or never had one in this log line -
     # "MII" is the DER SEQUENCE tag every RSA/EC/PKCS8 key or cert starts with once base64-encoded.
-    # Bounded to 4096 like the rule above; the trailing "={0,2}" is optional padding, not required, so
-    # a body with none still matches whole.
-    (r"\bMII[A-Za-z0-9+/]{20,4096}={0,2}", "[pem-redacted]"),
+    # The rows after it follow across whitespace or a literal "\n"/"\r" (a JSON-escaped key on one
+    # log line). The separator and the row share no character, so the repeat cannot backtrack
+    # across a row boundary; every quantifier is bounded. The trailing "={0,2}" is optional padding.
+    (r"\bMII[A-Za-z0-9+/]{20,4096}(?:(?:\\[nr]|\s){1,8}[A-Za-z0-9+/]{16,4096}){0,256}={0,2}", "[pem-redacted]"),
     # A lone base64 body line with no "MII" prefix of its own - a later line of a multi-line PEM once
     # the first has already matched above, or a body pasted without its first line. Exactly 64 base64
     # characters (PEM's own wrap width) containing at least one uppercase letter: that requirement is
     # what keeps a 64-character lowercase hex digest (sha256, common in ordinary logs) out of this.
-    (r"(?m)^(?=[^\n]{0,63}[A-Z])[A-Za-z0-9+/]{64}$", "[pem-redacted]"),
+    # Indentation (a YAML block) and a CRLF line end are allowed around it, and the indent is kept.
+    (r"(?m)^([ \t]{0,64})(?=[^\n]{0,63}[A-Z])[A-Za-z0-9+/]{64}\r?$", r"\1[pem-redacted]"),
     # The keyword must directly precede the separator - that trailing requirement alone is what
     # separates "safe" from "secret": max_tokens=, token_count=, tokenizer_latency=, secretary_id=,
     # passwordless_login= and pwd_check_interval= all have the keyword followed by more identifier
@@ -106,16 +118,23 @@ DEFAULT_REDACT = [
     # name is glued onto the keyword with no boundary at all (oldpassword=, apitoken=, mytoken=). The
     # trailing-separator requirement turned out to be the only check that needed to exist.
     #
-    # The separator itself allows an optional backslash around each quote (\"password\": ...) so an
-    # escaped JSON blob nested inside another JSON-encoded log line is caught
-    # the same as a plain one; [ \t]*, not \s, so it can never cross a "\n" the way the bearer/
+    # The separator allows up to three backslashes before each quote (\"password\": ..., and the
+    # doubly escaped \\\"password\\\": of JSON inside JSON inside JSON), and "=>" (Ruby hashes) as
+    # well as ":"/"=". A value that opens with a quote runs to its own closing quote, stepping over
+    # backslash escapes, so a ";", "," or escaped quote inside it no longer leaves a tail in the clear;
+    # an unquoted value runs to whitespace, a quote or "<". "pass" alone is anchored on its left so
+    # bypass=/compass= stay intact; the other keywords keep the old unanchored rule. Both value
+    # branches are the last element and their two alternatives share no character, so they cannot
+    # backtrack. [ \t]*, not \s, so it can never cross a "\n" the way the bearer/
     # authorization/x-api-key patterns below do (post_note() redacts line by line precisely because
     # those three still can). Unbounded, not {0,16}: a value emitted with more than 16 spaces/tabs of
     # padding around the separator (a fixed-width log format, `column -t`) must still be redacted;
     # measured linear, since it only ever backtracks over the run of spaces actually present, not a
     # fixed worst case, and a run of spaces has none of the fixed keyword letters to restart a match at.
-    (r'(?i)((?:password|passwd|pwd|secret|token|api[_-]?key|access[_-]?key|private[_-]?key|client[_-]?secret))(\\?["\']?[ \t]*[:=][ \t]*\\?["\']?)' + _REDACT_VALUE,
+    (r'(?i)(' + _KEYWORDS + r')(\\{0,3}["\']?[ \t]*(?:=>|[:=])[ \t]*\\{0,3}(["\'])?)(?(3)(?:\\.|(?!\3)[^\\\n])*|[^\s"\'<]+)',
      r"\1\2[redacted]"),
+    # The same keywords as an XML element name: <password>value</password>, <db_pass>value</db_pass>.
+    (r"(?i)(<[\w.:-]{0,64}(?:" + _KEYWORDS + r")>)[^<]*", r"\1[redacted]"),
     # Same two keywords, but no ":"/"=" at all - `aws configure set aws_secret_access_key <value>`
     # and the matching session-token flag separate keyword and value with whitespace only. Restricted
     # to these two AWS-specific names on purpose: a whitespace separator on the bare password/secret/
@@ -156,9 +175,11 @@ DEFAULT_REDACT = [
     # lookbehind, not \b: "-" is not \w, so "eyJ-eyJ-..." would give \b a start at every "eyJ" and each
     # would rescan the rest of the run
     (r"(?<![\w-])eyJ[\w-]{1,4096}\.eyJ[\w-]{1,8192}\.[\w-]{0,2048}", "[jwt-redacted]"),
-    # Signed-URL / SAS / STS query parameters: an Azure SAS or Teams workflow "sig=", an AWS
-    # presigned "X-Amz-Signature=" or "X-Amz-Security-Token=", and a bare API key passed as "key="
-    # (Google Maps and others) - the separator before the keyword is a literal "?"/"&" or one of the
+    # Signed-URL / SAS / STS query parameters: any parameter named *sig or *signature (Azure SAS
+    # "sig=", AWS "X-Amz-Signature=", S3 SigV2 and CloudFront "Signature=", GCS "X-Goog-Signature="),
+    # "X-Amz-Security-Token=", and a bare API key passed as "key=" (Google Maps and others) - the
+    # separator before the keyword is a literal "?"/"&", its URL encodings "%3F"/"%26" (a signed URL
+    # nested in a redirect parameter, where "=" is "%3D" too), or one of the
     # two shapes a "&" is commonly escaped into before it ever reaches this log line: the six literal
     # characters backslash-u-0-0-2-6 (Go's encoding/json HTML-escapes "&" by default) and "&amp;"
     # (HTML/XML entity encoding). Requiring that leading separator (in any of its forms) is what
@@ -167,7 +188,7 @@ DEFAULT_REDACT = [
     # "&"/"#" so it stops at the next parameter or fragment, but is otherwise unbounded: it is the
     # last element (nothing follows it to backtrack against), same as the URL-password and
     # Negotiate-token values above, not capped at some fixed length.
-    (r"(?i)((?:[?&]|\\u0026|&amp;)(?:sig|x-amz-signature|x-amz-security-token|key)=)[^&\s\"'#]+", r"\1[redacted]"),
+    (r"(?i)((?:[?&]|\\u0026|&amp;|%26|%3F)(?:[\w-]{0,64}sig(?:nature)?|x-amz-security-token|key)(?:=|%3D))[^&\s\"'#]+", r"\1[redacted]"),
     # bounded quantifiers: an unbounded [\w.+-]+@[\w-]+\.[\w.-]+ backtracks O(n^2) on a long line with
     # an "@" but no "." after it (an attacker-controlled log line, easily tens of KB)
     (r"[\w.+-]{1,64}@[\w-]{1,63}(?:\.[\w-]{1,63})+", "[email]"),
@@ -198,23 +219,34 @@ class Budget:
         return self.deadline - time.monotonic()
 
 
+_TOO_LARGE = object()
+
+
 def get_json(url, headers=None, timeout=SOURCE_TIMEOUT):
-    """GET and parse JSON; None on any failure. Never raises: every source is optional."""
+    """GET and parse JSON; None on any failure, _TOO_LARGE for a body over MAX_UPSTREAM_BYTES, which
+    is never parsed: at most one byte past the cap is ever read. Never raises: every source is optional."""
     try:
         req = urllib.request.Request(url, headers={**(headers or {}), "User-Agent": USER_AGENT})
         with urllib.request.urlopen(req, timeout=timeout) as r:
-            return json.loads(r.read().decode())
+            raw = r.read(MAX_UPSTREAM_BYTES + 1)
+        if len(raw) > MAX_UPSTREAM_BYTES:
+            log("source response over %d bytes, not parsed: %s" % (MAX_UPSTREAM_BYTES, url.split("?")[0]))
+            return _TOO_LARGE
+        return json.loads(raw.decode())
     except Exception as e:  # noqa: BLE001 - a dead upstream must not kill the triage
         log("source unreachable %s: %s" % (url.split("?")[0], e.__class__.__name__))
         return None
 
 
 def fetch_json(budget, url, headers=None):
-    """get_json against the shared deadline: 'unreachable' without a call once the budget is spent."""
+    """get_json against the shared deadline -> (data, "reached"), or (None, "unreachable") without a
+    call once the budget is spent, or (None, "too-large"). Callers pass any status but "reached" on."""
     remaining = budget.remaining()
     if remaining <= 0:
         return None, "unreachable"
     d = get_json(url, headers, timeout=min(SOURCE_TIMEOUT, remaining))
+    if d is _TOO_LARGE:
+        return None, "too-large"
     return (None, "unreachable") if d is None else (d, "reached")
 
 
@@ -223,7 +255,7 @@ def combine(*statuses):
     'unreachable' wins even if another call to the same endpoint succeeded: a partial failure must not
     be reported as a clean "ok", or a consumer trusting sources[...] == "ok" would miss it."""
     statuses = [s for s in statuses if s]
-    for pref in ("unreachable", "ok", "empty"):
+    for pref in ("unreachable", "too-large", "ok", "empty"):
         if pref in statuses:
             return pref
     return "skipped"
@@ -235,8 +267,8 @@ def prom_url(path, **params):
 
 def rule_for(name, budget):
     d, st = fetch_json(budget, prom_url("/api/v1/rules", type="alert"))
-    if st == "unreachable":
-        return None, "unreachable"
+    if st != "reached":
+        return None, st
     if not isinstance(d, dict):        # an upstream returning the wrong shape is "empty", not a crash
         return None, "empty"
     for g in d.get("data", {}).get("groups", []):
@@ -250,8 +282,8 @@ def series_now(expr, budget, limit=20):
     if not expr:
         return None, "skipped"
     d, st = fetch_json(budget, prom_url("/api/v1/query", query=expr))
-    if st == "unreachable":
-        return None, "unreachable"
+    if st != "reached":
+        return None, st
     if not isinstance(d, dict):
         return None, "empty"
     result = d.get("data", {}).get("result", [])[:limit]
@@ -265,8 +297,8 @@ def series_range(expr, budget, limit=20, minutes=30):
     now = time.time()
     step = max(60, minutes * 60 // 60)
     d, st = fetch_json(budget, prom_url("/api/v1/query_range", query=expr, start=now - minutes * 60, end=now, step=step))
-    if st == "unreachable":
-        return None, "unreachable"
+    if st != "reached":
+        return None, st
     if not isinstance(d, dict):
         return None, "empty"
     result = d.get("data", {}).get("result", [])[:limit]
@@ -292,8 +324,8 @@ def loki_lines(query, budget, minutes=15, limit=50):
     url = ENV("LOKI_URL", "http://loki:3100") + "/loki/api/v1/query_range?" + urllib.parse.urlencode(
         {"query": query, "start": now_ns - minutes * 60 * 10**9, "end": now_ns, "limit": limit, "direction": "backward"})
     d, st = fetch_json(budget, url, {"X-Scope-OrgID": "fake"})
-    if st == "unreachable":
-        return [], "unreachable"
+    if st != "reached":
+        return [], st
     if not isinstance(d, dict):
         return [], "empty"
     lines = []
@@ -305,16 +337,21 @@ def loki_lines(query, budget, minutes=15, limit=50):
     return lines, ("ok" if lines else "empty")
 
 
+def _q(value):
+    """A label value as the inside of a PromQL/LogQL double-quoted string: backslash first, then quote."""
+    return str(value).replace("\\", "\\\\").replace('"', '\\"')
+
+
 def loki_errors(service, budget, limit=50):
     if not service:
         return [], "skipped"
-    return loki_lines('{service="%s"} |~ "(?i)(error|exception|fatal|panic|traceback)"' % service, budget, 15, limit)
+    return loki_lines('{service="%s"} |~ "(?i)(error|exception|fatal|panic|traceback)"' % _q(service), budget, 15, limit)
 
 
 def firing_alerts(budget, limit=30):
     d, st = fetch_json(budget, ENV("ALERTMANAGER_URL", "http://alertmanager:9093") + "/api/v2/alerts?active=true&silenced=true&inhibited=true")
-    if st == "unreachable":
-        return [], "unreachable"
+    if st != "reached":
+        return [], st
     if not isinstance(d, list):        # e.g. an error body like {"error": "..."} instead of the alert list
         return [], "empty"
     out = [{"labels": a.get("labels", {}), "startsAt": a.get("startsAt"), "state": a.get("status", {}).get("state"),
@@ -330,8 +367,8 @@ def deploys(budget, limit=10, minutes=120):
     pw = ENV("GRAFANA_ADMIN_PASSWORD", "")
     hdr = {"Authorization": "Basic " + base64.b64encode(("admin:" + pw).encode()).decode()} if pw else {}
     d, st = fetch_json(budget, url, hdr)
-    if st == "unreachable":
-        return [], "unreachable"
+    if st != "reached":
+        return [], st
     if not isinstance(d, list):
         return [], "empty"
     out = [{"time": a.get("time"), "tags": a.get("tags", []), "text": a.get("text", "")} for a in d]
@@ -348,7 +385,9 @@ def cap_lines(text, n=RUNBOOK_MAX_LINES):
 
 
 def runbook(name):
-    """Pro mounts runbooks/<Alert>.md; free has the matching ### section of docs/ALERTS.md. No network call, no budget."""
+    """Pro mounts runbooks/<Alert>.md; free has the matching ### section of docs/ALERTS.md. No network call, no budget.
+    The name is sanitised here, not by each caller: build_pack passes an alert's own label value."""
+    name = re.sub(r"[^A-Za-z0-9_]", "", str(name))[:80]
     p = os.path.join(ENV("RUNBOOK_DIR", "/runbooks"), name + ".md")
     if os.path.isfile(p):
         with open(p) as f:
@@ -405,13 +444,32 @@ TOOLS = {
     "loki_query": lambda a, b: loki_lines(str(a.get("selector", ""))[:2000], b, minutes=_int(a, "minutes", 15, 180), limit=_int(a, "limit", 50, 50)),
     "alerts":     lambda a, b: firing_alerts(b),
     "deploys":    lambda a, b: deploys(b, minutes=_int(a, "minutes", 120, 1440)),
-    "runbook":    lambda a, b: runbook(re.sub(r"[^A-Za-z0-9_]", "", str(a.get("alert", "")))[:80]),
+    "runbook":    lambda a, b: runbook(a.get("alert", "")),
 }
+# loki_query: a stream selector followed only by line filters. Any other pipeline stage (| json,
+# logfmt, line_format, label_format, regexp, pattern, unpack, ...) reshapes a line before redact()
+# sees it - `| json | line_format "{{.password}}"` hands back a bare secret with no keyword left.
+# The two string forms share no character with what follows them, so this cannot backtrack.
+_LQ_STR = r'(?:"(?:[^"\\\n]|\\.)*"|`[^`]*`)'
+_LQ_MATCHER = r'\s*[A-Za-z_][A-Za-z0-9_]*\s*(?:=~|!~|!=|=)\s*' + _LQ_STR + r'\s*'
+LOKI_SELECTOR = re.compile(r'\{' + _LQ_MATCHER + r'(?:,' + _LQ_MATCHER + r')*\}(?:\s*(?:\|=|!=|\|~|!~)\s*' + _LQ_STR + r')*')
+
+
+def _refused(name, args):
+    """Why a tool call's arguments are refused, or None. Checked before any network call."""
+    if name == "loki_query" and not LOKI_SELECTOR.fullmatch(str(args.get("selector", ""))[:2000].strip()):
+        return ("loki_query takes a stream selector {label=\"value\", ...} followed only by line filters "
+                "(|= != |~ !~ with a quoted string); parsers, formatters and every other pipeline stage are refused")
+    if name in ("prom_query", "prom_range") and re.search(r"(?i)label_(?:replace|join)", str(args.get("expr", ""))):
+        return "label_replace and label_join are refused"
+    return None
 
 
 def run_tool(name, args, seconds):
     """One engine tool call -> (result, status). Unknown tool -> (None, "unknown"); non-dict args ->
-    (None, "skipped"); no budget left -> (None, "unreachable") without a network call. The result is
+    (None, "skipped"); no budget left -> (None, "unreachable") without a network call; a refused
+    argument -> ({"error": why}, "refused"), also without one; a response over MAX_UPSTREAM_BYTES ->
+    (None, "too-large"). The result is
     redacted like the pack and, past TOOL_MAX_BYTES of JSON, replaced by a marked sample."""
     fn = TOOLS.get(name)
     if fn is None:
@@ -420,6 +478,9 @@ def run_tool(name, args, seconds):
         return None, "skipped"
     if seconds <= 0:
         return None, "unreachable"
+    why = _refused(name, args)
+    if why:
+        return {"error": why}, "refused"
     result, status = fn(args, Budget(min(TOOL_TIMEOUT, seconds)))
     result = redact(result)
     s = json.dumps(result)
@@ -471,13 +532,14 @@ def build_pack(payload):
     pack["rule_now"], now_status = series_now(rule_expr, budget)
     pack["rule_30m"], range_status = series_30m(rule_expr, budget)
     inst = labels.get("instance")
-    pack["up"], up_status = series_now(('up{instance="%s"}' % inst) if inst else None, budget)
+    pack["up"], up_status = series_now(('up{instance="%s"}' % _q(inst)) if inst else None, budget)
     pack["logs"], loki_status = loki_errors(labels.get("service") or labels.get("job"), budget)
     pack["firing"], am_status = firing_alerts(budget)
     pack["deploys"], grafana_status = deploys(budget)
     pack["runbook"], runbook_status = runbook(name)
 
-    pack["sources"] = {
+    # a response over MAX_UPSTREAM_BYTES fails its source the way a dead one does
+    pack["sources"] = {k: "unreachable" if v == "too-large" else v for k, v in {
         "alertmanager": am_status,
         "rules": rules_status,
         "query": combine(now_status, up_status),
@@ -485,7 +547,7 @@ def build_pack(payload):
         "loki": loki_status,
         "grafana": grafana_status,
         "runbook": runbook_status,
-    }
+    }.items()}
     return trim(redact(pack))
 
 
@@ -534,7 +596,7 @@ def post_json(url, body, headers=None, timeout=45):
     data = json.dumps(body).encode()
     req = urllib.request.Request(url, data=data, headers={"Content-Type": "application/json", **(headers or {}), "User-Agent": USER_AGENT})
     with urllib.request.urlopen(req, timeout=timeout) as r:
-        return r.status, r.read().decode("utf-8", "replace")
+        return r.status, r.read(65536).decode("utf-8", "replace")   # a receiver's reply is never used
 
 
 def _chunks(text, size):
@@ -636,6 +698,10 @@ def post_note(text):
     # authorization, x-api-key) drops that newline in its replacement, which used to merge the line
     # after a guarded check_first command into format_note()'s code fence.
     text = "\n".join(redact(l) for l in text.split("\n"))
+    # redact() caps each line, not the note: bound the whole of it here, after redaction (so a cut can
+    # never split a secret the patterns would have caught) and before any receiver formats it.
+    if len(text) > NOTE_MAX_CHARS:
+        text = text[:NOTE_MAX_CHARS] + "\n(note truncated at %d characters)" % NOTE_MAX_CHARS
     oks = []
     def attempt(name, fn):
         try:
@@ -643,7 +709,11 @@ def post_note(text):
         except Exception as e:  # noqa: BLE001
             log("post to %s failed: %s" % (name, e.__class__.__name__)); oks.append(False)
     if ENV("SLACK_WEBHOOK_URL"):
-        attempt("slack", lambda: post_json(ENV("SLACK_WEBHOOK_URL"), {"text": format_note(text, "slack")}, timeout=10))
+        def slack():
+            # chunked like Discord, measured after escaping ("&" grows to "&amp;"); fences balanced
+            for chunk in _chunks_md(format_note(text, "slack"), SLACK_CHUNK_CHARS):
+                post_json(ENV("SLACK_WEBHOOK_URL"), {"text": chunk}, timeout=10)
+        attempt("slack", slack)
     if ENV("DISCORD_WEBHOOK_URL"):
         def discord():
             # chunks break at line boundaries with balanced fences; if a chunk's POST fails, the loop
@@ -705,7 +775,7 @@ def process(payload):
         # DEDUP.seen() above already marked this key seen; on failure we deliberately leave that mark
         # in place rather than undo it, so a repeatedly-firing alert is skipped for DEDUP_SECONDS
         # instead of hammering a broken upstream on every Alertmanager repeat.
-        log("build_pack failed for %s: %s: %s" % (json.dumps(key), e.__class__.__name__, json.dumps(str(e)))); return
+        log("build_pack failed for %s: %s: %s" % (json.dumps(key), e.__class__.__name__, json.dumps(redact(str(e))))); return
     if ENV("TRIAGE_DRY_RUN", "true").lower() == "true":
         log("dry run pack (%d bytes, sources %s)" % (len(json.dumps(pack)), json.dumps(pack["sources"])))
         print(json.dumps(pack), flush=True); return
@@ -724,14 +794,16 @@ def process(payload):
     try:
         results = run(payload, pack, remaining, os.environ, tools=run_tool) if run else [(triage_engine.triage(pack, remaining, os.environ), {"task": "triage"})]
     except Exception as e:  # noqa: BLE001 - an engine bug must not kill this worker thread
-        log("triage: engine raised %s: %s" % (e.__class__.__name__, json.dumps(str(e)))); return
+        log("triage: engine raised %s: %s" % (e.__class__.__name__, json.dumps(redact(str(e))))); return
     for text, trace in results:
         if text:
             ok = post_note(text)
             trace["outcome"] = "posted" if ok else "post-failed"
         else:
             trace["outcome"] = "no-note"
-            log("triage: no note (%s)" % json.dumps(getattr(triage_engine, "last_error", lambda: "")()))
+            log("triage: no note (%s)" % json.dumps(redact(str(getattr(triage_engine, "last_error", lambda: "")()))))
+        if trace.get("error"):   # it can quote a provider's reply; stdout is shipped to Loki
+            trace["error"] = redact(str(trace["error"]))
         print("triage-trace " + json.dumps(trace, sort_keys=True), flush=True)
 
 
@@ -756,6 +828,8 @@ class Handler(BaseHTTPRequestHandler):
         try:
             payload = json.loads(self.rfile.read(n).decode() or "{}")
         except ValueError:
+            self.send_response(400); self.end_headers(); return
+        if not isinstance(payload, dict):             # process() reads it as an object
             self.send_response(400); self.end_headers(); return
         self.send_response(200); self.end_headers()        # Alertmanager retries on non-2xx; never make it wait
         threading.Thread(target=process, args=(payload,), daemon=True).start()

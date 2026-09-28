@@ -2,7 +2,7 @@
 """Unit tests for scripts/triage_agent.py against fake Prometheus/Loki/Alertmanager/Grafana servers.
 Every fixture below is the JSON shape the real service returns (verified live by tests/smoke.sh);
 if a live shape ever differs, fix the fixture here, never the agent to match the fixture."""
-import importlib.util, json, os, smtplib, socket, ssl, sys, tempfile, threading, time, types, unittest, urllib.parse, urllib.request
+import base64, importlib.util, json, os, smtplib, socket, ssl, sys, tempfile, threading, time, types, unittest, urllib.parse, urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from unittest import mock
 
@@ -409,6 +409,80 @@ class PackTests(unittest.TestCase):
             self.agent._redact(s, self.agent.DEFAULT_REDACT)
             self.assertLess(time.monotonic() - start, 1.0, s[:20])
 
+    # --- run-3: the 19 shapes and 7 controls of the audit's redact_shapes_run3.py, verbatim ---------
+    # Redaction is pattern matching and never complete (README says so); these are the shape families
+    # it is tested against. Each shape's dummy secret must be gone; each control stays redacted.
+    _PEM_ROW = "MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQDummyDummyDummy"
+    _PEM_ROW2 = ("Zm9vYmFyRHVtbXlEdW1teUR1bW15RHVtbXlEdW1teUR1bW15RHVtbXlEdW1teUQ" + "A")[:64]
+    _K8S_PEM = base64.b64encode(
+        b"-----BEGIN RSA PRIVATE KEY-----\nMIIEdummydummydummy\n-----END RSA PRIVATE KEY-----\n").decode()
+    RUN3_SHAPES = [
+        ("ruby hash-rocket password", '{"user"=>"bob", "password"=>"hunter2dummy"}', "hunter2dummy"),
+        ("ruby symbol hash-rocket", ":password => 'hunter2dummy'", "hunter2dummy"),
+        ("XML element password", "<login><user>bob</user><password>hunter2dummy</password></login>", "hunter2dummy"),
+        ("double-escaped JSON password", r'{"log":"{\\\"password\\\":\\\"hunter2dummy\\\"}"}', "hunter2dummy"),
+        ("passphrase= key", "ssh-keygen passphrase=hunter2dummy failed", "hunter2dummy"),
+        ("pass= key", "login user=bob pass=hunter2dummy", "hunter2dummy"),
+        ("password value with ';' (tail)", "password=abcd;hunter2dummy", "hunter2dummy"),
+        ("password value with ',' (tail)", "password=abcd,hunter2dummy", "hunter2dummy"),
+        ("JSON password with escaped quote (tail)", r'{"password":"ab\"hunter2dummy"}', "hunter2dummy"),
+        ("S3 SigV2 presigned Signature=", "GET https://b.s3.amazonaws.com/o?AWSAccessKeyId=AKIADUMMYDUMMYDUMMY1&Expires=1&Signature=DummySigV2abc%2Bdef%3D", "DummySigV2abc"),
+        ("CloudFront signed URL Signature=", "GET https://d1.cloudfront.net/v.mp4?Expires=1&Signature=DummyCfSig~abc__&Key-Pair-Id=K2DUMMY", "DummyCfSig"),
+        ("GCS V4 X-Goog-Signature=", "GET https://storage.googleapis.com/b/o?X-Goog-Algorithm=GOOG4-RSA-SHA256&X-Goog-Signature=deadbeefdummy0123", "deadbeefdummy0123"),
+        ("sig= URL-encoded inside redirect param", "GET /login?next=https%3A%2F%2Fx.blob.core.windows.net%2Fc%3Fsv%3D1%26sig%3DDummySasSig123", "DummySasSig123"),
+        ("Azure storage AccountKey=", "DefaultEndpointsProtocol=https;AccountName=acct;AccountKey=DummyAcctKeyBase64Dummy==;EndpointSuffix=core.windows.net", "DummyAcctKeyBase64Dummy"),
+        ("Ocp-Apim-Subscription-Key header", "Ocp-Apim-Subscription-Key: DummySubKey0123456789", "DummySubKey0123456789"),
+        ("headerless PEM, escaped \\n continuation", "key=" + "\\n".join([_PEM_ROW, _PEM_ROW2, _PEM_ROW2]), _PEM_ROW2),
+        ("PEM continuation line with CRLF", _PEM_ROW2 + "\r", _PEM_ROW2),
+        ("PEM continuation line indented (YAML block)", "    " + _PEM_ROW2, _PEM_ROW2),
+        ("base64-encoded PEM (k8s Secret data)", "tls.key: " + _K8S_PEM, _K8S_PEM[:40]),
+    ]
+    RUN3_CONTROLS = [
+        ("escaped-json password", r'{"msg":"{\"password\":\"hunter2dummy\"}"}', "hunter2dummy"),
+        ("aws cli secret", "aws configure set aws_secret_access_key wJalrDUMMYDUMMYDUMMYDUMMYKEY", "wJalrDUMMYDUMMYDUMMYDUMMYKEY"),
+        ("sig=", "https://x/y?sv=1&sig=DummySasSig123", "DummySasSig123"),
+        ("X-Amz-Signature", "https://x/o?X-Amz-Signature=deadbeefdummy0123", "deadbeefdummy0123"),
+        ("key=", "https://maps.googleapis.com/x?key=AIzaDummyDummy123", "AIzaDummyDummy123"),
+        ("headerless MII line", _PEM_ROW, _PEM_ROW),
+        ("64-char continuation line", _PEM_ROW2, _PEM_ROW2),
+    ]
+
+    def test_run3_shapes_are_redacted(self):
+        for label, line, secret in self.RUN3_SHAPES:
+            with self.subTest(label):
+                self.assertNotIn(secret, self.agent.redact(line))
+        self.assertEqual(len(self.RUN3_SHAPES), 19)
+
+    def test_run3_controls_stay_redacted(self):
+        for label, line, secret in self.RUN3_CONTROLS:
+            with self.subTest(label):
+                self.assertNotIn(secret, self.agent.redact(line))
+        self.assertEqual(len(self.RUN3_CONTROLS), 7)
+
+    def test_run3_bare_signature_field_is_redacted(self):
+        # the audit harness's own note line: a Signature= with no "?"/"&" in front of it
+        for line in ("1. auth fails — Signature=DummyCfSig~abc", "x-goog-signature: deadbeefdummy0123"):
+            self.assertNotIn("dummy", self.agent.redact(line).lower(), line)
+
+    def test_run3_ordinary_words_near_the_new_keywords_survive(self):
+        # "pass" is anchored on its left, and every keyword still needs a separator right after it.
+        for s in ("bypass=true", "compass: north", "overpass=12", "tests passed: 3", "passphrase_policy=strict",
+                  "the signature was valid", "signature_valid=true", "sig_count=4", "account_key_id=5", "subscription_keys=2",
+                  "GET /search?q=monkey&keyboard=1", "<user>bob</user>", "a => b", "sha256 " + "a1b2c3d4" * 8):
+            self.assertEqual(self.agent.redact(s), s)
+
+    def test_run3_new_patterns_are_not_quadratic_on_a_repeated_prefix(self):
+        # one repeated-prefix case per pattern the run-3 fix added or widened
+        cases = ("<password>" * 8000, '"password"=>' * 8000, r'\\\"password\\\":' * 6000, "pass=" * 8000,
+                 'password:"' + "\\" * 50000, "passphrase=" * 8000, "&Signature=" * 8000, "%26sig%3D" * 8000,
+                 "&x-goog-signature=" * 5000, "AccountKey=" * 8000, "Ocp-Apim-Subscription-Key:" * 5000,
+                 "MIIAAAAAAAAAAAAAAAAAAAAA\\n" * 8000, "MIIAAAAAAAAAAAAAAAAAAAAA " * 8000,
+                 " " * 50000 + "A" * 63, "LS0tLS1CRUdJTi" * 10000, "<" + "a" * 60 + "password" * 5000)
+        for s in cases:
+            start = time.monotonic()
+            self.agent._redact(s, self.agent.DEFAULT_REDACT)
+            self.assertLess(time.monotonic() - start, 1.0, s[:24])
+
     def test_unreachable_source_is_reported_not_raised(self):
         Fake.routes["/loki/api/v1/query_range"] = (500, {"error": "boom"})
         del Fake.routes["/api/annotations"]
@@ -705,6 +779,79 @@ class ToolTests(unittest.TestCase):
         Fake.hits.clear()
         r, st = self.agent.run_tool("alerts", {}, 0)
         self.assertEqual(st, "unreachable"); self.assertEqual(Fake.hits, [])
+
+    # run-3: a LogQL pipeline reshapes lines before redact() sees them - `| json | line_format
+    # "{{.password}}"` returns a bare secret with no keyword left for any pattern to find.
+    H3_SELECTOR = '{service="auth"} |~ "(?i)error" | json | line_format "{{.password}}"'
+
+    def test_loki_query_refuses_every_pipeline_stage_before_calling_loki(self):
+        for sel in (self.H3_SELECTOR, '{a="b"} | json', '{a="b"}|logfmt', '{a="b"} | line_format "{{.x}}"',
+                    '{a="b"} | label_format x=y', '{a="b"} | regexp "(?P<x>.*)"', '{a="b"} | pattern "<x>"',
+                    '{a="b"} | unpack', '{a="b"} | decolorize', '{a="b"} | drop x', '{a="b"} | keep x',
+                    '{a="b"} |= "x" or "y"', '{a="b"} |= ip("1.1.1.1")', '{a="b"} | x="y"', 'sum(count_over_time({a="b"}[5m]))',
+                    '{a="b"} |= "x" | json', 'a="b"', '{a="b"} |= x', '{}', ''):
+            Fake.hits.clear()
+            r, st = self.agent.run_tool("loki_query", {"selector": sel}, 5)
+            self.assertEqual(st, "refused", sel)
+            self.assertIn("error", r, sel)
+            self.assertEqual([h for h in Fake.hits if "loki" in h], [], sel)
+
+    def test_loki_query_accepts_a_stream_selector_and_line_filters(self):
+        for sel in ('{service="api"}', '{service="api"} |~ "(?i)error"', '{service="api", level!="debug", x=~"a|b"} != "healthz" |= "timeout"',
+                    '{a="x | json"} |= "| line_format"', '{a="b"} |= `raw \\ text` !~ "\\"q\\""', ' { a = "b" , c != "d" } |= "e" '):
+            Fake.hits.clear()
+            r, st = self.agent.run_tool("loki_query", {"selector": sel}, 5)
+            self.assertEqual(st, "ok", sel)
+
+    def test_prom_tools_refuse_label_replace_and_label_join(self):
+        for tool in ("prom_query", "prom_range"):
+            for expr in ('label_replace(up, "x", "$1", "instance", "(.*)")', 'label_join(up, "x", ",", "job")',
+                         'sum(LABEL_REPLACE (up, "x", "$1", "job", "(.*)"))'):
+                Fake.hits.clear()
+                r, st = self.agent.run_tool(tool, {"expr": expr}, 5)
+                self.assertEqual(st, "refused", (tool, expr)); self.assertIn("error", r)
+                self.assertEqual(Fake.hits, [], (tool, expr))
+        r, st = self.agent.run_tool("prom_query", {"expr": 'sum by (instance) (up{job="node"})'}, 5)
+        self.assertEqual(st, "ok")
+
+    def test_tool_result_over_the_upstream_cap_is_too_large_and_never_parsed(self):
+        self.agent.MAX_UPSTREAM_BYTES = 1000
+        Fake.routes["/api/v1/query"] = (200, {"status": "success", "data": {"result": [
+            {"metric": {"x": "y" * 2000}, "value": [1, "0"]}]}})
+        with mock.patch.object(self.agent.json, "loads", wraps=json.loads) as loads:
+            r, st = self.agent.run_tool("prom_query", {"expr": "x"}, 5)
+        self.assertEqual(st, "too-large"); self.assertIsNone(r)
+        self.assertEqual(loads.call_count, 0)   # nothing past the cap is parsed
+
+    def test_pack_source_over_the_upstream_cap_fails_like_a_dead_one(self):
+        self.agent.MAX_UPSTREAM_BYTES = 1000
+        Fake.routes["/api/v2/alerts"] = (200, AM_ALERTS * 20)
+        p = self.agent.build_pack(WEBHOOK)
+        self.assertEqual(p["sources"]["alertmanager"], "unreachable"); self.assertEqual(p["firing"], [])
+        self.assertEqual(p["sources"]["rules"], "ok")
+
+    def test_runbook_sanitises_the_name_itself_for_every_caller(self):
+        # build_pack calls runbook(alertname) directly, without run_tool's sanitiser
+        with open(os.path.join(self.tmp, "escape.md"), "w") as f:
+            f.write("# Escape\n\nnotmyrunbook\n")
+        r, st = self.agent.runbook("../escape")
+        self.assertEqual(st, "empty"); self.assertNotIn("notmyrunbook", json.dumps(r))
+        p = self.agent.build_pack(dict(WEBHOOK, alerts=[dict(WEBHOOK["alerts"][0], labels={"alertname": "../escape"})]))
+        self.assertNotIn("notmyrunbook", json.dumps(p))
+
+    def test_build_pack_escapes_label_values_inside_query_strings(self):
+        # a label value with a quote must not close the string and append its own matcher or stage
+        inst = 'x"} or vector(1) or up{a="'
+        svc = 'api"} | json | line_format "{{.password}}'
+        self.agent.build_pack(dict(WEBHOOK, alerts=[dict(WEBHOOK["alerts"][0], labels={"alertname": "ServiceDown", "instance": inst, "service": svc})]))
+        qs = [urllib.parse.parse_qs(urllib.parse.urlparse(h).query).get("query", [""])[0] for h in Fake.hits]
+        self.assertIn('up{instance="x\\"} or vector(1) or up{a=\\""}', qs)
+        loki = [q for q in qs if q.startswith("{service=")][0]
+        self.assertTrue(loki.startswith('{service="api\\"} | json | line_format \\"{{.password}}"} |~ '), loki)
+        # a backslash is escaped first, so it cannot eat the escape in front of a quote
+        self.agent.build_pack(dict(WEBHOOK, alerts=[dict(WEBHOOK["alerts"][0], labels={"alertname": "ServiceDown", "instance": 'a\\"b'})]))
+        qs = [urllib.parse.parse_qs(urllib.parse.urlparse(h).query).get("query", [""])[0] for h in Fake.hits]
+        self.assertIn('up{instance="a\\\\\\"b"}', qs)
 
 
 FENCE_OPEN, FENCE_CLOSE = "```\n", "\n```"
@@ -1074,6 +1221,27 @@ class PostTests(unittest.TestCase):
             self.assertEqual(c.count("```") % 2, 0, "unbalanced fence in chunk: %r" % c[:60])
         self.assertIn("echo 059", "".join(chunks))
 
+    def test_slack_is_chunked_under_its_limit_after_escaping(self):
+        # run-3: Slack got the whole note in one POST, and "&" grows fivefold once escaped
+        text = ("Triage: " + "&" * 3000 + "        (confidence: low)\nCheck first (from runbook)\n"
+                + "\n".join("  echo %03d <%s>" % (n, "y" * 60) for n in range(80)) + "\nTrace: http://localhost:3000/d/sre-triage")
+        self.agent.post_note(text)
+        slack = [json.loads(b)["text"] for p, b, _ in Sink.posts if p == "/slack"]
+        self.assertGreater(len(slack), 1)
+        for c in slack:
+            self.assertLessEqual(len(c), 3500)   # Slack-safe, well under its documented 40,000
+            self.assertEqual(c.count("```") % 2, 0, "unbalanced fence in chunk: %r" % c[:60])
+
+    def test_whole_note_is_capped_before_formatting_with_a_visible_marker(self):
+        # redaction is per line, so no per-string cap bounds the note any more; post_note caps the
+        # whole note (8000 characters) before any receiver formats it, and says so in the note
+        huge = "\n".join(["Triage: x        (confidence: low)"] + ["Not seen: " + "e" * 39000] * 4)
+        self.agent.post_note(huge)
+        for path in ("/slack", "/discord"):
+            got = "".join(json.loads(b)["text" if path == "/slack" else "content"] for p, b, _ in Sink.posts if p == path)
+            self.assertLess(len(got), 8500, path)
+            self.assertIn("(note truncated at 8000 characters)", got, path)
+
     def test_post_note_uses_markdown_for_slack_and_discord_only(self):
         os.environ.update({"TELEGRAM_BOT_TOKEN": "t", "TELEGRAM_CHAT_ID": "c"})
         try:
@@ -1310,6 +1478,27 @@ class EngineHookTests(unittest.TestCase):
         self.agent.process(WEBHOOK)
         self.assertEqual(len(self.calls), 1); self.assertEqual(len(SINK.posts), 1)
 
+    def test_engine_error_text_is_redacted_before_stdout(self):
+        # last_error() and trace["error"] can echo a provider's reply; they reach stdout (and Loki)
+        import io, contextlib
+        self.result = None
+        secret = "password=hunter2dummy Bearer sk-ant-api03-DUMMYDUMMYDUMMYDUMMY"
+        self.fake.last_error = lambda: "http 500: " + secret
+        self.fake.run = lambda payload, pack, timeout, env, tools=None, post=None: [(None, {"task": "triage", "error": "http 500: " + secret})]
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            self.agent.process(dict(WEBHOOK, groupKey="redact-error"))
+        out = buf.getvalue()
+        self.assertIn("triage: no note", out); self.assertIn("triage-trace ", out)
+        self.assertNotIn("hunter2dummy", out); self.assertNotIn("DUMMYDUMMY", out)
+        # an engine that raises: its message is logged, redacted the same way
+        def boom(*a, **k): raise RuntimeError(secret)
+        self.fake.run = boom
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            self.agent.process(dict(WEBHOOK, groupKey="redact-raise"))
+        self.assertIn("engine raised", buf.getvalue()); self.assertNotIn("hunter2dummy", buf.getvalue())
+
     def test_last_error_is_escaped_to_prevent_a_forged_trace_line(self):
         # the engine's last_error() is logged raw in the "no note" branch,
         # so a value crafted to look like `triage-trace {...}` could forge a dashboard entry the
@@ -1375,6 +1564,14 @@ class IngressTests(unittest.TestCase):
             out, _ = self._raw(self._head(2097152))     # headers only: the 2 MiB body never arrives
         self.assertTrue(out.startswith(b"HTTP/1.0 413"), "expected an immediate 413, got %r" % out[:40])
         proc.assert_not_called()
+
+    def test_json_body_that_is_not_an_object_is_400_before_any_worker(self):
+        # process() calls payload.get(...): a list, string or number would crash the worker thread
+        for body in (b"[]", b'"x"', b"1", b"null"):
+            with mock.patch.object(self.agent, "process") as proc:
+                out, _ = self._raw(self._head(len(body)), body)
+            self.assertTrue(out.startswith(b"HTTP/1.0 400"), "%r -> %r" % (body, out[:40]))
+            proc.assert_not_called()
 
     def test_negative_content_length_is_400_immediately(self):
         out, _ = self._raw(self._head(-1))
