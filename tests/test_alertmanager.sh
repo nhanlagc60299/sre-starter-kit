@@ -128,6 +128,7 @@ JSON
 cat > "$tmp2/ordinary.json" <<'JSON'
 {"Status":"firing","Receiver":"critical","Alerts":[{"Status":"firing","Labels":{"alertname":"ServiceDown"},"Annotations":{"summary":"Container web restarted >3 times in 15m; Service api is DOWN (https://api.example.invalid/health?a=1&b=2)","runbook_url":"https://github.com/nhanlagc60299/sre-starter-kit/blob/main/docs/ALERTS.md#servicedown","dashboard":"sre-app?a=1&b=2"}}],"GroupLabels":{"alertname":"ServiceDown"},"CommonLabels":{"alertname":"ServiceDown"},"CommonAnnotations":{},"ExternalURL":"http://am.invalid"}
 JSON
+chmod 644 "$tmp2/hostile.json" "$tmp2/ordinary.json"   # read by amtool as nobody, whatever the caller's umask
 combined=$(cat "$tmp2/combined.txt")
 hostile_out=$(${CONTAINER_ENGINE:-docker} run --rm -v "$tmp2:/c" --entrypoint amtool prom/alertmanager:v0.28.1 template render --template.glob="/c/*.nonexistent" --template.data=/c/hostile.json --template.text="$combined")
 ordinary_out=$(${CONTAINER_ENGINE:-docker} run --rm -v "$tmp2:/c" --entrypoint amtool prom/alertmanager:v0.28.1 template render --template.glob="/c/*.nonexistent" --template.data=/c/ordinary.json --template.text="$combined")
@@ -138,6 +139,7 @@ printf '%s' "$ordinary_out" > "$tmp2/ordinary.out"
 cat > "$tmp2/links.json" <<'JSON'
 {"Status":"firing","Receiver":"critical","Alerts":[{"Status":"firing","Labels":{"alertname":"Test"},"Annotations":{"summary":"ok","runbook_url":"x|y> <!channel> <z","dashboard":"a)[b](https://evil.invalid)"}}],"GroupLabels":{"alertname":"Test"},"CommonLabels":{"alertname":"Test"},"CommonAnnotations":{},"ExternalURL":"http://am.invalid"}
 JSON
+chmod 644 "$tmp2/links.json"
 ${CONTAINER_ENGINE:-docker} run --rm -v "$tmp2:/c" --entrypoint amtool prom/alertmanager:v0.28.1 template render --template.glob="/c/*.nonexistent" --template.data=/c/links.json --template.text="$combined" > "$tmp2/links.out"
 python3 - "$tmp2/combined.txt" "$tmp2/hostile.out" "$tmp2/ordinary.out" "$tmp2/links.out" <<'PYRENDER' || { echo "FAIL: a rendered notification field failed the hostile or ordinary check"; exit 1; }
 import re, sys
