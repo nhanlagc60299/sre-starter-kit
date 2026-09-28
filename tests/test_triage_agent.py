@@ -222,7 +222,7 @@ class PackTests(unittest.TestCase):
         self.assertLess(elapsed, 2.0, "redact() must not be quadratic on an attacker-controlled line")
 
     def test_credential_shapes_the_kit_itself_uses_are_redacted(self):
-        # security run-1 v01: every one of these went through redact() unchanged (the PEM one only
+        # every one of these went through redact() unchanged (the PEM one only
         # partly) and on to the model provider and the chat note. Dummy secrets, real shapes -
         # including the kit's own documented DISCORD_WEBHOOK_URL and Telegram bot-URL forms.
         cases = {
@@ -254,7 +254,7 @@ class PackTests(unittest.TestCase):
             self.assertNotIn("pppp", self.agent.redact(original), original[:20])
 
     def test_default_patterns_are_not_quadratic_on_a_repeated_prefix(self):
-        # security run-1 v20: the Authorization and user:pass@ patterns backtracked O(n^2) on their
+        # the Authorization and user:pass@ patterns backtracked O(n^2) on their
         # own prefix repeated with no terminator - 3.3 s and 0.5 s here, GIL held throughout
         for s in ("authorization:" * 8000, "://a:" * 8000):
             start = time.monotonic()
@@ -289,7 +289,7 @@ class PackTests(unittest.TestCase):
         finally:
             os.environ["TRIAGE_REDACT"] = ""
 
-    # --- security audit run-2: redaction shapes that still leaked (dummy secrets, real shapes) -----
+    # --- redaction shapes that still leaked (dummy secrets, real shapes) -----
 
     def test_run2_shape_escaped_json_in_json_password_is_redacted(self):
         # a log line that embeds an escaped JSON blob (\"password\": rather than a bare "password":)
@@ -720,7 +720,7 @@ def _unfenced(s):
 
 
 # Values crafted to forge a `triage-trace {...}` line the AI Triage Grafana dashboard would parse
-# as real: a real newline, a bare space, and (run-1 fix round 1, Ruling R7) a `"` positioned to end
+# as real: a real newline, a bare space, and a `"` positioned to end
 # json.dumps's quoted string early if log() also doubled the backslash that escape introduced.
 FORGED_TRACE_TEXTS = ('k\ntriage-trace {"outcome":"posted"}', 'k triage-trace {"outcome":"posted"}',
                       'a" triage-trace {"outcome":"posted"}')
@@ -731,7 +731,7 @@ def _decode_json_value_after(tc, line, prefix, expect):
     with the rest of the line returned as-is. A stand-in substring check (e.g. asserting
     '"outcome":"posted"' is absent) is not enough: it misses the case where an embedded `"` in the
     untrusted value ends the JSON string early and leaves the remainder - possibly a forged
-    ` triage-trace {...}` - as unquoted trailing text (security-audit run-1 fix round 1, Ruling R7).
+    ` triage-trace {...}` - as unquoted trailing text.
     raw_decode() is the same thing a real JSON parser would do, so this proves the actual property:
     the whole untrusted value round-trips as one JSON value, nothing more, nothing less."""
     tc.assertTrue(line.startswith(prefix), line)
@@ -860,7 +860,7 @@ class PostTests(unittest.TestCase):
             os.environ.update({"ALERT_EMAIL_TO": "", "SMTP_HOST": "", "SMTP_USER": "", "SMTP_PASSWORD": ""})
 
     def test_starttls_verifies_the_server_certificate(self):
-        # security-audit run-1 v24: starttls() with no SSL context is an unverified context on
+        # starttls() with no SSL context is an unverified context on
         # CPython >= 3.12, so an on-path attacker can intercept the SMTP login in the clear.
         os.environ.update({"ALERT_EMAIL_TO": "ops@example.com", "SMTP_HOST": "smtp.example.test:25",
                            "SMTP_USER": "bob", "SMTP_PASSWORD": "secret"})
@@ -880,7 +880,7 @@ class PostTests(unittest.TestCase):
             os.environ.update({"ALERT_EMAIL_TO": "", "SMTP_HOST": "", "SMTP_USER": "", "SMTP_PASSWORD": ""})
 
     def test_starttls_cert_verification_failure_does_not_send(self):
-        # Ruling R8b (run-1 fix round 1): a server presenting a bad/self-signed cert must not result
+        # a server presenting a bad/self-signed cert must not result
         # in a login or a send - ssl.create_default_context() makes starttls() itself raise
         # SSLCertVerificationError when verification fails; post_note() must swallow that like any
         # other receiver failure and report the note as not delivered, not raise or silently send.
@@ -920,7 +920,7 @@ class PostTests(unittest.TestCase):
         for path, body, _ in Sink.posts:
             self.assertNotIn("ZHVtbXk6ZHVtbXlwYXNz", body, path)
 
-    # --- security audit run-2: the second redact() pass used to run over the whole rendered note in
+    # --- the second redact() pass used to run over the whole rendered note in
     # one shot, and \s in bearer/authorization/x-api-key patterns crosses the "\n" between a guarded
     # check_first line and whatever follows it, dropping that newline in the replacement - the
     # model's next line then lands inside format_note()'s command fence.
@@ -1229,7 +1229,7 @@ class EngineHookTests(unittest.TestCase):
         self.assertEqual(SINK.posts, [])
 
     def test_engine_raised_exception_message_is_escaped_to_prevent_a_forged_trace_line(self):
-        # Ruling R8a (run-1 fix round 1): "triage: engine raised ..." interpolates the exception's
+        # "triage: engine raised ..." interpolates the exception's
         # text without json.dumps, so an engine that raises with attacker-influenced text (e.g. an
         # upstream error message it relays verbatim) could forge a dashboard trace line the same way
         # the groupKey and last_error() cases could.
@@ -1311,7 +1311,7 @@ class EngineHookTests(unittest.TestCase):
         self.assertEqual(len(self.calls), 1); self.assertEqual(len(SINK.posts), 1)
 
     def test_last_error_is_escaped_to_prevent_a_forged_trace_line(self):
-        # security-audit run-1 v19: the engine's last_error() is logged raw in the "no note" branch,
+        # the engine's last_error() is logged raw in the "no note" branch,
         # so a value crafted to look like `triage-trace {...}` could forge a dashboard entry the
         # same way an untrusted groupKey could.
         import io, contextlib
@@ -1463,7 +1463,7 @@ class IngressTests(unittest.TestCase):
         self.assertIn('skip: group already triaged within 3600s: ' + json.dumps("raw-key-for-the-log"), buf.getvalue())
 
     def test_process_escapes_forged_trace_in_dedup_skip_log(self):
-        # security-audit run-1 v19: an unauthenticated POST controls groupKey, and process() used to
+        # an unauthenticated POST controls groupKey, and process() used to
         # log it raw through log() (no escaping). R1 (Task 1) keeps the RAW groupKey in `key` for
         # these log lines (only its digest goes into DEDUP), so the fix has to escape it here, not
         # stop logging it.

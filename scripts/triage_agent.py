@@ -107,7 +107,7 @@ DEFAULT_REDACT = [
     # trailing-separator requirement turned out to be the only check that needed to exist.
     #
     # The separator itself allows an optional backslash around each quote (\"password\": ...) so an
-    # escaped JSON blob nested inside another JSON-encoded log line (security audit run-2) is caught
+    # escaped JSON blob nested inside another JSON-encoded log line is caught
     # the same as a plain one; [ \t]*, not \s, so it can never cross a "\n" the way the bearer/
     # authorization/x-api-key patterns below do (post_note() redacts line by line precisely because
     # those three still can). Unbounded, not {0,16}: a value emitted with more than 16 spaces/tabs of
@@ -177,12 +177,12 @@ DEFAULT_REDACT = [
 def log(msg):
     """print() with the message's raw \\r/\\n escaped so it can never split into more than one
     stdout line - a second line could start with `triage-trace {`, which the AI Triage Grafana
-    dashboard's scraper would mistake for a genuine trace (security-audit run-1 v19). Untrusted
+    dashboard's scraper would mistake for a genuine trace. Untrusted
     values are additionally wrapped in json.dumps at the call site; do NOT also escape backslash
     here. json.dumps already turns every `"` into `\\"` and every `\\` into `\\\\`; re-escaping those
     backslashes a second time here would turn a `\\"` into `\\\\"`, which a JSON parser reads as an
     escaped backslash followed by an UNESCAPED quote - closing the string early and leaving the rest
-    of the value as unquoted trailing text (run-1 fix round 1, Ruling R7). A raw \\r/\\n is the only
+    of the value as unquoted trailing text. A raw \\r/\\n is the only
     thing that can still split a line once the untrusted value has already been through json.dumps,
     since json.dumps itself turns any real \\r/\\n in the value into the two literal characters
     \\\\r/\\\\n - never an actual control character."""
@@ -634,7 +634,7 @@ def post_note(text):
     # second pass: the model may quote anything the pack's redaction missed. Line by line, not
     # redact(text) over the whole note in one shot - a pattern whose \s crosses a "\n" (bearer,
     # authorization, x-api-key) drops that newline in its replacement, which used to merge the line
-    # after a guarded check_first command into format_note()'s code fence (security audit run-2).
+    # after a guarded check_first command into format_note()'s code fence.
     text = "\n".join(redact(l) for l in text.split("\n"))
     oks = []
     def attempt(name, fn):
@@ -675,7 +675,7 @@ def post_note(text):
                 try:
                     # ssl.create_default_context() verifies the server certificate and hostname;
                     # starttls() with no context is an unverified context on CPython >= 3.12, which
-                    # would hand the SMTP login to an on-path attacker (security-audit run-1 v24).
+                    # would hand the SMTP login to an on-path attacker.
                     s.starttls(context=ssl.create_default_context())
                 except smtplib.SMTPNotSupportedError:
                     # .env.example documents an unauthenticated relay on your own network as a valid
