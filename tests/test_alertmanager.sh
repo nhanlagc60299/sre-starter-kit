@@ -33,6 +33,9 @@ if out=$( cd "$tmp" && bash "$OLDPWD/scripts/render.sh" 2>&1 ); then echo "FAIL:
 # independent of the .env accumulated above (which ends deliberately poisoned by the non-ASCII-token
 # negative test just above).
 tmp2=$(mktemp -d); trap 'rm -rf "$tmp" "$tmp2"' EXIT
+# The amtool render steps below mount $tmp2 itself, and amtool runs as nobody: mktemp's 0700 makes
+# every file in it unreadable there on Linux (CI), though podman on macOS hides that.
+chmod 755 "$tmp2"
 sed 's#^SLACK_WEBHOOK_URL=.*#SLACK_WEBHOOK_URL=http://localhost:9/#; s/^GRAFANA_ADMIN_PASSWORD=.*/GRAFANA_ADMIN_PASSWORD=fixture-pw/' .env.example > "$tmp2/.env"
 cat >> "$tmp2/.env" <<'ENV'
 DISCORD_WEBHOOK_URL=https://discord.com/api/webhooks/1/x
