@@ -101,6 +101,9 @@ TRIAGE_DRY_RUN=true
 tg=""; [ -n "${TELEGRAM_BOT_TOKEN:-}" ] && [ -n "${TELEGRAM_CHAT_ID:-}" ] && tg=1
 [ -z "${SLACK_WEBHOOK_URL}${DISCORD_WEBHOOK_URL}${ALERT_EMAIL_TO}${tg}${TEAMS_WEBHOOK_URL}" ] && { echo "ERROR: configure at least one receiver (Slack, Discord, email, Telegram or Teams)." >&2; exit 1; }
 
+# umask 077 covers a new .env; an existing one keeps its old mode through the rewrite below, so
+# tighten it first -- the secrets are never written into a group- or world-readable file.
+if [ -e "$ROOT/.env" ]; then chmod 600 "$ROOT/.env"; fi
 cat > "$ROOT/.env" <<ENV
 PROJECT_NAME=$(q "$PROJECT_NAME")
 BIND_ADDR=$(q "${BIND_ADDR:-127.0.0.1}")
@@ -133,5 +136,4 @@ AUTH_LOG_PATH=$(q "${AUTH_LOG_PATH:-/var/log/auth.log}")
 CONTAINER_SOCK=$(q "${CONTAINER_SOCK:-/var/run/docker.sock}")
 COMPOSE_PROFILES=$(q "${COMPOSE_PROFILES:-}")
 ENV
-chmod 600 "$ROOT/.env"   # umask covers a new file only; an .env that already existed keeps its old mode
 echo "wrote .env"

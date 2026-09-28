@@ -3,9 +3,11 @@
 set -euo pipefail
 # build/ files are read through bind mounts by containers running as their own users (Alertmanager
 # and Prometheus as nobody), so a rendered file must be world-readable: under a caller's umask 077 a
-# 0600 file is unreadable to them on Linux. What keeps the rendered secrets (webhook URLs, the SMTP
-# password, the triage token) from other host users is build/ itself at 0700, set below: a container
-# reads the subdirectory it has mounted without walking through build/.
+# 0600 file is unreadable to them on Linux. The umask applies only to files and directories this
+# run creates; a file that already exists is rewritten in place and keeps its mode. What keeps the
+# rendered secrets (webhook URLs, the SMTP password, the triage token) from other host users is
+# build/ itself at 0700, set below: a container reads the subdirectory it has mounted without
+# walking through build/.
 umask 022
 ROOT="$(pwd)"
 [ -f "$ROOT/.env" ] || { echo "ERROR: .env not found. Run 'make init' first." >&2; exit 1; }

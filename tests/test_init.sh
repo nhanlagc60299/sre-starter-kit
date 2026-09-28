@@ -261,5 +261,12 @@ chmod 644 "$tmp15/.env"
 printf '%.0s\n' $(seq 1 25) | ( cd "$tmp15" && bash scripts/init.sh >/dev/null )
 mode=$(stat -c %a "$tmp15/.env" 2>/dev/null || stat -f %Lp "$tmp15/.env")
 [ "$mode" = 600 ] || { echo "FAIL: .env is mode $mode after init.sh, want 600"; exit 1; }
+# ... and the mode is tightened BEFORE the secrets are written, never after: in the trace, the
+# chmod of an existing .env comes before the heredoc that rewrites it.
+chmod 644 "$tmp15/.env"
+trace15=$(printf '%.0s\n' $(seq 1 25) | ( cd "$tmp15" && bash -x scripts/init.sh 2>&1 >/dev/null ))
+c=$(grep -n "chmod 600 $tmp15/.env" <<<"$trace15" | head -1 | cut -d: -f1)
+w=$(grep -n '^+ cat$' <<<"$trace15" | tail -1 | cut -d: -f1)
+[ -n "$c" ] && [ -n "$w" ] && [ "$c" -lt "$w" ] || { echo "FAIL: init.sh must chmod 600 an existing .env before rewriting it (chmod line ${c:-none}, write line ${w:-none})"; exit 1; }
 
 echo "test_init OK"
