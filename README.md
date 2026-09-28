@@ -27,6 +27,17 @@ you if you don't set your own. If you set one by hand, it must be at least 4 cha
 node-exporter at all, and you lose every host metric and infra alert if you skip this), set
 `CONTAINER_ENGINE=podman`, point `CONTAINER_SOCK` at your Podman socket, and leave `COMPOSE_PROFILES` empty in `.env` — cAdvisor needs Docker's `/var/lib/docker` and will not start. Its scrape target then shows DOWN in Prometheus and stays quiet: `ContainerMetricsMissing` only fires when cAdvisor is up and reporting nothing, so running without it is a supported choice rather than a permanent page. You get no container metrics, and the alerts built on them never fire.
 
+### Upgrading
+
+Two behaviour changes can surprise an existing install:
+
+- `make up` now re-applies `GRAFANA_ADMIN_PASSWORD` from `.env` to Grafana's admin account every
+  time. A password you changed in the Grafana UI is overwritten on the next `make up`, so change it
+  in `.env` (or with `make init`) instead.
+- `make up` refuses to render when `GRAFANA_ADMIN_PASSWORD` is empty, still the old published
+  default `change-me`, Grafana's own default `admin`, or shorter than 4 characters. Re-run
+  `make init`: an empty answer there generates a random password for you.
+
 ## Exposure
 
 Prometheus (9090), Alertmanager (9093) and Loki (3100) have **no authentication** — anyone who can

@@ -51,3 +51,4 @@ test: validate test-rules
 	@bash tests/test_env_example.sh
 	@bash tests/test_ci_permissions.sh
 	@bash tests/test_triage_agent.sh
+	@bash tests/test_features_counts.sh
