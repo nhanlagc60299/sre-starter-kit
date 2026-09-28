@@ -244,4 +244,22 @@ printf '%.0s\n' $(seq 1 25) | ( cd "$tmp14" && bash scripts/init.sh >/dev/null )
 pw4=$(sed -n "s/^GRAFANA_ADMIN_PASSWORD='\(.*\)'\$/\1/p" "$tmp14/.env")
 [[ "$pw4" =~ ^[0-9a-f]{20,}$ ]] || { echo "FAIL: a blank re-run kept a too-short Grafana password instead of generating one"; exit 1; }
 
+# a line break in the password is re-asked the same way (read -r keeps a CR; an older .env can hold
+# either inside its quotes), and an .env holding one is not kept on a blank re-run
+tmp15=$(mktemp -d)
+cp -r core scripts .env.example "$tmp15/"
+printf 'acme\nhttp://localhost:9/\n\n\n\n\n\n\n\n\npass\rword\ngood-pw\ny\n\ny\n\n\n\nn\n' | ( cd "$tmp15" && bash scripts/init.sh >/dev/null )
+grep -qxF "GRAFANA_ADMIN_PASSWORD='good-pw'" "$tmp15/.env" || { echo "FAIL: a Grafana password with a CR was not re-asked"; exit 1; }
+grep -qxF "MODULE_SECURITY='true'" "$tmp15/.env" || { echo "FAIL: re-asking the password shifted the later answers"; exit 1; }
+printf "GRAFANA_ADMIN_PASSWORD='line-one\nline-two'\nSLACK_WEBHOOK_URL='http://localhost:9/'\n" > "$tmp15/.env"
+printf '%.0s\n' $(seq 1 25) | ( cd "$tmp15" && bash scripts/init.sh >/dev/null )
+pw5=$(sed -n "s/^GRAFANA_ADMIN_PASSWORD='\(.*\)'\$/\1/p" "$tmp15/.env")
+[[ "$pw5" =~ ^[0-9a-f]{20,}$ ]] || { echo "FAIL: a blank re-run kept a Grafana password with a line break"; exit 1; }
+# .env holds the Grafana password and every webhook token: owner-only, even when it already existed
+# with wider permissions (umask only applies to a file init.sh creates)
+chmod 644 "$tmp15/.env"
+printf '%.0s\n' $(seq 1 25) | ( cd "$tmp15" && bash scripts/init.sh >/dev/null )
+mode=$(stat -c %a "$tmp15/.env" 2>/dev/null || stat -f %Lp "$tmp15/.env")
+[ "$mode" = 600 ] || { echo "FAIL: .env is mode $mode after init.sh, want 600"; exit 1; }
+
 echo "test_init OK"

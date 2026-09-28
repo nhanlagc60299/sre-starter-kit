@@ -34,16 +34,18 @@ inhibit_rules:
     target_matchers: [ 'alertname="ElevatedErrorRate"' ]
     equal: [service]
 
-# ${SLACK_SANITIZE} (Slack only) and ${OTHER_SANITIZE} (Discord/Teams/Telegram/email) are fixed pipe
-# chains defined once in scripts/render.sh, substituted the same way as ${PROJECT_NAME} above. One of
+# ${SLACK_SANITIZE} (Slack only) and ${OTHER_SANITIZE} (Discord/Teams/Telegram, and the email Subject
+# only) are fixed pipe chains defined once in scripts/render.sh, substituted the same way as ${PROJECT_NAME} above. One of
 # them must follow every action below (and in the receiver blocks scripts/render.sh adds) that
 # interpolates CommonLabels/Labels/GroupLabels/Annotations.summary/CommonAnnotations, because those
 # values can come from a lower-trust producer (an AWS Name tag, a Pushgateway push, a StatsD packet,
 # a postgres_exporter identifier -- Pro modules, but this template is shared) and reach
 # Slack/Discord/Teams/Telegram/email with the operator's webhook identity. The
 # Slack chain's &/</> HTML-entity escaping is Slack-only -- it showed up literally as "&gt;" outside
-# Slack, so the other four receivers use a chain that only neutralizes [, ], @ and ` (see
-# scripts/render.sh's comment for the full rationale of each). ${PROJECT_NAME},
+# Slack, so the other receivers use a chain that only folds CR/LF and neutralizes [, ], @ and ` (see
+# scripts/render.sh's comment for the full rationale of each). The email body is not ours: it is
+# Alertmanager's default HTML template, which relies on html/template's own escaping, and only the
+# Subject header goes through ${OTHER_SANITIZE}. ${PROJECT_NAME},
 # ${GRAFANA_EXTERNAL_URL} etc. are operator-authored and never need either chain.
 # .Annotations.runbook_url and .dashboard skip both chains (they would corrupt a query string's &)
 # and take ${LINK_SANITIZE} here (${MD_LINK_SANITIZE} on the markdown receivers) instead: the rule

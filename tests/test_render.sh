@@ -32,6 +32,17 @@ echo 'NODE_EXPORTER_TARGET=10.88.0.1:9100' >> "$tmp/.env"
 [ "$(cat "$tmp/build/sub/c.yml")" = "targets: [10.88.0.1:9100]" ] || {
   echo "FAIL: NODE_EXPORTER_TARGET from .env was not honoured: $(cat "$tmp/build/sub/c.yml")"; exit 1; }
 
+# File modes. The containers read build/ as their own users (Alertmanager and Prometheus as nobody),
+# so a rendered file must be world-readable even when the caller's umask is 077 -- a 0600 file is
+# unreadable through the bind mount on Linux. build/ itself is 0700: other users on the host cannot
+# walk into it, while every container still reads the subdirectory it has mounted.
+mode(){ stat -c %a "$1" 2>/dev/null || stat -f %Lp "$1"; }
+mkdir "$tmp/core/fresh"; echo 'x: 1' > "$tmp/core/fresh/f.yml.tpl"; chmod 755 "$tmp/build"
+( umask 077; cd "$tmp" && bash "$OLDPWD/scripts/render.sh" >/dev/null )
+[ "$(mode "$tmp/build")" = 700 ] || { echo "FAIL: build/ is mode $(mode "$tmp/build"), want 700"; exit 1; }
+[ "$(mode "$tmp/build/fresh/f.yml")" = 644 ] || { echo "FAIL: a file rendered under umask 077 is mode $(mode "$tmp/build/fresh/f.yml"), want 644"; exit 1; }
+[ "$(mode "$tmp/build/fresh")" = 755 ] || { echo "FAIL: a directory rendered under umask 077 is mode $(mode "$tmp/build/fresh"), want 755"; exit 1; }
+
 rm "$tmp/.env"
 if ( cd "$tmp" && bash "$OLDPWD/scripts/render.sh" 2>/dev/null ); then echo "FAIL: should exit when .env missing"; exit 1; fi
 echo "test_render OK"

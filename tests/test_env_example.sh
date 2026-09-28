@@ -41,6 +41,17 @@ for bad_pw in change-me "" abc admin; do
     *) echo "FAIL: wrong error message for GRAFANA_ADMIN_PASSWORD='$bad_pw': $out"; exit 1 ;;
   esac
 done
+# A line break inside the (quoted, so bash accepts it) value: refused like the rest, by name.
+grep -v '^GRAFANA_ADMIN_PASSWORD=' "$tmp/.env" > "$tmp/.env.nopw"
+for nl in '\n' '\r'; do
+  { cat "$tmp/.env.nopw"; printf "GRAFANA_ADMIN_PASSWORD='line-one${nl}line-two'\n"; } > "$tmp/.env"
+  out=$( cd "$tmp" && bash scripts/render.sh 2>&1 ) && { echo "FAIL: render accepted a GRAFANA_ADMIN_PASSWORD with a line break ($nl)"; exit 1; }
+  case "$out" in
+    *"GRAFANA_ADMIN_PASSWORD"*"line break"*) ;;
+    *) echo "FAIL: wrong error message for a GRAFANA_ADMIN_PASSWORD with a line break ($nl): $out"; exit 1 ;;
+  esac
+done
+{ cat "$tmp/.env.nopw"; echo "GRAFANA_ADMIN_PASSWORD=fixture-pw"; } > "$tmp/.env"
 sed -i.bak 's/^GRAFANA_ADMIN_PASSWORD=.*/GRAFANA_ADMIN_PASSWORD=fixture-pw/' "$tmp/.env" && rm -f "$tmp/.env.bak"   # restore for the checks below
 ${CONTAINER_ENGINE:-docker} run --rm -v "$tmp/build/alertmanager:/c" --entrypoint amtool prom/alertmanager:v0.28.1 check-config /c/alertmanager.yml
 

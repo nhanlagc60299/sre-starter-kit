@@ -1,6 +1,12 @@
 #!/usr/bin/env bash
 # Render core/**/*.tpl with values from .env into build/, copy everything else as-is.
 set -euo pipefail
+# build/ files are read through bind mounts by containers running as their own users (Alertmanager
+# and Prometheus as nobody), so a rendered file must be world-readable: under a caller's umask 077 a
+# 0600 file is unreadable to them on Linux. What keeps the rendered secrets (webhook URLs, the SMTP
+# password, the triage token) from other host users is build/ itself at 0700, set below: a container
+# reads the subdirectory it has mounted without walking through build/.
+umask 022
 ROOT="$(pwd)"
 [ -f "$ROOT/.env" ] || { echo "ERROR: .env not found. Run 'make init' first." >&2; exit 1; }
 set -a; . "$ROOT/.env"; set +a
@@ -18,8 +24,10 @@ if [ -f "$ROOT/core/alertmanager/alertmanager.yml.tpl" ]; then
   # rotation silently unapplied. Refuse it at the same place as empty/change-me rather than let it
   # surface two steps later. Length only, never the value itself.
   # 'admin' is Grafana's own shipped default, as guessable as change-me.
-  if [ -z "${GRAFANA_ADMIN_PASSWORD:-}" ] || [ "${GRAFANA_ADMIN_PASSWORD:-}" = "change-me" ] || [ "${GRAFANA_ADMIN_PASSWORD:-}" = "admin" ] || [ "${#GRAFANA_ADMIN_PASSWORD}" -lt 4 ]; then
-    echo "ERROR: GRAFANA_ADMIN_PASSWORD must be set in .env, at least 4 characters (Grafana's own minimum), and must not be a published default ('change-me', or Grafana's own 'admin'). Run 'make init' or set a real password by hand." >&2
+  # A line break (a quoted .env value can hold one) is refused too: the password is written into
+  # single-line places - an .env line, Grafana's own reset command.
+  if [ -z "${GRAFANA_ADMIN_PASSWORD:-}" ] || [ "${GRAFANA_ADMIN_PASSWORD:-}" = "change-me" ] || [ "${GRAFANA_ADMIN_PASSWORD:-}" = "admin" ] || [ "${#GRAFANA_ADMIN_PASSWORD}" -lt 4 ] || [[ "$GRAFANA_ADMIN_PASSWORD" == *[$'\r\n']* ]]; then
+    echo "ERROR: GRAFANA_ADMIN_PASSWORD must be set in .env, at least 4 characters (Grafana's own minimum), with no line break, and must not be a published default ('change-me', or Grafana's own 'admin'). Run 'make init' or set a real password by hand." >&2
     exit 1
   fi
   if [ -n "${TELEGRAM_BOT_TOKEN:-}" ] && [ -z "${TELEGRAM_CHAT_ID:-}" ]; then
@@ -57,13 +65,16 @@ export NODE_EXPORTER_TARGET GRAFANA_EXTERNAL_URL
 # "[[]" / "[]]" are the POSIX bracket-expression idiom for a literal [ / ] (a leading ] is literal
 # inside a class); verified against prom/alertmanager:v0.28.1's amtool template render.
 #
+# Both chains first fold CR and LF into a space: a line break in a label would start a new line of
+# its own -- a markdown heading on Discord/Teams/Telegram, a second line in an email Subject.
+#
 # SLACK_SANITIZE additionally escapes &,<,> as the HTML entities Slack's own escaping convention
 # already renders as literal characters (its docs: &amp;/&lt;/&gt;) -- Slack-only, & first so it is
-# not itself re-escaped by the </> step. OTHER_SANITIZE (Discord/Teams/Telegram/email) leaves &,<,>
+# not itself re-escaped by the </> step. OTHER_SANITIZE (Discord/Teams/Telegram, the email Subject) leaves &,<,>
 # alone: those receivers do not decode entities, so "&gt;3 times" showed up literally there (fix
 # round 1 review) -- ordinary label/annotation text must render the same as before this change.
-SLACK_SANITIZE='reReplaceAll "&" "&amp;" | reReplaceAll "<" "&lt;" | reReplaceAll ">" "&gt;" | reReplaceAll "[[]" "［" | reReplaceAll "[]]" "］" | reReplaceAll "@" "＠" | reReplaceAll "`" "｀"'
-OTHER_SANITIZE='reReplaceAll "[[]" "［" | reReplaceAll "[]]" "］" | reReplaceAll "@" "＠" | reReplaceAll "`" "｀"'
+SLACK_SANITIZE='reReplaceAll "[\r\n]" " " | reReplaceAll "&" "&amp;" | reReplaceAll "<" "&lt;" | reReplaceAll ">" "&gt;" | reReplaceAll "[[]" "［" | reReplaceAll "[]]" "］" | reReplaceAll "@" "＠" | reReplaceAll "`" "｀"'
+OTHER_SANITIZE='reReplaceAll "[\r\n]" " " | reReplaceAll "[[]" "［" | reReplaceAll "[]]" "］" | reReplaceAll "@" "＠" | reReplaceAll "`" "｀"'
 # .Annotations.runbook_url/.dashboard are rule-authored, but anyone who can POST to
 # Alertmanager's unauthenticated API sets them too ("x|y> <!channel> <z" would ping a Slack channel).
 # They get their own chain that strips only what leaves a link -- [, <, >, | everywhere, plus ) on
@@ -77,7 +88,7 @@ export SLACK_SANITIZE OTHER_SANITIZE LINK_SANITIZE MD_LINK_SANITIZE
 # every running container reading the deleted copy, so `make reload` HUPed Prometheus into its own stale
 # config and new targets never appeared (found on EC2, 2026-09-19; macOS virtiofs hid it). Files are
 # rewritten in place (same inode) and anything without a source is removed afterwards.
-mkdir -p "$ROOT/build"
+mkdir -p "$ROOT/build"; chmod 700 "$ROOT/build"
 _mark=$(mktemp); trap 'rm -f "$_mark"' EXIT   # every file written by this run is newer than it
 # Only substitute variables that are defined in .env, so Prometheus/Alloy $labels etc. survive.
 VARS="$(grep -oE '^[A-Z_][A-Z0-9_]*=' "$ROOT/.env" | sed 's/=$//' | sed 's/^/\$/' | tr '\n' ' ') \$NODE_EXPORTER_TARGET \$GRAFANA_EXTERNAL_URL \$SLACK_SANITIZE \$OTHER_SANITIZE \$LINK_SANITIZE \$MD_LINK_SANITIZE"

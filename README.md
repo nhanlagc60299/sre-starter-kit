@@ -111,22 +111,33 @@ metrics line up in the dashboards: `service` is the probe name in Prometheus but
 service name in Loki, so the App and Overview log panels stay empty when the two differ.
 
 `build/` contains rendered secrets (Slack/Discord/Teams webhooks, the Telegram bot token, the SMTP
-password) readable by other local users — run the kit on a host you control.
+password). `render.sh` keeps the directory itself at `0700` so other local users cannot open it, and
+`.env` is `0600`; the files inside stay world-readable because the containers read them as their own
+users. Anyone with root, or in the `docker` group, can still read them — run the kit on a host you
+control.
 
 ## AI triage (optional)
 
 Answer `y` to the triage question in `make init` and the kit runs a small agent
 (`scripts/triage_agent.py`, standard-library Python) that receives a copy of every critical alert. It
 gathers the alert's rule and current values from Prometheus, the last error lines from Loki, other
-firing alerts, recent deploy annotations and the alert's runbook section, and makes a best-effort
-pass at redacting common credential shapes (passwords and API keys, `Authorization`/`Bearer`/`Cookie`
-headers, signed-URL parameters, PEM keys, emails) before any of it is written anywhere. It cannot
-catch a passphrase containing spaces or a secret described in prose (`api key is X`) -- keep those out
-of alert text and logs.
+firing alerts, recent deploy annotations and the alert's runbook section, and redacts what it
+recognises as a credential before any of it is written anywhere.
+
+Redaction is best-effort pattern matching, not a guarantee. It covers the shape families
+`tests/test_triage_agent.py` exercises: password, passphrase, secret, token, API-key, account-key and
+subscription-key fields as `key=value`, `key: value`, JSON (also escaped once or twice), Ruby `=>` and
+an XML `<password>` element; `Authorization`, `Bearer` and `Cookie` headers; signed-URL parameters
+(`sig`, any `*Signature`, `X-Amz-Security-Token`, `key`, also URL-encoded); PEM keys, with or without
+their header, across escaped `\n` rows and base64-wrapped; URL userinfo; Slack, Discord and Telegram
+webhook credentials; AWS, GitHub, Slack, Stripe, Anthropic and `sk-` tokens; JWTs; emails. It cannot
+catch a passphrase containing spaces, a secret described in prose (`api key is X`), or a shape that is
+not on that list. If your applications log secrets, add `TRIAGE_REDACT` patterns for them (below).
 
 `TRIAGE_DRY_RUN=true` is the default, and nothing leaves your network in that mode: the context pack
-is only printed to the agent's own log (`docker compose logs triage-agent`). The free tier runs the
-agent in dry run only; the note itself (the model call, with your own Anthropic key) is a Pro feature.
+is only printed to the agent's own log (`docker compose logs triage-agent`; Alloy ships it to Loki
+like any container's output). The free tier runs the agent in dry run only; the note itself (the
+model call, with your own Anthropic key) is a Pro feature.
 
 `TRIAGE_REDACT` adds your own regexes (separated by `;;`) to strip from log lines before anything is
 sent, on top of the built-in shapes above.
