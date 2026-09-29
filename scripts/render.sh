@@ -76,11 +76,15 @@ export NODE_EXPORTER_TARGET GRAFANA_EXTERNAL_URL
 #
 # SLACK_SANITIZE additionally escapes &,<,> as the HTML entities Slack's own escaping convention
 # already renders as literal characters (its docs: &amp;/&lt;/&gt;) -- Slack-only, & first so it is
-# not itself re-escaped by the </> step. OTHER_SANITIZE (Discord/Teams/Telegram, the email Subject) leaves &,<,>
+# not itself re-escaped by the </> step. OTHER_SANITIZE (Discord/Teams/Telegram, the email Subject) leaves &
 # alone: those receivers do not decode entities, so "&gt;3 times" showed up literally there (fix
-# round 1 review) -- ordinary label/annotation text must render the same as before this change.
+# round 1 review). It maps < and > to full-width look-alikes instead (audit run-6): Discord reads
+# <#id>, </cmd:id>, <t:...> and <https://...> in a message as a channel link, a slash-command
+# mention, a timestamp and an autolink, so a label must not carry them. "＞3 times" still reads as
+# ">3 times"; Telegram is sent as plain text (parse_mode '') and the email Subject is RFC 2047-encoded,
+# as it already is for the other look-alikes. ||spoiler|| is left alone: it can hide text, not add any.
 SLACK_SANITIZE='reReplaceAll "[\r\n\v\f\x1c-\x1e\u0085\u2028\u2029]" " " | reReplaceAll "&" "&amp;" | reReplaceAll "<" "&lt;" | reReplaceAll ">" "&gt;" | reReplaceAll "[[]" "［" | reReplaceAll "[]]" "］" | reReplaceAll "@" "＠" | reReplaceAll "`" "｀"'
-OTHER_SANITIZE='reReplaceAll "[\r\n\v\f\x1c-\x1e\u0085\u2028\u2029]" " " | reReplaceAll "[[]" "［" | reReplaceAll "[]]" "］" | reReplaceAll "@" "＠" | reReplaceAll "`" "｀"'
+OTHER_SANITIZE='reReplaceAll "[\r\n\v\f\x1c-\x1e\u0085\u2028\u2029]" " " | reReplaceAll "[[]" "［" | reReplaceAll "[]]" "］" | reReplaceAll "<" "＜" | reReplaceAll ">" "＞" | reReplaceAll "@" "＠" | reReplaceAll "`" "｀"'
 # .Annotations.runbook_url/.dashboard are rule-authored, but anyone who can POST to
 # Alertmanager's unauthenticated API sets them too ("x|y> <!channel> <z" would ping a Slack channel).
 # They get their own chain that strips only what leaves a link -- [, <, >, | everywhere, plus ) on
