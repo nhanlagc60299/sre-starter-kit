@@ -194,4 +194,36 @@ if bad:
 print("amtool template render: every field is inert on the hostile case and intact on the ordinary case")
 PYRENDER
 
+# Secrets never ride on a helper process's argv (security audit run-4, C1): /proc/<pid>/cmdline is
+# world-readable on Linux, so a receiver block or the triage token passed as an argument reaches
+# every local user while build/ at 0700 keeps the same values from them. A stub python3 first on
+# PATH records every argv render.sh gives it; no dummy secret may appear there, and every one must
+# still reach the rendered config (or the check proves nothing).
+tmp3=$(mktemp -d); trap 'rm -rf "$tmp" "$tmp2" "$tmp3"' EXIT
+mkdir "$tmp3/bin"
+real_py=$(command -v python3)
+printf '#!/bin/sh\nprintf "%%s\\n" "$*" >> "%s/argv.log"\nexec "%s" "$@"\n' "$tmp3" "$real_py" > "$tmp3/bin/python3"
+chmod 755 "$tmp3/bin/python3"
+sed 's#^SLACK_WEBHOOK_URL=.*#SLACK_WEBHOOK_URL=http://localhost:9/DUMMYSLACKSECRET#; s/^GRAFANA_ADMIN_PASSWORD=.*/GRAFANA_ADMIN_PASSWORD=fixture-pw/' .env.example > "$tmp3/.env"
+cat >> "$tmp3/.env" <<'ENV'
+DISCORD_WEBHOOK_URL=https://discord.com/api/webhooks/1/DUMMYDISCORDSECRET
+TEAMS_WEBHOOK_URL=https://example.webhook.office.com/webhookb2/DUMMYTEAMSSECRET
+TELEGRAM_BOT_TOKEN=123:DUMMYTELEGRAMSECRET
+TELEGRAM_CHAT_ID=-1001
+ALERT_EMAIL_TO=a@example.invalid
+SMTP_HOST=smtp.example.invalid:587
+SMTP_FROM=b@example.invalid
+SMTP_USER=b@example.invalid
+SMTP_PASSWORD=DUMMYSMTPSECRET
+TRIAGE_WEBHOOK_TOKEN=DUMMYTRIAGESECRET
+ENV
+cp -r core "$tmp3/core"
+( cd "$tmp3" && PATH="$tmp3/bin:$PATH" bash "$OLDPWD/scripts/render.sh" >/dev/null )
+[ -s "$tmp3/argv.log" ] || { echo "FAIL: the python3 stub never ran, so the argv check proves nothing"; exit 1; }
+for s in DUMMYSLACKSECRET DUMMYDISCORDSECRET DUMMYTEAMSSECRET DUMMYTELEGRAMSECRET DUMMYSMTPSECRET DUMMYTRIAGESECRET; do
+  grep -q "$s" "$tmp3/build/alertmanager/alertmanager.yml" || { echo "FAIL: $s did not reach the rendered config"; exit 1; }
+  if grep -q "$s" "$tmp3/argv.log"; then echo "FAIL: $s was passed to python3 on its command line"; exit 1; fi
+done
+echo "no receiver secret or triage token on a helper's argv"
+
 echo "test_alertmanager OK"

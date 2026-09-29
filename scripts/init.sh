@@ -26,10 +26,10 @@ ask_pct() { # var prompt default -- integer 1-99
 q() { printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"; }  # shell-quote a value for .env
 echo "== SRE Starter Kit setup =="
 ask PROJECT_NAME "Project name" "myproject"
-ask SLACK_WEBHOOK_URL "Slack webhook URL (optional if you set another receiver below)" ""
-ask TELEGRAM_BOT_TOKEN "Telegram bot token (optional)" ""
+ask_secret SLACK_WEBHOOK_URL "Slack webhook URL (optional if you set another receiver below)"
+ask_secret TELEGRAM_BOT_TOKEN "Telegram bot token (optional)"
 ask TELEGRAM_CHAT_ID "Telegram chat id (optional)" ""
-ask TEAMS_WEBHOOK_URL "MS Teams Workflows webhook URL (optional)" ""
+ask_secret TEAMS_WEBHOOK_URL "MS Teams Workflows webhook URL (optional)"
 echo "Services to probe, one per line as name=http://host:port/health. Empty line to finish."
 echo "Name each probe after its compose service name so its logs and metrics line up in the dashboards."
 svcs=()
@@ -74,7 +74,7 @@ case "$CADVISOR_ANS" in y|Y|yes|YES) COMPOSE_PROFILES=cadvisor ;; *) COMPOSE_PRO
 if [ "$MODULE_SECURITY" = true ]; then
   ask AUTH_LOG_PATH "Auth log path (RHEL/Amazon Linux: /var/log/secure)" "/var/log/auth.log"
 fi
-ask DISCORD_WEBHOOK_URL "Discord webhook URL (optional)" ""
+ask_secret DISCORD_WEBHOOK_URL "Discord webhook URL (optional)"
 ask ALERT_EMAIL_TO "Email address(es) for alerts, comma-separated (optional)" ""
 if [ -n "$ALERT_EMAIL_TO" ]; then
   ask SMTP_HOST "SMTP host:port (STARTTLS)" "smtp.gmail.com:587"

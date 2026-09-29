@@ -269,4 +269,27 @@ c=$(grep -n "chmod 600 $tmp15/.env" <<<"$trace15" | head -1 | cut -d: -f1)
 w=$(grep -n '^+ cat$' <<<"$trace15" | tail -1 | cut -d: -f1)
 [ -n "$c" ] && [ -n "$w" ] && [ "$c" -lt "$w" ] || { echo "FAIL: init.sh must chmod 600 an existing .env before rewriting it (chmod line ${c:-none}, write line ${w:-none})"; exit 1; }
 
+# --- a webhook URL or bot token already in .env is never shown back: those four prompts are
+#     ask_secret, like the passwords, so the prompt says [unchanged] instead of the value (a
+#     screen share or a terminal log would otherwise carry it). A blank answer still keeps it. ---
+tmp16=$(mktemp -d); trap 'rm -rf "$tmp" "${tmp7:-}" "${tmp8:-}" "${tmp8b:-}" "${tmp9:-}" "${tmp10:-}" "${tmp11:-}" "${tmp12:-}" "${tmp13:-}" "${tmp14:-}" "${tmp15:-}" "$tmp16"' EXIT
+cp -r core scripts .env.example "$tmp16/"
+cat > "$tmp16/.env" <<'ENV'
+GRAFANA_ADMIN_PASSWORD='good-pw'
+SLACK_WEBHOOK_URL='https://hooks.slack.com/services/DUMMYSLACK'
+TELEGRAM_BOT_TOKEN='1:DUMMYTELEGRAM'
+TELEGRAM_CHAT_ID='-1'
+TEAMS_WEBHOOK_URL='https://example.webhook.office.com/DUMMYTEAMS'
+DISCORD_WEBHOOK_URL='https://discord.com/api/webhooks/1/DUMMYDISCORD'
+ENV
+trace16=$(printf '%.0s\n' $(seq 1 25) | ( cd "$tmp16" && bash -x scripts/init.sh 2>&1 >/dev/null ))
+if grep -E '^\++ read ' <<<"$trace16" | grep -q DUMMY; then
+  echo "FAIL: a wizard prompt showed a stored webhook URL or bot token: $(grep -E '^\++ read ' <<<"$trace16" | grep DUMMY | sed 's/DUMMY.*/DUMMY.../')"; exit 1; fi
+for q in 'Slack webhook URL' 'Telegram bot token' 'MS Teams Workflows webhook URL' 'Discord webhook URL'; do
+  grep -E '^\++ read -rs ' <<<"$trace16" | grep -qF "$q" || { echo "FAIL: '$q' is not asked with hidden input"; exit 1; }
+done
+for v in DUMMYSLACK DUMMYTELEGRAM DUMMYTEAMS DUMMYDISCORD; do
+  grep -q "$v" "$tmp16/.env" || { echo "FAIL: a blank answer did not keep the stored $v value"; exit 1; }
+done
+
 echo "test_init OK"

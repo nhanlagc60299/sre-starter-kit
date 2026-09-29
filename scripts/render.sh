@@ -129,10 +129,13 @@ if [ -f "$INFRA" ]; then
 fi
 # 3. optional receivers
 AM="$ROOT/build/alertmanager/alertmanager.yml"
+# The block carries a bot token, a webhook URL or the SMTP password, so it goes to python3 through
+# the environment, never argv: /proc/<pid>/cmdline is readable by every local user, environ only by
+# this one (the triage token below, the same way).
 add() { # marker block
-  python3 - "$AM" "$1" "$2" <<'PY'
-import sys
-p,marker,block=sys.argv[1:]; s=open(p).read()
+  RECEIVER_BLOCK="$2" python3 - "$AM" "$1" <<'PY'
+import os,sys
+p,marker=sys.argv[1:]; block=os.environ["RECEIVER_BLOCK"]; s=open(p).read()
 if "    # "+marker not in s:
     sys.exit("ERROR: receiver marker '%s' not found in %s - core/alertmanager/alertmanager.yml.tpl must keep it." % (marker,p))
 open(p,"w").write(s.replace("    # "+marker, block+"\n    # "+marker))
@@ -201,9 +204,9 @@ fi
 # The agent compares UTF-8 bytes against a latin-1-decoded header, so only ASCII can ever match: refuse
 # anything else here rather than ship a config whose every triage delivery is rejected.
 if [ -f "$AM" ] && [ -n "${TRIAGE_WEBHOOK_TOKEN:-}" ]; then
-  python3 - "$AM" "$TRIAGE_WEBHOOK_TOKEN" <<'PY'
-import re,sys
-p,tok=sys.argv[1:]; s=open(p).read(); m="        # TRIAGE_WEBHOOK_AUTH"
+  python3 - "$AM" <<'PY'
+import os,re,sys
+p=sys.argv[1]; tok=os.environ["TRIAGE_WEBHOOK_TOKEN"]; s=open(p).read(); m="        # TRIAGE_WEBHOOK_AUTH"
 if not re.fullmatch(r"[!-~]+", tok):
     sys.exit("ERROR: TRIAGE_WEBHOOK_TOKEN must be printable ASCII with no spaces (e.g. the hex 'make init' generates).")
 if m not in s:

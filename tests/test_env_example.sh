@@ -77,4 +77,11 @@ grep -v '^ALERTMANAGER_EXTERNAL_URL=' "$tmp/.env" > "$tmp/.env.no-external-url" 
 cfg=$( cd "$tmp" && ${CONTAINER_ENGINE:-docker} compose --env-file .env.no-external-url -f compose/docker-compose.yml config )
 [[ "$cfg" == *"--web.external-url=http://localhost:9093"* ]] || { echo "FAIL: external URL has no default"; exit 1; }
 
+# A copy of .env (.env.bak, .env.prod, .env.local) holds the same secrets: git ignores every one of
+# them, but still tracks the example.
+for f in .env .env.bak .env.prod .env.local; do
+  git check-ignore -q --no-index "$f" || { echo "FAIL: git does not ignore $f"; exit 1; }
+done
+if git check-ignore -q --no-index .env.example; then echo "FAIL: .env.example is ignored"; exit 1; fi
+
 echo "test_env_example OK"
