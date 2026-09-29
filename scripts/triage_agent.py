@@ -140,13 +140,14 @@ DEFAULT_REDACT = [
     # "MII" is the DER SEQUENCE tag every RSA/EC/PKCS8 key or cert starts with once base64-encoded.
     # The rows after it follow across whitespace or a literal "\n"/"\r" (a JSON-escaped key on one
     # log line), and only real PEM rows count (audit run-4): exactly 64 characters, or 76 (MIME and
-    # GNU base64's wrap, audit run-5) with no "." after it (that is a JWT's header segment, which the
-    # JWT rule below must see whole, audit run-6), or a final row of 4-76 with its "=" padding that ends the line
-    # or its value (a quote, comma, brace or bracket after it: a key inside JSON or a YAML flow
-    # sequence), in real base64 shape (whole 4-character groups, then "xx==" or "xxx="). Any row may
-    # end the text itself (loki_lines cuts a line at 300 characters, mid-row). One last row, padded
-    # or not, may also end at whitespace with more text after it: taken once, outside the repeat, so
-    # at most one following word of that shape is over-redacted. A field name after the key ("databasePassword:",
+    # GNU base64's wrap, audit run-5) with no ".eyJ" after it (that is a JWT's header segment, which
+    # the JWT rule below must see whole, audit run-6; a bare "." after a real last row, as in
+    # "...row. retrying", still ends the row, audit run-7), or a final row of 4-76 with its "="
+    # padding that ends the line or its value (a quote, comma, brace, bracket or a "." that is not
+    # ".eyJ" after it: a key inside JSON or a YAML flow sequence, or the end of a sentence), in real
+    # base64 shape (whole 4-character groups, then "xx==" or "xxx="). Any row may end the text itself
+    # (loki_lines cuts a line at 300 characters, mid-row). One last row, padded or not, may also end
+    # at whitespace with more text after it: taken once, outside the repeat, so at most one following word of that shape is over-redacted. A field name after the key ("databasePassword:",
     # "storageAccountKey=", "appPassword= x") is neither. These two rules run AFTER the keyword and
     # name/value rules (R42): a keyword's value is already "[redacted]", which no base64 row can eat,
     # and before that swap "password=" in front of a quote read as a padded final row. A keyword-named
@@ -155,9 +156,9 @@ DEFAULT_REDACT = [
     # separator and the row share no character, each row's end is fixed by a bounded lookahead, and
     # nothing after the repeat can fail, so it never backtracks. The trailing "={0,2}" is the first
     # row's own padding.
-    (r"(?:\bMII[A-Za-z0-9+/]{20,4096}|(?<=\[redacted\])(?=(?:\\[nr]|\s){1,8}[A-Za-z0-9+/]{64}(?:[A-Za-z0-9+/]{12})?(?![A-Za-z0-9+/=.])))"
-     r"(?:(?:\\[nr]|\s){1,8}(?:[A-Za-z0-9+/]{64}(?:[A-Za-z0-9+/]{12})?(?![A-Za-z0-9+/=.])"
-     r"|(?=[A-Za-z0-9+/=]{4,76}[ \t]{0,8}(?:\\[nr]|[\r\n\"',}\]]|$))(?:[A-Za-z0-9+/]{4}){0,19}(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?(?![A-Za-z0-9+/=])"
+    (r"(?:\bMII[A-Za-z0-9+/]{20,4096}|(?<=\[redacted\])(?=(?:\\[nr]|\s){1,8}[A-Za-z0-9+/]{64}(?:[A-Za-z0-9+/]{12})?(?![A-Za-z0-9+/=]|\.eyJ)))"
+     r"(?:(?:\\[nr]|\s){1,8}(?:[A-Za-z0-9+/]{64}(?:[A-Za-z0-9+/]{12})?(?![A-Za-z0-9+/=]|\.eyJ)"
+     r"|(?=[A-Za-z0-9+/=]{4,76}[ \t]{0,8}(?:\\[nr]|[\r\n\"',}\]]|\.(?!eyJ)|$))(?:[A-Za-z0-9+/]{4}){0,19}(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?(?![A-Za-z0-9+/=])"
      r"|[A-Za-z0-9+/]{1,76}={0,2}\Z)){0,256}"
      r"(?:(?:\\[nr]|\s){1,8}(?:(?:[A-Za-z0-9+/]{4}){1,19}|(?:[A-Za-z0-9+/]{4}){0,18}(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=))(?=\s))?={0,2}",
      "[pem-redacted]"),
@@ -436,23 +437,33 @@ MAX_LABELS = 64          # per alert or series; the labels a reader needs first 
 MAX_FIELD_CHARS = 300    # per label name, label value or other scalar, like loki_lines' line cut
 MAX_REFS = 10            # inhibitedBy, silencedBy, a deploy's tags
 RULE_QUERY_CHARS = 4000  # a rule's PromQL is sent back to Prometheus, so it gets a longer cut
+# A cut must never leave a secret's prefix that no pattern matches any more (audit run-7: a ghp_ token
+# straddling the 300th character kept 9-19 of its characters, where the whole value was redacted
+# before). So a value longer than its cut is redacted over its first n + CUT_REDACT_WINDOW characters
+# and then cut: every bounded pattern (a URL password's 1024, a token's 255, an email's parts) fits
+# whole in that window, and the unbounded ones redact whatever of the value it holds. One window at
+# a time, so the copy is bounded like the cut; the cut then lands in redacted text.
+CUT_REDACT_WINDOW = 2048
 _KEY_LABELS = ("__name__", "alertname", "severity", "instance", "job", "service", "namespace")
 
 
 def _cut(v, n=MAX_FIELD_CHARS):
-    """A scalar from an upstream body, as a new bounded value: a string cut to n, a number or None as it is."""
+    """A scalar from an upstream body, as a new bounded value: a string cut to n (redacted first when
+    it is longer, see CUT_REDACT_WINDOW), a number or None as it is."""
     if v is None or isinstance(v, (bool, int, float)):
         return v
-    return (v if isinstance(v, str) else str(v))[:n]
+    s = v if isinstance(v, str) else str(v)
+    return s if len(s) <= n else redact(s[:n + CUT_REDACT_WINDOW])[:n]
 
 
 def _labels(d):
-    """At most MAX_LABELS labels, the _KEY_LABELS first, every name and value cut."""
+    """At most MAX_LABELS labels, the _KEY_LABELS first, every name and value cut. A name that names a
+    secret is tested whole, before its cut can drop the keyword it ends in (audit run-7)."""
     if not isinstance(d, dict):
         return {}
     keys = [k for k in _KEY_LABELS if k in d]
     keys += itertools.islice((k for k in d if k not in _KEY_LABELS), MAX_LABELS - len(keys))
-    return {_cut(k): _cut(d[k]) for k in keys}
+    return {_cut(k): "[redacted]" if isinstance(k, str) and _SECRET_KEY.search(k) else _cut(d[k]) for k in keys}
 
 
 def _refs(v):
@@ -800,10 +811,21 @@ def run_allowed(now=None):
 
 
 def post_json(url, body, headers=None, timeout=45):
+    """POST JSON to a receiver. The whole call keeps to `timeout` of wall-clock time, like get_json
+    (audit run-7): a socket timeout counts only silence, so a receiver trickling its reply held a
+    worker for as long as it kept sending. A reply the deadline cut raises TimeoutError."""
     data = json.dumps(body).encode()
     req = urllib.request.Request(url, data=data, headers={"Content-Type": "application/json", **(headers or {}), "User-Agent": USER_AGENT})
-    with urllib.request.urlopen(req, timeout=timeout) as r:
-        return r.status, r.read(65536).decode("utf-8", "replace")   # a receiver's reply is never used
+    _WATCH.deadline = guard = _Deadline(timeout)
+    try:
+        with _OPENER.open(req, timeout=timeout) as r:
+            status, reply = r.status, r.read(65536)   # a receiver's reply is never used
+    finally:
+        guard.cancel()
+        _WATCH.deadline = None
+    if guard.fired:
+        raise TimeoutError("receiver reply cut at the %ss deadline" % timeout)
+    return status, reply.decode("utf-8", "replace")
 
 
 def _chunks(text, size):
@@ -1066,6 +1088,19 @@ WORKERS = threading.BoundedSemaphore(MAX_WORKERS)
 # flight at once. A POST past it gets 503 with its body unread; Alertmanager retries it.
 MAX_BODY_READERS = 8
 BODY_READERS = threading.BoundedSemaphore(MAX_BODY_READERS)
+# Before auth, the stdlib kept up to 100 header lines of 64 KiB per connection, one thread each, with
+# no cap on connections and only an idle timeout: about 35 slow unauthenticated connections passed
+# 256 MiB, and the OOM restart forgot the hourly run cap (audit run-7). Now every phase before auth is
+# bounded by construction: at most MAX_CONNECTIONS requests in flight (one past it is closed unread),
+# the request line and headers within HEADER_SECONDS of wall-clock time and MAX_HEADER_BYTES in all
+# (past either, 408 or 431 and the connection closes). Alertmanager's webhook sends well under 1 KiB
+# of headers. Measured: 64 connections each holding its full header budget add 3.1 MiB (0.05 MiB
+# each, a thread and its deadline timer included), on top of the 165 MiB and the 8 MiB of bodies
+# above: 176 MiB worst case, under the 192 MiB design bar (audit run-7, three runs, 100 peers each).
+MAX_CONNECTIONS = 64
+CONNECTIONS = threading.BoundedSemaphore(MAX_CONNECTIONS)
+HEADER_SECONDS = 5
+MAX_HEADER_BYTES = 16384
 
 
 def _work(payload):
@@ -1078,8 +1113,56 @@ def _work(payload):
 BODY_SECONDS = 5   # wall-clock seconds to read one webhook body; a 1 MiB body on a live link takes far less
 
 
+class _HeaderBudget:
+    """The request line and headers are read through this: MAX_HEADER_BYTES in all, then
+    HTTPException, which parse_request answers with 431. The body is read from the socket file."""
+    def __init__(self, f, left):
+        self.f, self.left = f, left
+
+    def readline(self, limit=-1):
+        line = self.f.readline(self.left + 1 if limit < 0 else min(limit, self.left + 1))
+        self.left -= len(line)
+        if self.left < 0:
+            raise http.client.HTTPException("request line and headers over %d bytes" % MAX_HEADER_BYTES)
+        return line
+
+    def __getattr__(self, name):
+        return getattr(self.f, name)
+
+
 class Handler(BaseHTTPRequestHandler):
     timeout = 10   # seconds of socket idle before the connection is dropped; a stalled sender cannot pin a thread
+
+    def setup(self):
+        super().setup()
+        self._hdr = _Deadline(HEADER_SECONDS, socket.SHUT_RD)   # SHUT_RD, so a 408 still goes out
+        try:
+            self._hdr.add(self.connection)
+        except BaseException:
+            self._hdr.cancel()
+            raise
+        self.rfile = _HeaderBudget(self.rfile, MAX_HEADER_BYTES)
+
+    def handle(self):
+        try:
+            super().handle()
+        except http.client.HTTPException:   # a request line over the budget: nothing to answer, close
+            pass
+
+    def parse_request(self):
+        try:
+            ok = super().parse_request()
+        finally:
+            self._hdr.cancel()
+            self.rfile = getattr(self.rfile, "f", self.rfile)
+        if ok and self._hdr.fired:          # the deadline cut the headers: never act on part of them
+            self.send_response(408); self.end_headers()
+            return False
+        return ok
+
+    def finish(self):
+        self._hdr.cancel()
+        super().finish()
 
     def do_GET(self):
         self.send_response(200 if self.path == "/healthz" else 404); self.end_headers()
@@ -1140,12 +1223,38 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, *a): pass
 
 
+class Server(ThreadingHTTPServer):
+    """ThreadingHTTPServer with at most MAX_CONNECTIONS requests in flight: one past it is closed
+    before a byte of it is read, and its slot comes back when its request finishes."""
+    def __init__(self, *a, **k):
+        self._slots = {}                    # id(request) -> the semaphore it took, given back by the same
+        super().__init__(*a, **k)
+
+    def process_request(self, request, client_address):
+        slots = CONNECTIONS
+        if not slots.acquire(blocking=False):
+            self.shutdown_request(request)
+            return
+        self._slots[id(request)] = slots
+        try:
+            super().process_request(request, client_address)
+        except BaseException:               # no thread: the slot goes back here
+            self._slots.pop(id(request)).release()
+            raise
+
+    def process_request_thread(self, request, client_address):
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            self._slots.pop(id(request)).release()
+
+
 def serve(port=9096):
-    srv = ThreadingHTTPServer(("0.0.0.0", port), Handler)
+    srv = Server(("0.0.0.0", port), Handler)
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     return srv, "http://127.0.0.1:%d" % srv.server_address[1]
 
 
 if __name__ == "__main__":
     log("listening on :9096, dry_run=%s" % ENV("TRIAGE_DRY_RUN", "true"))
-    ThreadingHTTPServer(("0.0.0.0", 9096), Handler).serve_forever()
+    Server(("0.0.0.0", 9096), Handler).serve_forever()

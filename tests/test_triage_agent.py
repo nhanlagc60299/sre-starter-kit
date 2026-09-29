@@ -930,6 +930,55 @@ class PackTests(unittest.TestCase):
         r, _ = self.agent.rule_for("ServiceDown", b())
         self.assertLessEqual(len(r["query"]), 4000); self.assertLessEqual(len(r["group"]), 300)
 
+    def test_run7_a_last_key_row_before_a_dot_is_redacted(self):
+        # audit run-7 h3 run7_probe (1): the "." added to the row lookaheads for the JWT case (run-6)
+        # also left a real last row of 64 or 76 characters in the clear when "." followed it, and a
+        # padded last row followed by "." leaked before that too. Only ".eyJ" (a JWT's payload) stops a row.
+        import random
+        rnd = random.Random(7)
+        b64 = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+        w = lambda n: "".join(rnd.choice(b64) for _ in range(n))
+        mii = "MIIEvQIBADANBgkqhkiG9w0BAQEFAASC" + w(32)
+        for width in (64, 76):
+            for sep in ("\n", "\\n", " "):
+                for last, rows in (("full", [w(width), w(width)]), ("padded", [w(width), w(width - 10) + "AAAAAAAA=="])):
+                    s = "load key failed: " + mii + sep + sep.join(rows) + ". retrying"
+                    with self.subTest(width=width, sep=sep, last=last):
+                        out = self.agent.redact(s)
+                        self.assertEqual([r for r in rows if r[:16] in out], [], out)
+                        self.assertTrue(out.endswith(". retrying"), out)
+                # the rows after a keyword's own value ("[redacted]") start the rule on the same terms
+                row = w(width)
+                with self.subTest(width=width, after="[redacted]"):
+                    out = self.agent.redact("private_key: " + mii + "\n" + row + ". retrying")
+                    self.assertNotIn(row[:16], out); self.assertTrue(out.endswith(". retrying"), out)
+        # a JWT still stays whole after a MII blob, whatever its header's length: HS256's usual 36
+        # characters would otherwise read as a padded last row once "." ends one
+        for hdr in ("eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9", "eyJ" + w(73).replace("+", "a").replace("/", "b")):
+            jwt = hdr + ".eyJzdWIiOiJkdW1teSJ9" + w(20).replace("+", "a").replace("/", "b") + "." + "s" * 43
+            with self.subTest(header=len(hdr)):
+                self.assertEqual(self.agent.redact(mii + "\n" + jwt), "[pem-redacted]\n[jwt-redacted]")
+
+    def test_run7_a_cut_never_leaves_part_of_a_secret(self):
+        # audit run-7 h3 run7_probe (3): values were cut to 300 characters before redact(), so a token
+        # straddling the cut kept a prefix no pattern matches (a ghp_ token kept 9-19 of its characters),
+        # and a label name longer than 300 lost the "_password" that blanks its value.
+        tok = "ghp_" + "3Wk6Gml15hEecaA49qOxYzAbCdEfGhIjKlMn"
+        name = "a" * 301 + "_password"
+        labels = {"alertname": "Leak", "note": "x" * 280 + " token " + tok, name: "dummyval"}
+        labels.update({"at%03d" % n: "y" * n + " " + tok for n in range(250, 300, 3)})
+        Fake.routes["/api/v2/alerts"] = (200, [dict(AM_ALERTS[0], labels=labels)])
+        Fake.routes["/loki/api/v1/query_range"] = (200, {"status": "success", "data": {"result": [
+            {"stream": {}, "values": [["1758000000000000000", "z" * 290 + " " + tok + " retry"]]}]}})
+        p = self.agent.build_pack(WEBHOOK)
+        kept = p["firing"][0]["labels"]
+        text = json.dumps(p)
+        self.assertEqual([tok[:n] for n in range(9, len(tok)) if tok[:n] in text], [], "part of the token survived a cut")
+        self.assertEqual(kept[name[:300]], "[redacted]")
+        self.assertNotIn("dummyval", text)
+        self.assertTrue(kept["note"].startswith("x" * 280 + " token "), kept["note"])
+        self.assertTrue(all(len(k) <= 300 and len(v) <= 300 for k, v in kept.items()))
+
     def test_dedup_within_an_hour(self):
         d = self.agent.Dedup(seconds=3600)
         self.assertFalse(d.seen("k")); self.assertTrue(d.seen("k"))
@@ -1336,6 +1385,33 @@ class PostTests(unittest.TestCase):
         cls.agent.TELEGRAM_API = cls.base + "/tg/bot%s/sendMessage"
 
     def setUp(self): Sink.posts = []
+
+    def test_run7_a_trickling_receiver_is_cut_at_the_call_timeout(self):
+        # audit run-7 h9: post_json kept only urllib's per-recv socket timeout, so a receiver trickling
+        # its reply (a header line or a body) held the worker for as long as it kept sending.
+        for name, head, trickle in (("content-length body", b"HTTP/1.1 200 OK\r\nContent-Length: 100000\r\n\r\no", b"kkkkkkkkkk"),
+                                    ("header line", b"HTTP/1.1 200 OK\r\nX-Pad: ", b"aaaaaaaaaa")):
+            lst = socket.socket(); lst.bind(("127.0.0.1", 0)); lst.listen(1)
+            self.addCleanup(lst.close)
+            stop = threading.Event()   # Event.wait, not time.sleep: a later test may mock time.sleep
+            def serve(lst=lst, head=head, trickle=trickle, stop=stop):
+                c, _ = lst.accept()
+                try:
+                    c.recv(65536); c.sendall(head)
+                    end = time.monotonic() + 6
+                    while time.monotonic() < end and not stop.is_set():
+                        c.sendall(trickle); stop.wait(0.05)
+                except OSError:
+                    pass
+                finally:
+                    c.close()
+            th = threading.Thread(target=serve, daemon=True); th.start()
+            self.addCleanup(th.join, 10); self.addCleanup(stop.set)
+            with self.subTest(name):
+                start = time.monotonic()
+                with self.assertRaises(Exception):
+                    self.agent.post_json("http://127.0.0.1:%d/slack" % lst.getsockname()[1], {"text": "x"}, timeout=1.0)
+                self.assertLess(time.monotonic() - start, 1.8)
 
     def test_telegram_when_configured(self):
         # Telegram gets no fence (M7): no parse_mode is set, so a fence would render as three
@@ -2162,13 +2238,93 @@ class IngressTests(unittest.TestCase):
             self.assertIn(out, (b"HTTP/1.0 408", b""))     # the 408, or the reset a later byte drew
             self.assertLess(took, 2.5)
 
+    def test_run7_connections_past_the_cap_are_closed_unread(self):
+        # audit run-7 h1: before auth the stdlib kept up to ~6.5 MB of headers per connection, one
+        # thread each, with no cap on connections; ~35 slow peers passed 256 MiB. Past the cap a
+        # connection is closed before a byte of it is read, and each slot comes back when its request ends.
+        self.assertEqual(self.agent.MAX_CONNECTIONS, 64)
+        slots = threading.BoundedSemaphore(2)
+        with mock.patch.object(self.agent, "CONNECTIONS", slots), mock.patch.object(self.agent, "process"):
+            held = [socket.create_connection(("127.0.0.1", self.port), timeout=5) for _ in range(2)]
+            for c in held: c.sendall(b"POST /alert HTTP/1.1\r\nX-Pad: ")     # headers never finish
+            for _ in range(50):
+                if slots._value == 0: break
+                time.sleep(0.05)
+            self.assertEqual(slots._value, 0, "two slow senders did not hold both slots")
+            t0, out = time.monotonic(), b""
+            c = socket.create_connection(("127.0.0.1", self.port), timeout=3)
+            try:
+                c.sendall(self._head(2) + b"{}"); out = c.recv(100)
+            except ConnectionResetError:         # closed with the request unread: a reset, or an EOF
+                pass
+            finally:
+                c.close()
+            self.assertEqual(out, b"", "a connection past the cap was served: %r" % out[:40])
+            self.assertLess(time.monotonic() - t0, 1.0)
+            for c in held: c.close()
+            for _ in range(100):
+                if slots._value == 2: break
+                time.sleep(0.05)
+            self.assertEqual(slots._value, 2, "a connection slot was not given back")
+            self.assertEqual(self._post(), 200)          # and the next genuine delivery is served
+        self.assertEqual(self.agent.CONNECTIONS._value, 64)
+
+    def test_run7_the_header_phase_has_a_wall_clock_deadline(self):
+        # Handler.timeout counts only silence: one byte every few seconds kept a header read going.
+        # The request line and headers now have HEADER_SECONDS of wall-clock time in all, then 408.
+        self.assertEqual(self.agent.HEADER_SECONDS, 5)
+        with mock.patch.object(self.agent, "HEADER_SECONDS", 1), mock.patch.object(self.agent, "process") as proc:
+            c = socket.create_connection(("127.0.0.1", self.port), timeout=5)
+            try:
+                c.sendall(b"POST /alert HTTP/1.1\r\nHost: x\r\nContent-Length: 2\r\nX-Pad: ")
+                t0, out = time.monotonic(), b""
+                c.settimeout(0.1)
+                while time.monotonic() - t0 < 4 and not out:
+                    try:
+                        c.sendall(b"a"); out = c.recv(100)
+                    except socket.timeout:
+                        pass
+                    except OSError:
+                        break
+                took = time.monotonic() - t0
+            finally:
+                c.close()
+        self.assertTrue(out.startswith(b"HTTP/1.0 408"), "expected 408 at the header deadline, got %r" % out[:40])
+        self.assertLess(took, 2.0)
+        proc.assert_not_called()
+
+    def test_run7_request_line_and_headers_have_a_byte_budget(self):
+        # ... and MAX_HEADER_BYTES in all, far below the stdlib's 100 x 64 KiB: past it, 431 (headers)
+        # or a closed connection (a request line alone over the budget), with nothing read further.
+        self.assertEqual(self.agent.MAX_HEADER_BYTES, 16384)
+        errors = []
+        with mock.patch.object(self.agent, "process") as proc, \
+             mock.patch.object(self.srv, "handle_error", lambda req, addr: errors.append(sys.exc_info()[1])):
+            pad = "".join("X-Pad-%d: %s\r\n" % (i, "a" * 8000) for i in range(3))
+            out, _ = self._raw(("POST /alert HTTP/1.1\r\nHost: x\r\n%sContent-Length: 2\r\n\r\n" % pad).encode(), b"{}")
+            self.assertTrue(out.startswith(b"HTTP/1.0 431"), out[:40])
+            try:
+                out, closed = self._raw(b"POST /" + b"a" * 20000 + b" HTTP/1.1\r\n\r\n", wait=3)
+            except ConnectionResetError:
+                out, closed = b"", 0
+            self.assertEqual((out, closed is not None), (b"", True))
+            # an Alertmanager-sized request (well under 1 KiB of headers) is untouched
+            self.assertEqual(self._post({"User-Agent": "Alertmanager/0.28.1", "X-Pad": "b" * 4000}), 200)
+        self.assertEqual(errors, [])
+        self.assertEqual(proc.call_count, 1)
+
     def test_run6_r2_a_failed_dup_on_the_body_read_leaves_no_timer(self):
         timers = lambda: [t for t in threading.enumerate() if isinstance(t, threading.Timer) and t.is_alive()]
         before = len(timers())
         errors = []   # the handler's OSError reaches socketserver, which would print its traceback
+        real_dup, calls = socket.socket.dup, []
+        def dup(sock):   # the header deadline's dup succeeds; the body read's fails
+            calls.append(1)
+            if len(calls) > 1: raise OSError(24, "Too many open files")
+            return real_dup(sock)
         with mock.patch.object(self.agent, "BODY_SECONDS", 30), mock.patch.object(self.agent, "process") as proc, \
              mock.patch.object(self.srv, "handle_error", lambda req, addr: errors.append(sys.exc_info()[1])), \
-             mock.patch.object(socket.socket, "dup", side_effect=OSError(24, "Too many open files")):
+             mock.patch.object(socket.socket, "dup", dup):
             self._raw(self._head(2), b"{}", wait=3)
             time.sleep(0.2)
         proc.assert_not_called()
