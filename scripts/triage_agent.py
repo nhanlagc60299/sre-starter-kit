@@ -4,7 +4,7 @@ redacts it, and either prints it (dry run, the default) or hands it to triage_en
 the Anthropic Messages API with your own key, and posts the returned note. Standard library only, on
 purpose: anyone can read this file end to end and know exactly what leaves their network. Only GETs
 against the kit's services."""
-import base64, hashlib, heapq, hmac, itertools, json, os, re, threading, time, urllib.error, urllib.parse, urllib.request
+import base64, hashlib, heapq, hmac, http.client, itertools, json, os, re, socket, threading, time, urllib.error, urllib.parse, urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 try:
@@ -260,16 +260,75 @@ class Budget:
 
 
 _TOO_LARGE = object()
-# One upstream body is read, decoded and parsed at a time, process-wide (audit run-5): an 8 MiB body
-# of attacker-shaped alert labels costs 109 MiB while it is a str plus a parse tree. Measured with
-# the audit's section H (4 workers, attacker-shaped 8 MiB alert lists, worst of 20 trials): 351 MiB
-# VmHWM without this lock, against the 256 MiB limit, and 157 MiB with it (worst of 60 in three
-# runs, with the fetchers' bounded copies of audit run-6, see MAX_LABELS). The wait for the lock comes out of the call's own timeout, so a worker that waits
-# too long counts the source as unreachable, and build_pack keeps to its deadline. The body is read in
-# chunks against that same deadline (audit run-6): an upstream trickling bytes cannot hold the lock
-# past the call's timeout plus one socket read.
+# One upstream body is decoded and parsed at a time, process-wide (audit run-5): an 8 MiB body of
+# attacker-shaped alert labels costs 109 MiB while it is a str plus a parse tree. Measured with the
+# audit's section H (4 workers, attacker-shaped 8 MiB alert lists): 351 MiB VmHWM without this lock,
+# against the 256 MiB limit. The network read happens before it, outside it, bounded by the call's
+# own wall-clock deadline (_Deadline; audit run-6, review ruling R48): a socket timeout counts only
+# silence between two recvs, so an upstream trickling a body, a header line or a chunk-size line held
+# the lock for as long as it kept sending. The wait for the lock comes out of the same deadline, so
+# a worker that waits too long counts the source as unreachable and build_pack keeps to its deadline.
 _UPSTREAM = threading.Lock()
 READ_CHUNK = 65536
+
+
+class _Deadline:
+    """A wall-clock bound on blocking socket reads. At `seconds` it shuts down every socket given to
+    add(), and one added later at once: a read blocked on it returns EOF and its caller fails. It
+    keeps a dup() of each socket, not the socket itself, so the owner's object is untouched and a TLS
+    wrap made after add() (which detaches the original object) is still cut. cancel() stops the timer
+    and closes the dups. `how` is SHUT_RDWR for an upstream, SHUT_RD where a reply must still go out."""
+    def __init__(self, seconds, how=socket.SHUT_RDWR):
+        self.how, self.socks, self.fired, self.lock = how, [], False, threading.Lock()
+        self.timer = threading.Timer(max(0.0, seconds), self._fire)
+        self.timer.daemon = True
+        self.timer.start()
+
+    def add(self, sock):
+        d = sock.dup()
+        with self.lock:
+            self.socks.append(d)
+            if self.fired:
+                self._shut(d)
+        return sock
+
+    def _shut(self, s):
+        try:
+            s.shutdown(self.how)
+        except OSError:
+            pass
+
+    def _fire(self):
+        with self.lock:
+            self.fired = True
+            for s in self.socks:
+                self._shut(s)
+
+    def cancel(self):
+        self.timer.cancel()
+        with self.lock:
+            for s in self.socks:
+                s.close()
+            self.socks = []
+
+
+_WATCH = threading.local()   # .deadline: the _Deadline of the get_json call running on this thread
+
+
+def _watched(cls):
+    """An http.client connection class whose sockets join this thread's _Deadline as soon as TCP
+    connects, before any TLS handshake or header byte is read. It swaps the connection's
+    _create_connection, the attribute HTTPConnection.connect() opens its socket through (private,
+    but the same since Python 3.4; HTTPSConnection.connect() goes through it too)."""
+    def make(*a, **k):
+        conn = cls(*a, **k)
+        create = conn._create_connection
+        def connect(*x, **y):
+            sock, d = create(*x, **y), getattr(_WATCH, "deadline", None)
+            return d.add(sock) if d else sock
+        conn._create_connection = connect
+        return conn
+    return make
 
 
 class SameOriginRedirects(urllib.request.HTTPRedirectHandler):
@@ -281,41 +340,59 @@ class SameOriginRedirects(urllib.request.HTTPRedirectHandler):
             p = urllib.parse.urlsplit(u)
             return p.scheme.lower(), (p.hostname or "").lower(), p.port or {"http": 80, "https": 443}.get(p.scheme.lower())
         if origin(req.full_url) != origin(urllib.parse.urljoin(req.full_url, newurl)):
-            raise urllib.error.HTTPError(req.full_url, code, "redirect to another origin refused", headers, fp)
+            fp.close()                     # its body is never read; the error carries none
+            raise urllib.error.HTTPError(req.full_url, code, "redirect to another origin refused", headers, None)
         return super().redirect_request(req, fp, code, msg, headers, newurl)
 
 
-_OPENER = urllib.request.build_opener(SameOriginRedirects)
+class _WatchedHTTP(urllib.request.HTTPHandler):
+    def http_open(self, req):
+        return self.do_open(_watched(http.client.HTTPConnection), req)
+
+
+class _WatchedHTTPS(urllib.request.HTTPSHandler):
+    def https_open(self, req):
+        return self.do_open(_watched(http.client.HTTPSConnection), req, context=self._context)
+
+
+_OPENER = urllib.request.build_opener(SameOriginRedirects, _WatchedHTTP, _WatchedHTTPS)
 
 
 def get_json(url, headers=None, timeout=SOURCE_TIMEOUT):
     """GET and parse JSON; None on any failure, _TOO_LARGE for a body over MAX_UPSTREAM_BYTES, which
-    is never parsed: at most one byte past the cap is ever read. Never raises: every source is optional."""
+    is never parsed: at most one byte past the cap is ever read. The whole call, network, lock wait
+    and parse, keeps to `timeout` of wall-clock time. Never raises: every source is optional."""
     try:
         req = urllib.request.Request(url, headers={**(headers or {}), "User-Agent": USER_AGENT})
-        t0 = time.monotonic(); deadline = t0 + timeout
-        if not _UPSTREAM.acquire(timeout=timeout):
-            raise TimeoutError("another upstream body is being parsed")
+        deadline = time.monotonic() + timeout
+        _WATCH.deadline = guard = _Deadline(timeout)
         try:
-            left = deadline - time.monotonic()   # the wait counts: one call never takes 2x timeout
-            if left <= 0:
-                raise TimeoutError("no time left after waiting for the parse lock")
-            with _OPENER.open(req, timeout=left) as r:
+            with _OPENER.open(req, timeout=timeout) as r:
                 raw = bytearray()
                 while len(raw) <= MAX_UPSTREAM_BYTES:
-                    if time.monotonic() > deadline:
-                        raise TimeoutError("upstream body not read within the call timeout")
                     chunk = r.read1(min(READ_CHUNK, MAX_UPSTREAM_BYTES + 1 - len(raw)))   # one socket read
                     if not chunk:
                         break
                     raw += chunk
-            if len(raw) > MAX_UPSTREAM_BYTES:
-                log("source response over %d bytes, not parsed: %s" % (MAX_UPSTREAM_BYTES, url.split("?")[0]))
-                return _TOO_LARGE
-            return json.loads(raw.decode())
+        finally:
+            guard.cancel()
+            _WATCH.deadline = None
+        if len(raw) > MAX_UPSTREAM_BYTES:
+            log("source response over %d bytes, not parsed: %s" % (MAX_UPSTREAM_BYTES, url.split("?")[0]))
+            return _TOO_LARGE
+        # The guard fires at the deadline, so a body it cut (a close-delimited one reads as a normal
+        # end) always has no time left here and is refused, never parsed.
+        left = deadline - time.monotonic()
+        if left <= 0 or not _UPSTREAM.acquire(timeout=left):
+            raise TimeoutError("no time left to parse: another upstream body is being parsed")
+        try:
+            text, raw = raw.decode(), None   # the bytes go before the parse tree is built
+            return json.loads(text)
         finally:
             _UPSTREAM.release()
     except Exception as e:  # noqa: BLE001 - a dead upstream must not kill the triage
+        if isinstance(e, urllib.error.HTTPError):
+            e.close()
         log("source unreachable %s: %s" % (url.split("?")[0], e.__class__.__name__))
         return None
 
@@ -844,6 +921,8 @@ def post_note(text):
         try:
             fn(); log("posted to " + name); oks.append(True)
         except Exception as e:  # noqa: BLE001
+            if isinstance(e, urllib.error.HTTPError):
+                e.close()                                  # a receiver's error reply is never read
             log("post to %s failed: %s" % (name, e.__class__.__name__)); oks.append(False)
     if ENV("SLACK_WEBHOOK_URL"):
         def slack():
@@ -968,12 +1047,13 @@ def process(payload):
 
 # At most this many process() workers at once, inside the container's 256 MiB: an OOM restart would
 # also forget the hourly run cap and the dedup map. One attacker-shaped 8 MiB alert list costs 109 MiB
-# while it is parsed, so get_json parses one body at a time and every fetcher keeps only a bounded
-# copy of it: VmHWM 157 MiB, 351 MiB without the lock (audit run-5 section H, 4 workers, worst of 60
-# trials in three runs; see _UPSTREAM), and 128 MiB for 30 alerts of ~25k short labels each, 396 MiB while their
-# labels were kept by reference (audit run-6, worst of 6; see MAX_LABELS). A group that arrives while every slot
-# is busy is dropped with a log line, not queued: it is not marked triaged, so Alertmanager's next
-# notification for it can still be triaged.
+# while it is parsed, so get_json parses one body at a time (each worker may hold its own raw bytes,
+# up to 8 MiB, while it waits) and every fetcher keeps only a bounded copy of what it parsed. VmHWM,
+# 4 workers: 165 MiB, 351 MiB without the lock (audit run-5 section H, worst of 60 trials in three
+# runs; see _UPSTREAM), and 143 MiB for 30 alerts of ~25k short labels each, 405 MiB while their
+# labels were kept by reference (audit run-6, worst of 12; see MAX_LABELS). A group that arrives
+# while every slot is busy is dropped with a log line, not queued: it is not marked triaged, so
+# Alertmanager's next notification for it can still be triaged.
 MAX_WORKERS = 4
 WORKERS = threading.BoundedSemaphore(MAX_WORKERS)
 
@@ -983,6 +1063,9 @@ def _work(payload):
         process(payload)
     finally:
         WORKERS.release()
+
+
+BODY_SECONDS = 5   # wall-clock seconds to read one webhook body; a 1 MiB body on a live link takes far less
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -1003,16 +1086,28 @@ class Handler(BaseHTTPRequestHandler):
             n = -1
         if n < 0 or n > MAX_BODY:                # refused before a single body byte is read
             self.send_response(413 if n > MAX_BODY else 400); self.end_headers(); return
-        # A slot is taken before the body is read or parsed (audit run-6): with every slot busy, a group
-        # costs no parse at all. It gets 200 (Alertmanager retries on non-2xx) and is dropped, not
-        # dedup-marked, so its next notification can still be triaged. Every other path gives the slot back.
+        # The body's bytes are read under a wall-clock deadline, holding no worker slot: Handler.timeout
+        # counts only silence, so a sender trickling a byte at a time kept the read going, and with
+        # the slot taken first four such senders held every slot (audit run-6, ruling R48b).
+        # SHUT_RD, so the 408 still goes out.
+        guard = _Deadline(BODY_SECONDS, socket.SHUT_RD)
+        guard.add(self.connection)
+        try:
+            body = self.rfile.read(n)
+        finally:
+            guard.cancel()
+        if len(body) < n:
+            self.send_response(408 if guard.fired else 400); self.end_headers(); return
+        # Only then a slot, and no parse without one: with every slot busy the group gets 200
+        # (Alertmanager retries on non-2xx) and is dropped unparsed, not dedup-marked, so its next
+        # notification can still be triaged. Every other path gives the slot back.
         if not WORKERS.acquire(blocking=False):
             log("skip: %d triage runs already in progress" % MAX_WORKERS)
             self.send_response(200); self.end_headers(); return
         handed, status = False, 400
         try:
             try:
-                payload = json.loads(self.rfile.read(n).decode() or "{}")
+                payload = json.loads(body.decode() or "{}")
             except ValueError:
                 payload = None
             if isinstance(payload, dict):                 # process() reads it as an object

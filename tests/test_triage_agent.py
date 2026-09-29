@@ -256,10 +256,15 @@ class PackTests(unittest.TestCase):
     def test_default_patterns_are_not_quadratic_on_a_repeated_prefix(self):
         # the Authorization and user:pass@ patterns backtracked O(n^2) on their
         # own prefix repeated with no terminator - 3.3 s and 0.5 s here, GIL held throughout
+        # best of three: a quadratic pattern is slow on every run, while a worker thread an earlier
+        # test left running can steal the GIL from any single one
         for s in ("authorization:" * 8000, "://a:" * 8000):
-            start = time.monotonic()
-            self.agent._redact(s, self.agent.DEFAULT_REDACT)
-            self.assertLess(time.monotonic() - start, 0.1, s[:20])
+            best = 9e9
+            for _ in range(3):
+                start = time.monotonic()
+                self.agent._redact(s, self.agent.DEFAULT_REDACT)
+                best = min(best, time.monotonic() - start)
+            self.assertLess(best, 0.1, s[:20])
 
     def test_each_string_is_capped_before_any_regex_runs(self):
         # trim() never shortens a single annotation, so without this a 100 KB one reaches every pattern
@@ -724,7 +729,7 @@ class PackTests(unittest.TestCase):
             self.assertLess(elapsed, 0.5, "POST /alert must return well before the slow upstream call finishes")
         finally:
             Fake.sleep_prefix = None; Fake.sleep_seconds = 0
-            srv.shutdown()
+            srv.shutdown(); srv.server_close()
 
     def test_combine_reports_unreachable_over_a_partial_ok(self):
         # a single logical endpoint (e.g. /api/v1/query, hit once for rule_now and once for up) must
@@ -956,7 +961,7 @@ class PackTests(unittest.TestCase):
             line = next(l for l in out.splitlines() if l.startswith("{"))
             self.assertEqual(json.loads(line)["schema_version"], 1)
         finally:
-            srv.shutdown()
+            srv.shutdown(); srv.server_close()
 
 
 class ToolTests(unittest.TestCase):
@@ -1074,31 +1079,23 @@ class ToolTests(unittest.TestCase):
         self.assertEqual(p["sources"]["alertmanager"], "unreachable"); self.assertEqual(p["firing"], [])
         self.assertEqual(p["sources"]["rules"], "ok")
 
-    def test_upstream_bodies_are_read_and_parsed_one_at_a_time(self):
+    def test_upstream_bodies_are_parsed_one_at_a_time(self):
         # audit run-5 section H: four workers each decoding and parsing an attacker-shaped 8 MiB alert
-        # list at once reached a VmHWM of 351 MiB (worst of 20 trials) against the 256 MiB limit. One body's read, decode and json.loads finish before
-        # another body's read starts.
-        inside, peak, lock, gate, real_loads = [0], [0], threading.Lock(), threading.Barrier(2), json.loads
+        # list at once reached a VmHWM of 351 MiB (worst of 20 trials) against the 256 MiB limit. The
+        # network reads may overlap (review ruling R48: they hold no lock); the parses never do.
+        inside, peak, lock, real_loads = [0], [0], threading.Lock(), json.loads
         class Resp:
-            def __enter__(self):
-                with lock:
-                    inside[0] += 1; peak[0] = max(peak[0], inside[0])
-                return self
+            def __init__(self): self.body = [b'{"ok": true}']
+            def __enter__(self): return self
             def __exit__(self, *a): return False
-            def read1(self, n):
-                if getattr(self, "done", False):
-                    return b""
-                self.done = True
-                try:
-                    gate.wait(timeout=1)    # both threads meet here unless the reads are serialised
-                except threading.BrokenBarrierError:
-                    pass
-                return b'{"ok": true}'
+            def read1(self, n): return self.body.pop() if self.body else b""
         def loads(s, *a, **k):
-            r = real_loads(s, *a, **k)
+            with lock:
+                inside[0] += 1; peak[0] = max(peak[0], inside[0])
+            time.sleep(0.2)                  # long enough for the other thread to arrive if it could
             with lock:
                 inside[0] -= 1
-            return r
+            return real_loads(s, *a, **k)
         out = []
         with mock.patch.object(self.agent._OPENER, "open", lambda req, timeout: Resp()), \
              mock.patch.object(self.agent.json, "loads", loads):
@@ -1106,49 +1103,66 @@ class ToolTests(unittest.TestCase):
             for t in ts: t.start()
             for t in ts: t.join()
         self.assertEqual(out, [{"ok": True}, {"ok": True}])
-        self.assertEqual(peak[0], 1, "two upstream bodies were being read or parsed at the same time")
+        self.assertEqual(peak[0], 1, "two upstream bodies were being parsed at the same time")
 
     def test_upstream_lock_wait_counts_against_the_call_timeout(self):
-        # review round 1: waiting for the parse lock and then calling urlopen with the full timeout let
-        # one call take twice its timeout, and build_pack overrun TOTAL_DEADLINE. urlopen gets what is left.
-        seen = []
+        # review round 1 (run-5): the wait for the parse lock counts, so one call never takes more
+        # than its timeout and build_pack keeps to TOTAL_DEADLINE.
         class Resp:
+            def __init__(self): self.body = [b'{"ok": true}']
             def __enter__(self): return self
             def __exit__(self, *a): return False
-            def read1(self, n, body=[b'{"ok": true}']): return body.pop() if body else b""
-        self.agent._UPSTREAM.acquire()
-        threading.Timer(0.3, self.agent._UPSTREAM.release).start()
-        with mock.patch.object(self.agent._OPENER, "open", lambda req, timeout: seen.append(timeout) or Resp()):
-            self.assertEqual(self.agent.get_json("http://am/api/v2/alerts", timeout=0.5), {"ok": True})
-        self.assertEqual(len(seen), 1)
-        self.assertTrue(0 < seen[0] <= 0.25, seen)
+            def read1(self, n): return self.body.pop() if self.body else b""
+        with mock.patch.object(self.agent._OPENER, "open", lambda req, timeout: Resp()), mock.patch("builtins.print"):
+            self.agent._UPSTREAM.acquire()
+            threading.Timer(1.0, self.agent._UPSTREAM.release).start()
+            t0 = time.monotonic()
+            self.assertIsNone(self.agent.get_json("http://am/api/v2/alerts", timeout=0.3))
+            self.assertLess(time.monotonic() - t0, 0.6)
+            time.sleep(1.0)
+            self.agent._UPSTREAM.acquire()
+            threading.Timer(0.2, self.agent._UPSTREAM.release).start()
+            self.assertEqual(self.agent.get_json("http://am/api/v2/alerts", timeout=0.6), {"ok": True})
 
-    def test_run6_a_trickling_upstream_releases_the_lock_by_the_call_timeout(self):
-        # audit run-6 (h1, h2, h9): the lock was held for the whole body read, and a socket timeout only
-        # fires on silence, so an upstream sending a few bytes at a time held it for as long as it liked.
-        lst = socket.socket(); lst.bind(("127.0.0.1", 0)); lst.listen(1)
-        self.addCleanup(lst.close)
-        def trickle():
-            c, _ = lst.accept()
-            try:
-                c.recv(65536)
-                c.sendall(b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 100000\r\n\r\n[")
-                end = time.monotonic() + 6
-                while time.monotonic() < end:
-                    c.sendall(b"1," * 5); time.sleep(0.05)
-            except OSError:
-                pass
-            finally:
-                c.close()
-        threading.Thread(target=trickle, daemon=True).start()
-        out = []
-        t = threading.Thread(target=lambda: out.append(self.agent.get_json("http://127.0.0.1:%d/x" % lst.getsockname()[1], timeout=1.0)))
-        start = time.monotonic(); t.start(); time.sleep(0.2)
-        self.assertTrue(self.agent._UPSTREAM.acquire(timeout=10))
-        held = time.monotonic() - start
-        self.agent._UPSTREAM.release(); t.join(10)
-        self.assertEqual(out, [None])
-        self.assertLess(held, 1.8, "the parse lock was held %.1fs by a 1s call" % held)
+    def test_run6_a_trickling_upstream_is_cut_at_the_call_timeout(self):
+        # audit run-6 (h1, h2, h9), review ruling R48: a socket timeout only fires on silence, so an
+        # upstream sending a few bytes at a time kept the read going for as long as it liked, while
+        # holding the parse lock -- a Content-Length body, a chunk-size line and a header line alike.
+        # Each call now ends at its own wall-clock timeout, and the lock stays free throughout.
+        shapes = {"content-length body": (b"HTTP/1.1 200 OK\r\nContent-Length: 100000\r\n\r\n[", b"1,1,1,1,1,"),
+                  "chunk-size line": (b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n1;", b"aaaaaaaaaa"),
+                  "header line": (b"HTTP/1.1 200 OK\r\nX-Pad: ", b"aaaaaaaaaa"),
+                  # a body that ends at close, whose bytes before the cut already parse: http.client sees
+                  # a normal end there, so the cut itself must fail the call
+                  "close-delimited, valid JSON before the cut": (b"HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n[1]", b"          ")}
+        for name, (head, trickle) in shapes.items():
+            with self.subTest(name):
+                lst = socket.socket(); lst.bind(("127.0.0.1", 0)); lst.listen(1)
+                self.addCleanup(lst.close)
+                def serve(lst=lst, head=head, trickle=trickle):
+                    c, _ = lst.accept()
+                    try:
+                        c.recv(65536); c.sendall(head)
+                        end = time.monotonic() + 6
+                        while time.monotonic() < end:
+                            c.sendall(trickle); time.sleep(0.05)
+                    except OSError:
+                        pass
+                    finally:
+                        c.close()
+                threading.Thread(target=serve, daemon=True).start()
+                out = []
+                t = threading.Thread(target=lambda: out.append(self.agent.get_json("http://127.0.0.1:%d/x" % lst.getsockname()[1], timeout=1.0)))
+                with mock.patch("builtins.print"):
+                    start = time.monotonic(); t.start(); time.sleep(0.3)
+                    lock_free = self.agent._UPSTREAM.acquire(timeout=10)   # never held for the network read
+                    waited = time.monotonic() - start - 0.3
+                    self.agent._UPSTREAM.release()
+                    t.join(10)
+                took = time.monotonic() - start
+                self.assertEqual(out, [None])
+                self.assertTrue(lock_free and waited < 0.2, "the parse lock was held %.1fs during the network read" % waited)
+                self.assertLess(took, 1.8, "a 1s call took %.1fs" % took)
 
     def test_run6_a_credentialed_request_never_follows_a_redirect_to_another_origin(self):
         # audit run-6 (h9): urllib's default redirect handler copies every header to the new URL,
@@ -2033,7 +2047,8 @@ class IngressTests(unittest.TestCase):
         # or four such failures would stop triage for good.
         # only the agent's own worker thread fails: the server's per-request threads come from socketserver
         def start(): raise RuntimeError("can't start new thread")
-        no_threads = types.SimpleNamespace(Thread=lambda *a, **k: types.SimpleNamespace(start=start))
+        no_threads = types.SimpleNamespace(Thread=lambda *a, **k: types.SimpleNamespace(start=start),
+                                           Timer=threading.Timer, Lock=threading.Lock)   # the body deadline still works
         with mock.patch.object(self.agent, "threading", no_threads), mock.patch("builtins.print"):
             for _ in range(5):
                 self.assertEqual(self._post(), 200)
@@ -2050,15 +2065,15 @@ class IngressTests(unittest.TestCase):
             self.assertEqual(self._post(), 200)
         self.assertEqual(free_at_parse, [3], "the body was parsed without holding a worker slot")
 
-    def test_run6_with_every_slot_busy_a_group_is_dropped_unread_and_unparsed(self):
+    def test_run6_with_every_slot_busy_a_group_is_dropped_unparsed(self):
         import io, contextlib
         self.assertTrue(all(self.agent.WORKERS.acquire(blocking=False) for _ in range(4)))
         self.addCleanup(lambda: [self.agent.WORKERS.release() for _ in range(4)])
-        buf = io.StringIO()
+        buf, body = io.StringIO(), json.dumps(WEBHOOK).encode()
         with mock.patch.object(self.agent, "process") as proc, mock.patch.object(self.agent.json, "loads", wraps=json.loads) as loads, \
              contextlib.redirect_stdout(buf):
-            out, _ = self._raw(self._head(100))            # headers only: the body never arrives, and is never waited for
-            self.assertTrue(out.startswith(b"HTTP/1.0 200"), "expected an immediate 200, got %r" % out[:40])
+            out, _ = self._raw(self._head(len(body)), body)
+            self.assertTrue(out.startswith(b"HTTP/1.0 200"), "expected 200, got %r" % out[:40])
             self.assertEqual(self._post(), 200)
         proc.assert_not_called(); self.assertEqual(loads.call_count, 0)
         self.assertEqual(buf.getvalue().count("skip: 4 triage runs already in progress"), 2)
@@ -2071,6 +2086,48 @@ class IngressTests(unittest.TestCase):
                 time.sleep(0.05)
         proc.assert_called_once()
         self.agent.WORKERS.acquire(timeout=2)
+
+    def test_run6_a_trickled_body_holds_no_slot_and_is_refused_by_its_deadline(self):
+        # review ruling R48b: with the slot taken before the body was read, four senders trickling a
+        # byte at a time held every slot for as long as they kept sending (Handler.timeout counts only
+        # silence). The body is now read under a wall-clock deadline, before any slot is taken.
+        n, ended, codes, real_send = 1000, [], [], self.agent.Handler.send_response
+        def send_response(handler, code, *a):
+            codes.append(code); return real_send(handler, code, *a)
+        def trickle():
+            c = socket.create_connection(("127.0.0.1", self.port), timeout=10)
+            c.sendall(self._head(n)); t0, out = time.monotonic(), b""
+            try:
+                while time.monotonic() - t0 < 4:
+                    c.sendall(b"{"); time.sleep(0.05)
+                    c.setblocking(False)
+                    try:
+                        out = c.recv(100)
+                        break                    # the answer, or EOF
+                    except BlockingIOError:
+                        pass
+                    finally:
+                        c.setblocking(True)
+            except OSError:                      # a byte sent after the answer can draw a reset
+                pass
+            ended.append((out[:12], time.monotonic() - t0)); c.close()
+        with mock.patch.object(self.agent, "BODY_SECONDS", 1), mock.patch.object(self.agent, "process") as proc, \
+             mock.patch.object(self.agent.Handler, "send_response", send_response):
+            ts = [threading.Thread(target=trickle) for _ in range(4)]
+            for t in ts: t.start()
+            time.sleep(0.5)
+            self.assertEqual(self.agent.WORKERS._value, 4, "a trickled body holds a worker slot")
+            self.assertEqual(self._post(), 200)           # a genuine group still gets a slot meanwhile
+            for t in ts: t.join(10)
+        for _ in range(50):
+            if proc.called: break
+            time.sleep(0.05)
+        proc.assert_called_once()
+        self.assertEqual(sorted(codes), [200, 408, 408, 408, 408])
+        self.assertEqual(len(ended), 4)
+        for out, took in ended:
+            self.assertIn(out, (b"HTTP/1.0 408", b""))     # the 408, or the reset a later byte drew
+            self.assertLess(took, 2.5)
 
     def test_run6_a_bad_or_unread_body_gives_its_slot_back(self):
         with mock.patch.object(self.agent, "process") as proc:
