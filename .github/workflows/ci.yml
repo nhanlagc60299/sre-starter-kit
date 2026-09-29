@@ -4,11 +4,20 @@ on:
     branches: [main]
   pull_request:
 
+# pull_request has no branch filter, so a PR author's own checked-out code runs as `make test` /
+# `make smoke` below. `contents: read` is all any job needs, and persist-credentials: false keeps
+# that (now read-only) token out of .git/config entirely, rather than trusting a repo setting this
+# file can't show. tests/test_ci_permissions.sh guards both.
+permissions:
+  contents: read
+
 jobs:
   static:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
       - name: Install build deps
         run: sudo apt-get update && sudo apt-get install -y gettext-base python3-yaml
       - run: make validate
@@ -17,17 +26,20 @@ jobs:
       - run: bash tests/test_init.sh
       - run: bash tests/test_env_example.sh
       - run: bash tests/test_triage_agent.sh
+      - run: bash tests/test_features_counts.sh
 
   smoke:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
       - name: Install build deps
         run: sudo apt-get update && sudo apt-get install -y gettext-base python3-yaml
       - run: make smoke
         env:
           SMOKE_PACK_OUT: ${{ runner.temp }}/triage-sample-pack.json
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         if: always()
         with:
           name: triage-sample-pack

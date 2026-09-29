@@ -21,10 +21,10 @@ and AI triage notes that run inside your own network with your own Anthropic key
 | Container metrics | cAdvisor (optional profile) | ✓ |
 | HTTP probes | blackbox exporter for every service you list (`SERVICES=`) | ✓ |
 | Logs | Loki + Grafana Alloy (Promtail is EOL and not used) | ✓ |
-| Alert rules | 16 Prometheus (infra + app) + 4 Loki (log bursts, HTTP 5xx in access logs, SSH failed-login burst, root login) | 40 to 65 Prometheus depending on modules + 4 Loki + 5 recording rules |
+| Alert rules | 16 Prometheus (infra + app) + 4 Loki (log bursts, HTTP 5xx in access logs, SSH failed-login burst, root login) | 18 to 66 Prometheus depending on modules + 4 Loki + 5 recording rules |
 | Receivers | Slack, Discord, email (SMTP), Telegram, MS Teams. Any one is enough | ✓ |
-| Routing | critical → now, repeats hourly; warning → batched every 30 min; NodeDown silences the node's other alerts | + service down silences its error/latency/SLO alerts; exporter down silences its AWS alerts (12 inhibit rules) |
-| Alert documentation | `docs/ALERTS.md`: one section per alert, what fires it and where to look first | `runbooks/<Alert>.md`: 69 files, same headings every time (meaning, first checks, usual causes, mitigation, root-cause fix), linked from every notification; a test fails the build if an alert has no runbook or a runbook has no alert |
+| Routing | critical → now, repeats hourly; warning → batched every 30 min; NodeDown silences the node's other alerts | + service down silences its error/latency/SLO alerts; exporter down silences its AWS alerts (13 inhibit rules) |
+| Alert documentation | `docs/ALERTS.md`: one section per alert, what fires it and where to look first | `runbooks/<Alert>.md`: 70 files, same headings every time (meaning, first checks, usual causes, mitigation, root-cause fix), linked from every notification; a test fails the build if an alert has no runbook or a runbook has no alert |
 | Dashboards | Overview, Node, App | + Container, Logs, AWS, Airflow, Kubernetes, SLO, Postgres (9 total) |
 | AWS CloudWatch module | — | YACE discovers RDS, ALB, EC2 and NAT gateways by tag: RDS storage, CPU, connections, replica lag, CPU credits, gp2 burst balance; ALB 5xx and unhealthy targets; EC2 status checks, CPU credits, surplus-credit charges; NAT gateway port-allocation errors and drops; on-demand vCPU quota (`EC2_VCPU_QUOTA`); billing threshold. Instance role or access key |
 | Ops module | — | Backup dead man's switch (one line at the end of each backup job), RDS snapshot age, Watchdog → healthchecks.io, AWS billing threshold |
@@ -52,7 +52,10 @@ the kit's own services only:
 - Grafana deploy annotations from the last two hours
 - the alert's runbook (Pro: the real `runbooks/<Alert>.md` file)
 
-It redacts passwords, tokens, API keys, webhook URLs and emails, trims the pack to 40 KB, and in Pro
+It redacts what it recognises as a credential -- best-effort pattern matching that **will miss
+some secrets**: it removes values in common shapes such as `password=...`, `Authorization: Bearer
+...` or a PEM private key, and anything in another shape passes through (see the README's AI triage
+section) -- trims the pack to 40 KB, and in Pro
 asks Claude for a note with a fixed shape: probable causes with the number or log line each rests
 on, whether a deploy lines up, what to check first (only commands that appear verbatim in the
 runbook), and what it did not see. The note is at most 25 lines and ends with where to find the
@@ -86,7 +89,9 @@ billed to your own Anthropic account. There is no subscription and no server of 
 ## What is deliberately not in either tier
 
 - No hosted service, no data of yours on our side. The only thing that ever leaves your network is
-  the redacted triage pack, and only in Pro, and only to Anthropic with your key.
+  the redacted triage pack, and only in Pro, and only to the model provider you configure, with your
+  key. Redaction is best-effort, so that provider and your receivers are trusted recipients of the
+  alert's error log lines.
 - No on-call scheduling or escalation; PagerDuty and friends do that better.
 - No automatic remediation. The kit reads; people act.
 - No support for Alertmanagers outside the kit.

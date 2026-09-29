@@ -190,3 +190,38 @@ tests:
               dashboard: sre-overview
               summary: "Container pinned has been hitting its memory limit for 15m"
               runbook_url: https://github.com/nhanlagc60299/sre-starter-kit/blob/main/docs/ALERTS.md#containeratmemoryceiling
+  # Audit run-7 review round 1: node-exporter and Alloy run as DaemonSet pods on every node, so a
+  # compromised node answers for job="node" and job="alloy" as well as for its kubelet. Host series
+  # from Alloy's job and container series from node-exporter's must not page, and must not keep
+  # ContainerMetricsMissing quiet: node_* selects job="node", container_* job="cadvisor".
+  - interval: 1m
+    input_series:
+      - series: 'node_filesystem_avail_bytes{job="alloy",instance="n9",mountpoint="/",fstype="ext4"}'
+        values: '1x30'
+      - series: 'node_filesystem_size_bytes{job="alloy",instance="n9",mountpoint="/",fstype="ext4"}'
+        values: '100x30'
+      - series: 'node_memory_MemAvailable_bytes{job="alloy",instance="n9"}'
+        values: '1x30'
+      - series: 'node_memory_MemTotal_bytes{job="alloy",instance="n9"}'
+        values: '100x30'
+      - series: 'node_cpu_seconds_total{job="alloy",instance="n9",cpu="0",mode="idle"}'
+        values: '0x30'
+      - series: 'up{job="cadvisor",instance="cadvisor:8080"}'
+        values: '1x30'
+      - series: 'container_memory_working_set_bytes{job="node",instance="n9",name="victim"}'
+        values: '95x30'
+      - series: 'container_spec_memory_limit_bytes{job="node",instance="n9",name="victim"}'
+        values: '100x30'
+    alert_rule_test:
+      - { eval_time: 25m, alertname: DiskFull, exp_alerts: [] }
+      - { eval_time: 25m, alertname: HighMemory, exp_alerts: [] }
+      - { eval_time: 25m, alertname: HighCPU, exp_alerts: [] }
+      - { eval_time: 25m, alertname: ContainerMemoryNearLimit, exp_alerts: [] }
+      - eval_time: 8m
+        alertname: ContainerMetricsMissing
+        exp_alerts:
+          - exp_labels: { severity: critical, module: infra, job: cadvisor, instance: "cadvisor:8080" }
+            exp_annotations:
+              dashboard: sre-overview
+              summary: "cAdvisor is up but reporting no containers; every container alert is blind"
+              runbook_url: https://github.com/nhanlagc60299/sre-starter-kit/blob/main/docs/ALERTS.md#containermetricsmissing

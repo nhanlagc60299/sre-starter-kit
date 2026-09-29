@@ -1,10 +1,29 @@
 groups:
   - name: security
     rules:
+      # Both rules read only what sshd writes itself, never text an SSH client chooses (a username,
+      # a non-SSH banner, a disconnect reason: sshd logs all three mid-line, and the last two may
+      # hold ":", "[" and "]"; audit run-5 C2, run-6 C1). So the event must sit at the true start of
+      # the message, anchored at "^": in file mode after exactly the syslog prefix rsyslog writes,
+      # traditional "Mmm [ d]d hh:mm:ss host " or RFC3339 "2026-09-29T10:00:00.123456+00:00 host "
+      # (Ubuntu 24.04), then "sshd[pid]: " or "sshd-session[pid]: "; in journal mode the line is
+      # MESSAGE, which starts with sshd's own text. rsyslog's "message repeated N times: [ ... ]"
+      # wrapper (Ubuntu's $RepeatedMsgReduction) is allowed right after that prefix; such a line counts
+      # once. The event ends in sshd's own "from <addr> port <n> ssh2", and the greedy ".*" makes the
+      # ip sshd's last, real "from" (IPv6 too). A root accept may end only in "ssh2" or in what
+      # OpenSSH's auth.c format_method_key() writes after it: "<TYPE> SHA256:<fp>", for a certificate
+      # "<TYPE> SHA256:<fp> ID <key id> (serial <n>) CA <TYPE> SHA256:<fp>", either one then
+      # ", signature count = <n>" for a FIDO key. The key ID is the CA's text, bounded here, and sits
+      # after sshd's own anchored prefix. Other syslog timestamp formats are not matched.
+      # Methods (auth.c auth_log(), audit run-7): password, keyboard-interactive/pam and
+      # gssapi-with-mic for both rules, publickey and hostbased for the root rule. A hostbased line
+      # ends in ', client user "<u>", client host "<h>"', text the CLIENT chooses (100 characters
+      # each, vis-escaped), so it is allowed only after an anchored root accept, and a failed
+      # hostbased line is not counted: that client text after sshd's "from" could name any address.
       - alert: SSHFailedLoginBurst
         expr: |
           sum by (ip) (
-            count_over_time({job="authlog"} |= "Failed password" | regexp `from (?P<ip>\d+\.\d+\.\d+\.\d+)` [5m])
+            count_over_time({job="authlog"} |~ `^(?:(?:[A-Z][a-z]{2} [ 0-9]\d \d{2}:\d{2}:\d{2}|\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})) \S+ sshd(?:-session)?\[\d+\]: (?:message repeated \d+ times: \[ )?)?Failed (?:password|keyboard-interactive/pam|gssapi-with-mic) for (?:invalid user )?.* from \S+ port \d+ ssh2(?: ?\])?$` | regexp `.* from (?P<ip>\S+) port \d+ ssh2( ?\])?$` [5m])
           ) > 20
         for: 1m
         labels: { severity: warning, module: security }
@@ -15,7 +34,7 @@ groups:
 
       - alert: RootLoginDetected
         expr: |
-          sum(count_over_time({job="authlog"} |~ "Accepted (password|publickey) for root" [5m])) > 0
+          sum(count_over_time({job="authlog"} |~ `^(?:(?:[A-Z][a-z]{2} [ 0-9]\d \d{2}:\d{2}:\d{2}|\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})) \S+ sshd(?:-session)?\[\d+\]: (?:message repeated \d+ times: \[ )?)?Accepted (?:password|publickey|keyboard-interactive/pam|hostbased|gssapi-with-mic) for root from \S+ port \d+ ssh2(?:: [A-Z0-9-]+ SHA256:[A-Za-z0-9+/]{43}(?: ID .{0,300} \(serial \d+\) CA [A-Z0-9-]+ SHA256:[A-Za-z0-9+/]{43})?(?:, signature count = \d+|, client user ".{0,400}", client host ".{0,400}")?)?(?: ?\])?$` [5m])) > 0
         labels: { severity: warning, module: security }
         annotations:
           dashboard: sre-overview

@@ -41,10 +41,12 @@ line is added; if anything fails at all, nothing is posted and one line goes to 
 A small Python agent inside the stack (standard library only, about 500 lines you can read)
 receives a copy of every critical alert. It gathers the firing rule and a 30-minute trend from
 Prometheus, the last error lines from Loki, the other firing alerts, deploy annotations from the
-last two hours, and the alert's runbook. It redacts passwords, tokens, keys, webhook URLs and
-emails, trims the pack to 40 KB, and sends it from your host straight to the Anthropic API with
-your key. There is no server of mine in the path. No subscription, no quota, no data of yours on
-my side.
+last two hours, and the alert's runbook. It redacts what it recognises as a credential
+(`password=...`, bearer tokens, PEM keys, webhook URLs), but that is best-effort pattern matching
+and it will miss some secrets, so the model provider and your alert channels are trusted recipients
+of those log lines. It trims the pack to 40 KB and sends it from your host straight to the Anthropic
+API with your key. There is no server of mine in the path. No subscription, no quota, no data of
+yours on my side.
 
 Dry run is the default: the agent prints the pack to its own log and sends nothing, so you can read
 exactly what would leave before you paste a key. The free tier stops there.

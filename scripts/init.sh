@@ -26,10 +26,10 @@ ask_pct() { # var prompt default -- integer 1-99
 q() { printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"; }  # shell-quote a value for .env
 echo "== SRE Starter Kit setup =="
 ask PROJECT_NAME "Project name" "myproject"
-ask SLACK_WEBHOOK_URL "Slack webhook URL (optional if you set another receiver below)" ""
-ask TELEGRAM_BOT_TOKEN "Telegram bot token (optional)" ""
+ask_secret SLACK_WEBHOOK_URL "Slack webhook URL (optional if you set another receiver below)"
+ask_secret TELEGRAM_BOT_TOKEN "Telegram bot token (optional)"
 ask TELEGRAM_CHAT_ID "Telegram chat id (optional)" ""
-ask TEAMS_WEBHOOK_URL "MS Teams Workflows webhook URL (optional)" ""
+ask_secret TEAMS_WEBHOOK_URL "MS Teams Workflows webhook URL (optional)"
 echo "Services to probe, one per line as name=http://host:port/health. Empty line to finish."
 echo "Name each probe after its compose service name so its logs and metrics line up in the dashboards."
 svcs=()
@@ -45,7 +45,23 @@ ask_pct DISK_WARN_PCT "Disk free % warning threshold" "15"
 ask_pct DISK_CRIT_PCT "Disk free % critical threshold" "5"
 ask PROM_RETENTION_TIME "Prometheus retention" "15d"
 ask LOKI_RETENTION_PERIOD "Loki retention" "168h"
-ask GRAFANA_ADMIN_PASSWORD "Grafana admin password" "change-me"
+# Re-asked in place (never a new question: the positional tests) until Grafana would accept it --
+# 4+ characters, its own `grafana cli admin reset-admin-password` minimum -- has no line break, and
+# is not Grafana's shipped default 'admin'. A refused value, typed or kept from an older .env, is dropped first, so
+# the next empty answer (or EOF) falls through to the generated password below instead of looping.
+while true; do
+  ask_secret GRAFANA_ADMIN_PASSWORD "Grafana admin password"
+  case "$GRAFANA_ADMIN_PASSWORD" in admin|?|??|???|*$'\n'*|*$'\r'*) ;; *) break ;; esac
+  echo "  Grafana needs at least 4 characters, no line break, and not 'admin'; empty generates one"
+  GRAFANA_ADMIN_PASSWORD=
+done
+# Empty on a first run (no previous value to keep) or still the public default from an .env
+# written before this fix: generate one rather than keeping either. Same CSPRNG idiom as the
+# triage webhook token below, hex so it is easy to read back out of .env if you ever need to.
+if [ -z "$GRAFANA_ADMIN_PASSWORD" ] || [ "$GRAFANA_ADMIN_PASSWORD" = "change-me" ]; then
+  GRAFANA_ADMIN_PASSWORD=$(od -An -tx1 -N24 /dev/urandom | tr -d ' \n')
+  echo "Generated a random Grafana admin password (see .env, GRAFANA_ADMIN_PASSWORD)."
+fi
 # Keep the current setting as the default so a re-run does not silently re-enable it.
 case "${MODULE_SECURITY:-true}" in true) sec_default=y ;; *) sec_default=n ;; esac
 ask MODULE_SECURITY_ANS "Enable SSH early-warning alerts? (y/n)" "$sec_default"
@@ -58,7 +74,7 @@ case "$CADVISOR_ANS" in y|Y|yes|YES) COMPOSE_PROFILES=cadvisor ;; *) COMPOSE_PRO
 if [ "$MODULE_SECURITY" = true ]; then
   ask AUTH_LOG_PATH "Auth log path (RHEL/Amazon Linux: /var/log/secure)" "/var/log/auth.log"
 fi
-ask DISCORD_WEBHOOK_URL "Discord webhook URL (optional)" ""
+ask_secret DISCORD_WEBHOOK_URL "Discord webhook URL (optional)"
 ask ALERT_EMAIL_TO "Email address(es) for alerts, comma-separated (optional)" ""
 if [ -n "$ALERT_EMAIL_TO" ]; then
   ask SMTP_HOST "SMTP host:port (STARTTLS)" "smtp.gmail.com:587"
@@ -73,8 +89,11 @@ case "${TRIAGE_WEBHOOK_URL:-}" in http://triage-agent:9096/alert) tri_default=y 
 ask TRIAGE_ANS "Enable the triage agent? Free tier: dry-run context packs in the agent log, no AI notes (y/n)" "$tri_default"
 case "$TRIAGE_ANS" in y|Y|yes|YES)
   COMPOSE_PROFILES="${COMPOSE_PROFILES:+$COMPOSE_PROFILES,}triage"
-  TRIAGE_WEBHOOK_URL=http://triage-agent:9096/alert ;;
-*) TRIAGE_WEBHOOK_URL=http://localhost:9/ ;;
+  TRIAGE_WEBHOOK_URL=http://triage-agent:9096/alert
+  # The secret Alertmanager sends the agent (render.sh adds it to webhook-triage). Not asked: kept
+  # when set, generated otherwise. Hex, because the agent compares it as bytes and needs ASCII.
+  [ -n "${TRIAGE_WEBHOOK_TOKEN:-}" ] || TRIAGE_WEBHOOK_TOKEN=$(od -An -tx1 -N24 /dev/urandom | tr -d ' \n') ;;
+*) TRIAGE_WEBHOOK_URL=http://localhost:9/; TRIAGE_WEBHOOK_TOKEN= ;;
 esac
 TRIAGE_DRY_RUN=true
 # Telegram needs both the bot token and the chat id to actually notify anyone; the token alone
@@ -82,6 +101,9 @@ TRIAGE_DRY_RUN=true
 tg=""; [ -n "${TELEGRAM_BOT_TOKEN:-}" ] && [ -n "${TELEGRAM_CHAT_ID:-}" ] && tg=1
 [ -z "${SLACK_WEBHOOK_URL}${DISCORD_WEBHOOK_URL}${ALERT_EMAIL_TO}${tg}${TEAMS_WEBHOOK_URL}" ] && { echo "ERROR: configure at least one receiver (Slack, Discord, email, Telegram or Teams)." >&2; exit 1; }
 
+# umask 077 covers a new .env; an existing one keeps its old mode through the rewrite below, so
+# tighten it first -- the secrets are never written into a group- or world-readable file.
+if [ -e "$ROOT/.env" ]; then chmod 600 "$ROOT/.env"; fi
 cat > "$ROOT/.env" <<ENV
 PROJECT_NAME=$(q "$PROJECT_NAME")
 BIND_ADDR=$(q "${BIND_ADDR:-127.0.0.1}")
@@ -100,6 +122,8 @@ SMTP_PASSWORD=$(q "${SMTP_PASSWORD:-}")
 TRIAGE_WEBHOOK_URL=$(q "${TRIAGE_WEBHOOK_URL:-http://localhost:9/}")
 TRIAGE_DRY_RUN=$(q "${TRIAGE_DRY_RUN:-true}")
 TRIAGE_REDACT=$(q "${TRIAGE_REDACT:-}")
+TRIAGE_WEBHOOK_TOKEN=$(q "${TRIAGE_WEBHOOK_TOKEN:-}")
+TRIAGE_MAX_RUNS_PER_HOUR=$(q "${TRIAGE_MAX_RUNS_PER_HOUR:-}")
 SERVICES=$(q "${SERVICES:-}")
 DISK_WARN_PCT=$(q "$DISK_WARN_PCT")
 DISK_CRIT_PCT=$(q "$DISK_CRIT_PCT")

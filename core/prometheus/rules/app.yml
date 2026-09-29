@@ -33,10 +33,14 @@ groups:
 
       # The three rules below need the app to expose http_requests_total{service,status}
       # and http_request_duration_seconds_bucket{service,le}. See README "App metrics".
+      # job!~"kubelet|cadvisor|node|alloy": on Kubernetes those four jobs scrape a body a node writes
+      # itself (the kubelet, or a DaemonSet pod on it), which can carry any metric name and service
+      # label (audit run-7). App jobs are named by the customer, so these are excluded rather than one
+      # job required. Compose has node, cadvisor and alloy jobs of its own; none serves app metrics.
       - alert: HighErrorRate
         expr: |
-          sum by (service) (rate(http_requests_total{status=~"5.."}[5m]))
-            / sum by (service) (rate(http_requests_total[5m])) * 100 > 5
+          sum by (service) (rate(http_requests_total{job!~"kubelet|cadvisor|node|alloy",status=~"5.."}[5m]))
+            / sum by (service) (rate(http_requests_total{job!~"kubelet|cadvisor|node|alloy"}[5m])) * 100 > 5
         for: 5m
         labels: { severity: critical, module: app }
         annotations:
@@ -46,8 +50,8 @@ groups:
 
       - alert: ElevatedErrorRate
         expr: |
-          sum by (service) (rate(http_requests_total{status=~"5.."}[5m]))
-            / sum by (service) (rate(http_requests_total[5m])) * 100 > 1
+          sum by (service) (rate(http_requests_total{job!~"kubelet|cadvisor|node|alloy",status=~"5.."}[5m]))
+            / sum by (service) (rate(http_requests_total{job!~"kubelet|cadvisor|node|alloy"}[5m])) * 100 > 1
         for: 15m
         labels: { severity: warning, module: app }
         annotations:
@@ -57,7 +61,7 @@ groups:
 
       - alert: HighP95Latency
         expr: |
-          histogram_quantile(0.95, sum by (service, le) (rate(http_request_duration_seconds_bucket[5m]))) > 1
+          histogram_quantile(0.95, sum by (service, le) (rate(http_request_duration_seconds_bucket{job!~"kubelet|cadvisor|node|alloy"}[5m]))) > 1
         for: 10m
         labels: { severity: warning, module: app }
         annotations:

@@ -16,18 +16,44 @@ make up        # http://localhost:3000  (admin / your password)
 
 Re-run `make init` any time; previous answers are the defaults. A blank answer on re-run keeps the previous value; to clear a value, edit `.env` directly.
 
-`make up` re-renders `build/` from `.env` and reloads Prometheus, Alertmanager and Alloy in place, so it is also the command to run after any config change.
+`make up` re-renders `build/` from `.env` and reloads Prometheus, Alertmanager and Alloy in place, so it is also the command to run after any config change. Changing the Grafana admin password this way reaches
+the already-running Grafana too: `make up` resets the persisted admin password to match `.env`
+(`GF_SECURITY_ADMIN_PASSWORD` alone only takes effect the first time Grafana creates that account, not on
+a later change). There is no published default to leave in place: `make init` generates a random one for
+you if you don't set your own. If you set one by hand, it must be at least 4 characters -- Grafana's own
+`reset-admin-password` refuses anything shorter, and `render.sh` refuses it first, before that ever runs.
 
 **Podman hosts:** set `NODE_EXPORTER_TARGET` (see "Exposure" — rootless Podman cannot scrape
 node-exporter at all, and you lose every host metric and infra alert if you skip this), set
 `CONTAINER_ENGINE=podman`, point `CONTAINER_SOCK` at your Podman socket, and leave `COMPOSE_PROFILES` empty in `.env` — cAdvisor needs Docker's `/var/lib/docker` and will not start. Its scrape target then shows DOWN in Prometheus and stays quiet: `ContainerMetricsMissing` only fires when cAdvisor is up and reporting nothing, so running without it is a supported choice rather than a permanent page. You get no container metrics, and the alerts built on them never fire.
+
+### Upgrading
+
+Two behaviour changes can surprise an existing install:
+
+- `make up` now re-applies `GRAFANA_ADMIN_PASSWORD` from `.env` to Grafana's admin account every
+  time. A password you changed in the Grafana UI is overwritten on the next `make up`, so change it
+  in `.env` (or with `make init`) instead.
+- `make up` refuses to render when `GRAFANA_ADMIN_PASSWORD` is empty, still the old published
+  default `change-me`, Grafana's own default `admin`, or shorter than 4 characters. Re-run
+  `make init`: an empty answer there generates a random password for you.
 
 ## Exposure
 
 Prometheus (9090), Alertmanager (9093) and Loki (3100) have **no authentication** — anyone who can
 reach the port can read your metrics and logs and silence your alerts. Grafana (3000) has a password.
 So every published port binds to `127.0.0.1` by default (`BIND_ADDR` in `.env`) — with one
-exception, node-exporter, below.
+exception, node-exporter, below. The triage agent (9096) is never published, and accepts alerts only
+with `TRIAGE_WEBHOOK_TOKEN` once it is set (`make init` generates it; see AI triage). That token
+authenticates only the Alertmanager-to-agent hop: Alertmanager's own API has no authentication, so
+anyone who can reach it can still trigger triage runs with labels they choose, up to
+`TRIAGE_MAX_RUNS_PER_HOUR` -- restrict who can send it alerts with Alertmanager's own
+`--web.config.file` basic auth or a NetworkPolicy. Any container on the compose network can still
+open connections to it: the agent caps what one costs before the token is checked (64 connections,
+8 per address, headers within 5 seconds and 16 KiB), but such a container could hold those slots and
+delay Alertmanager's deliveries, so keep untrusted containers off that network. The blackbox exporter
+(9115) is not published either, but any container on the compose network can call its `/probe?target=<url>` and have it fetch
+any URL from the monitoring host's network position; keep untrusted containers off that network.
 
 To reach Grafana from your laptop, tunnel instead of opening the port:
 
@@ -90,22 +116,56 @@ metrics line up in the dashboards: `service` is the probe name in Prometheus but
 service name in Loki, so the App and Overview log panels stay empty when the two differ.
 
 `build/` contains rendered secrets (Slack/Discord/Teams webhooks, the Telegram bot token, the SMTP
-password) readable by other local users — run the kit on a host you control.
+password). `render.sh` keeps the directory itself at `0700` so other local users cannot open it, and
+`.env` is `0600`; the files inside stay world-readable because the containers read them as their own
+users. Anyone with root, or in the `docker` group, can still read them — run the kit on a host you
+control.
 
 ## AI triage (optional)
 
 Answer `y` to the triage question in `make init` and the kit runs a small agent
 (`scripts/triage_agent.py`, standard-library Python) that receives a copy of every critical alert. It
 gathers the alert's rule and current values from Prometheus, the last error lines from Loki, other
-firing alerts, recent deploy annotations and the alert's runbook section, and redacts passwords,
-tokens and emails before any of it is written anywhere.
+firing alerts, recent deploy annotations and the alert's runbook section, and redacts what it
+recognises as a credential before any of it is written anywhere.
+
+**Redaction is best-effort pattern matching, and it will miss some secrets.** It removes values in
+common shapes -- for example `password=...`, `"api_key": "..."`, `Authorization: Bearer ...`, a
+`?sig=...` or `X-Amz-Signature=...` URL parameter, a PEM private key, `user:pass@` in a URL, an
+`sk-ant-...` or `AKIA...` key -- and `tests/test_triage_agent.py` lists every example it is tested
+against. A secret in any other shape passes through, and so does one described in prose
+(`the api key is X`). If your applications log secrets, add `TRIAGE_REDACT` patterns for them (below).
+With Pro's live mode, the model provider you configure and your team's receivers become trusted
+recipients of the alert's error log lines; the provider also chooses the Loki line filters of its
+own queries, so it is trusted not to go looking.
 
 `TRIAGE_DRY_RUN=true` is the default, and nothing leaves your network in that mode: the context pack
-is only printed to the agent's own log (`docker compose logs triage-agent`). The free tier runs the
-agent in dry run only; the note itself (the model call, with your own Anthropic key) is a Pro feature.
+is only printed to the agent's own log (`docker compose logs triage-agent`; Alloy ships it to Loki
+like any container's output). The free tier runs the agent in dry run only; the note itself (the
+model call, with your own Anthropic key) is a Pro feature.
 
-`TRIAGE_REDACT` takes extra regexes (separated by `;;`) to strip from log lines before anything is
-sent.
+`TRIAGE_REDACT` adds your own regexes (separated by `;;`) to strip from log lines before anything is
+sent, on top of the built-in shapes above.
+
+Alertmanager authenticates to the agent with `TRIAGE_WEBHOOK_TOKEN`. `make init` generates one (hex)
+when you turn triage on and keeps it on every re-run; `render.sh` adds it to the `webhook-triage`
+receiver as a Bearer credential, and the agent answers 401 to any alert that does not carry it. Empty
+means no header and no check. Use ASCII only — `render.sh` refuses anything else, because such a
+token could never match. This only authenticates the Alertmanager-to-agent hop, though: Alertmanager's
+own API has no authentication, so anyone who can reach it can still trigger a triage run with labels
+of their choosing, up to the cap below — restrict who may send it alerts with Alertmanager's
+`--web.config.file` basic auth or a NetworkPolicy. `TRIAGE_MAX_RUNS_PER_HOUR` caps triage runs in any rolling hour (empty = 30,
+`0` = unlimited), so a burst of alert groups cannot turn into a burst of dry-run packs. A run the cap
+refuses logs `skip: hourly triage run cap reached`, and its alert group is still marked triaged, so a
+repeat of it within the hour is skipped too. "The group" is the group together with the set of alerts
+in it: a notification whose alert set differs from every one triaged in the last hour is triaged
+again. An alert
+joining is sent at the group's next interval (`group_interval: 5m`, so within 5 minutes); one resolving does not (`webhook-triage` has
+`send_resolved: false`), so the smaller set is seen at the group's next notification. Only the first
+20 alerts of a group reach the agent (`max_alerts: 20`), so anyone who can post to Alertmanager can
+crowd a genuine alert out of the triage payload with 20 of their own. The number of alerts cut is part
+of "the set", so the notification is still triaged again, but without the genuine alert in the pack;
+the page to your receivers is unaffected.
 
 The agent also carries a read-only tool registry (`prom_query`, `prom_range`, `loki_query`, `alerts`,
 `deploys`, `runbook`) that Pro's engine may call while it thinks, and Pro prints one `triage-trace`
@@ -147,7 +207,7 @@ AWS CloudWatch alerts (RDS/ELB/EC2/NAT gateway, CPU credits, vCPU quota), a Kube
 kube-state-metrics), an Airflow module (scheduler health, DAG failures, run duration against a
 7-day baseline, queue backlog), a Postgres module (connections, replica lag, idle transactions,
 deadlocks, dead tuples), SLO burn-rate alerts, backup dead-man's switch, monitoring watchdog,
-deploy markers on every dashboard, and a written runbook for all 69 alerts (65 from Prometheus
+deploy markers on every dashboard, and a written runbook for all 70 alerts (66 from Prometheus
 metrics, 4 from Loki logs).
 
 Both flavours ship: `docker compose` for VMs, and a Helm chart for Kubernetes.

@@ -15,6 +15,7 @@ render:          ## .env + core/*.tpl -> build/
 
 up: render       ## start the stack (re-renders build/ and reloads the running config)
 	@$(COMPOSE) up -d
+	@bash scripts/rotate-grafana-password.sh
 	@$(MAKE) --no-print-directory reload
 
 reload:          ## make Prometheus/Alertmanager/Alloy re-read build/ (compose does not watch bind mounts)
@@ -48,4 +49,6 @@ test: validate test-rules
 	@bash tests/test_render.sh
 	@bash tests/test_init.sh
 	@bash tests/test_env_example.sh
+	@bash tests/test_ci_permissions.sh
 	@bash tests/test_triage_agent.sh
+	@bash tests/test_features_counts.sh

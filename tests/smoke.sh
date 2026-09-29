@@ -23,6 +23,10 @@ case ",${SMOKE_SKIP_JOBS:-}," in *,cadvisor,*) sed -i.bak 's/^COMPOSE_PROFILES=.
 # python rather than sed: .env's COMPOSE_PROFILES value can itself hold whatever SMOKE_SKIP_JOBS
 # left behind, and feeding that text into a sed s/// pattern is exactly how a stray "/" breaks it.
 sed -i.bak 's#^TRIAGE_WEBHOOK_URL=.*#TRIAGE_WEBHOOK_URL=http://triage-agent:9096/alert#' .env && rm -f .env.bak
+# The Alertmanager -> agent webhook token: the synthetic alert below reaches the agent only through
+# Alertmanager's rendered http_config, so every triage assertion after it proves that Alertmanager
+# really sends the token; a direct POST without it is checked for a 401.
+sed -i.bak 's/^TRIAGE_WEBHOOK_TOKEN=.*/TRIAGE_WEBHOOK_TOKEN=0123456789abcdef0123456789abcdef/' .env && rm -f .env.bak
 python3 - <<'PY'
 import re
 with open(".env") as f:
@@ -162,6 +166,16 @@ assert any(a["labels"]["alertname"]=="ServiceDown" for a in p["firing"]), "firin
 print("smoke: up{instance=<probe url>} = %r" % (p["up"],))
 print("smoke: triage pack ok, %d bytes, sources %s" % (len(open(sys.argv[1]).read()), p["sources"]))
 PY
+# The same agent refuses a POST that does not carry the token: no header, and a wrong one. Sent from
+# inside the agent's own container, since its port is not published.
+codes=$($COMPOSE exec -T triage-agent python3 -c '
+import urllib.request, urllib.error
+for h in ({}, {"Authorization": "Bearer wrong"}):
+    try: print(urllib.request.urlopen(urllib.request.Request("http://127.0.0.1:9096/alert", data=b"{}", headers=h, method="POST"), timeout=5).status)
+    except urllib.error.HTTPError as e: print(e.code)
+' 2>/dev/null | tr '\n' ' ' || true)
+[ "$codes" = "401 401 " ] || { echo "FAIL: a POST to the agent without the webhook token got [$codes], want 401 for no header and for a wrong one"; exit 1; }
+echo "smoke: agent refuses alerts without the webhook token (401)"
 # UX: logging in lands on Overview, and the provisioned Overview carries the SRE Kit dropdown (a
 # dashboards-by-tag link), so nobody has to remember dashboard names.
 curl -sf -u "admin:smoke" "$H:3000/api/dashboards/home" | grep -q '"uid":"sre-overview"' || { echo "FAIL: Grafana home is not the Overview dashboard"; exit 1; }

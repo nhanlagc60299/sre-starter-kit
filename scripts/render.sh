@@ -1,6 +1,14 @@
 #!/usr/bin/env bash
 # Render core/**/*.tpl with values from .env into build/, copy everything else as-is.
 set -euo pipefail
+# build/ files are read through bind mounts by containers running as their own users (Alertmanager
+# and Prometheus as nobody), so a rendered file must be world-readable: under a caller's umask 077 a
+# 0600 file is unreadable to them on Linux. The umask applies only to files and directories this
+# run creates; a file that already exists is rewritten in place and keeps its mode. What keeps the
+# rendered secrets (webhook URLs, the SMTP password, the triage token) from other host users is
+# build/ itself at 0700, set below: a container reads the subdirectory it has mounted without
+# walking through build/.
+umask 022
 ROOT="$(pwd)"
 [ -f "$ROOT/.env" ] || { echo "ERROR: .env not found. Run 'make init' first." >&2; exit 1; }
 set -a; . "$ROOT/.env"; set +a
@@ -8,6 +16,22 @@ set -a; . "$ROOT/.env"; set +a
 # blocks are stripped below, but SOME receiver has to exist or every alert is dropped on the floor.
 # Guarded on the template so the minimal render fixture in tests/ is unaffected.
 if [ -f "$ROOT/core/alertmanager/alertmanager.yml.tpl" ]; then
+  # A Grafana nobody can log into safely is a stack shipped broken on purpose: refuse the published
+  # default and an unset value the same way the wizard now refuses to keep either silently. Guarded
+  # on the template, like the checks below, so the minimal render fixture in tests/ (no .env key at
+  # all) is unaffected.
+  # Grafana's own `grafana cli admin reset-admin-password` refuses anything under 4 characters
+  # ("the new password doesn't meet the password policy criteria", verified against
+  # grafana/grafana:12.0.0); a shorter value here would render cleanly and then leave compose
+  # rotation silently unapplied. Refuse it at the same place as empty/change-me rather than let it
+  # surface two steps later. Length only, never the value itself.
+  # 'admin' is Grafana's own shipped default, as guessable as change-me.
+  # A line break (a quoted .env value can hold one) is refused too: the password is written into
+  # single-line places - an .env line, Grafana's own reset command.
+  if [ -z "${GRAFANA_ADMIN_PASSWORD:-}" ] || [ "${GRAFANA_ADMIN_PASSWORD:-}" = "change-me" ] || [ "${GRAFANA_ADMIN_PASSWORD:-}" = "admin" ] || [ "${#GRAFANA_ADMIN_PASSWORD}" -lt 4 ] || [[ "$GRAFANA_ADMIN_PASSWORD" == *[$'\r\n']* ]]; then
+    echo "ERROR: GRAFANA_ADMIN_PASSWORD must be set in .env, at least 4 characters (Grafana's own minimum), with no line break, and must not be a published default ('change-me', or Grafana's own 'admin'). Run 'make init' or set a real password by hand." >&2
+    exit 1
+  fi
   if [ -n "${TELEGRAM_BOT_TOKEN:-}" ] && [ -z "${TELEGRAM_CHAT_ID:-}" ]; then
     echo "ERROR: TELEGRAM_BOT_TOKEN is set but TELEGRAM_CHAT_ID is empty." >&2
     exit 1
@@ -33,15 +57,57 @@ fi
 # The dashboard link on every alert; defaults here for a .env written before the key existed.
 : "${GRAFANA_EXTERNAL_URL:=http://localhost:3000}"
 export NODE_EXPORTER_TARGET GRAFANA_EXTERNAL_URL
+# Two sanitizer chains piped after every label/annotation-derived action reaching a
+# chat/email notification (see core/alertmanager/alertmanager.yml.tpl and the receiver blocks
+# below). Not a customer setting -- reuses the same ${VAR} substitution render.sh already does for
+# GRAFANA_EXTERNAL_URL etc. so the templates stay short. reReplaceAll is Alertmanager's only
+# string-replace template func (regex-based; there is no plain `replace`). Replacements are visible,
+# not silently dropped: [ and ] become full-width look-alikes so masked-link syntax breaks; @ and `
+# become full-width look-alikes so an @everyone/@here/<@U...> mention or a code fence can't fire.
+# "[[]" / "[]]" are the POSIX bracket-expression idiom for a literal [ / ] (a leading ] is literal
+# inside a class); verified against prom/alertmanager:v0.28.1's amtool template render.
+#
+# Both chains first fold every line separator into a space -- CR, LF, VT, FF, FS, GS, RS, NEL, U+2028,
+# U+2029 (Go string escapes; the template lexer turns them into the characters themselves): a line
+# break in a label would start a new line of its own -- a markdown heading on Discord/Teams/Telegram,
+# a second line in an email Subject -- and some clients break lines on the others too (Python's
+# str.splitlines does on FS, GS and RS). The Discord message and the Teams text also open with the
+# fixed word "Summary:", so a summary that starts "# " or "-# " is not a heading or subtext there.
+#
+# SLACK_SANITIZE additionally escapes &,<,> as the HTML entities Slack's own escaping convention
+# already renders as literal characters (its docs: &amp;/&lt;/&gt;) -- Slack-only, & first so it is
+# not itself re-escaped by the </> step. OTHER_SANITIZE (Discord/Teams/Telegram, the email Subject) leaves &
+# alone: those receivers do not decode entities, so "&gt;3 times" showed up literally there (fix
+# round 1 review). It maps < and > to full-width look-alikes instead (audit run-6): Discord reads
+# <#id>, </cmd:id>, <t:...> and <https://...> in a message as a channel link, a slash-command
+# mention, a timestamp and an autolink, so a label must not carry them. "＞3 times" still reads as
+# ">3 times"; Telegram is sent as plain text (parse_mode '') and the email Subject is RFC 2047-encoded,
+# as it already is for the other look-alikes. ||spoiler|| is left alone: it can hide text, not add any.
+# A "/" that starts a word ("/start", "(/stop@bot") becomes the look-alike "／" too (audit run-7):
+# Telegram turns it into a tappable bot command even in plain text. Only where Telegram's own parser
+# would start one -- after a non-word character other than "/", before a letter, digit or "_" -- so
+# "https://x/y" and "a/b" in a summary are untouched; runbook_url/dashboard take the link chains.
+# "${1}" and "${2}" are Go regexp group references for Alertmanager: envsubst, the add() splice and
+# the chart's replace insert this value verbatim and never rescan it, so they reach Alertmanager as is.
+SLACK_SANITIZE='reReplaceAll "[\r\n\v\f\x1c-\x1e\u0085\u2028\u2029]" " " | reReplaceAll "&" "&amp;" | reReplaceAll "<" "&lt;" | reReplaceAll ">" "&gt;" | reReplaceAll "[[]" "［" | reReplaceAll "[]]" "］" | reReplaceAll "@" "＠" | reReplaceAll "`" "｀"'
+OTHER_SANITIZE='reReplaceAll "[\r\n\v\f\x1c-\x1e\u0085\u2028\u2029]" " " | reReplaceAll "[[]" "［" | reReplaceAll "[]]" "］" | reReplaceAll "<" "＜" | reReplaceAll ">" "＞" | reReplaceAll "(^|[^[:alnum:]_/])/([[:alnum:]_])" "${1}／${2}" | reReplaceAll "@" "＠" | reReplaceAll "`" "｀"'
+# .Annotations.runbook_url/.dashboard are rule-authored, but anyone who can POST to
+# Alertmanager's unauthenticated API sets them too ("x|y> <!channel> <z" would ping a Slack channel).
+# They get their own chain that strips only what leaves a link -- [, <, >, | everywhere, plus ) on
+# the markdown receivers (Discord/Teams/Telegram) -- and never the text chains above, so a
+# query string's & (and ? and =) survives intact. "[[<>|]" is one bracket expression, [ literal inside.
+LINK_SANITIZE='reReplaceAll "[[<>|]" ""'
+MD_LINK_SANITIZE='reReplaceAll "[[<>|)]" ""'
+export SLACK_SANITIZE OTHER_SANITIZE LINK_SANITIZE MD_LINK_SANITIZE
 # Refresh build/ IN PLACE, never `rm -rf build`: compose bind-mounts build/prometheus, build/alertmanager,
 # build/loki/config.alloy and friends, and on Linux a bind mount follows the inode. Wiping the tree left
 # every running container reading the deleted copy, so `make reload` HUPed Prometheus into its own stale
 # config and new targets never appeared (found on EC2, 2026-09-19; macOS virtiofs hid it). Files are
 # rewritten in place (same inode) and anything without a source is removed afterwards.
-mkdir -p "$ROOT/build"
+mkdir -p "$ROOT/build"; chmod 700 "$ROOT/build"
 _mark=$(mktemp); trap 'rm -f "$_mark"' EXIT   # every file written by this run is newer than it
 # Only substitute variables that are defined in .env, so Prometheus/Alloy $labels etc. survive.
-VARS="$(grep -oE '^[A-Z_][A-Z0-9_]*=' "$ROOT/.env" | sed 's/=$//' | sed 's/^/\$/' | tr '\n' ' ') \$NODE_EXPORTER_TARGET \$GRAFANA_EXTERNAL_URL"
+VARS="$(grep -oE '^[A-Z_][A-Z0-9_]*=' "$ROOT/.env" | sed 's/=$//' | sed 's/^/\$/' | tr '\n' ' ') \$NODE_EXPORTER_TARGET \$GRAFANA_EXTERNAL_URL \$SLACK_SANITIZE \$OTHER_SANITIZE \$LINK_SANITIZE \$MD_LINK_SANITIZE"
 while IFS= read -r -d '' f; do
   rel="${f#$ROOT/core/}"
   out="$ROOT/build/$rel"
@@ -77,10 +143,13 @@ if [ -f "$INFRA" ]; then
 fi
 # 3. optional receivers
 AM="$ROOT/build/alertmanager/alertmanager.yml"
+# The block carries a bot token, a webhook URL or the SMTP password, so it goes to python3 through
+# the environment, never argv: /proc/<pid>/cmdline is readable by every local user, environ only by
+# this one (the triage token below, the same way).
 add() { # marker block
-  python3 - "$AM" "$1" "$2" <<'PY'
-import sys
-p,marker,block=sys.argv[1:]; s=open(p).read()
+  RECEIVER_BLOCK="$2" python3 - "$AM" "$1" <<'PY'
+import os,sys
+p,marker=sys.argv[1:]; block=os.environ["RECEIVER_BLOCK"]; s=open(p).read()
 if "    # "+marker not in s:
     sys.exit("ERROR: receiver marker '%s' not found in %s - core/alertmanager/alertmanager.yml.tpl must keep it." % (marker,p))
 open(p,"w").write(s.replace("    # "+marker, block+"\n    # "+marker))
@@ -105,7 +174,7 @@ if [ -f "$AM" ] && [ -n "${TELEGRAM_BOT_TOKEN:-}" ]; then
         chat_id: ${TELEGRAM_CHAT_ID:-}
         parse_mode: ''
         send_resolved: true
-        message: '[${PROJECT_NAME:-}] {{ .CommonLabels.alertname }}: {{ range .Alerts }}{{ .Annotations.summary }} runbook: {{ .Annotations.runbook_url }} dashboard: ${GRAFANA_EXTERNAL_URL}/d/{{ .Annotations.dashboard }} {{ end }}'"
+        message: '[${PROJECT_NAME:-}] {{ .CommonLabels.alertname | ${OTHER_SANITIZE} }}: {{ range .Alerts }}{{ .Annotations.summary | ${OTHER_SANITIZE} }} runbook: {{ .Annotations.runbook_url | ${MD_LINK_SANITIZE} }} dashboard: ${GRAFANA_EXTERNAL_URL}/d/{{ .Annotations.dashboard | ${MD_LINK_SANITIZE} }} {{ end }}'"
   done
 fi
 if [ -f "$AM" ] && [ -n "${TEAMS_WEBHOOK_URL:-}" ]; then
@@ -113,17 +182,19 @@ if [ -f "$AM" ] && [ -n "${TEAMS_WEBHOOK_URL:-}" ]; then
     add "$m" "    msteamsv2_configs:
       - webhook_url: ${TEAMS_WEBHOOK_URL:-}
         send_resolved: true
-        title: '[${PROJECT_NAME:-}] {{ .CommonLabels.alertname }}'
-        text: '{{ range .Alerts }}{{ .Annotations.summary }} [runbook]({{ .Annotations.runbook_url }}) [dashboard](${GRAFANA_EXTERNAL_URL}/d/{{ .Annotations.dashboard }}) {{ end }}'"
+        title: '[${PROJECT_NAME:-}] {{ .CommonLabels.alertname | ${OTHER_SANITIZE} }}'
+        text: 'Summary: {{ range .Alerts }}{{ .Annotations.summary | ${OTHER_SANITIZE} }} [runbook]({{ .Annotations.runbook_url | ${MD_LINK_SANITIZE} }}) [dashboard](${GRAFANA_EXTERNAL_URL}/d/{{ .Annotations.dashboard | ${MD_LINK_SANITIZE} }}) {{ end }}'"
   done
 fi
 if [ -f "$AM" ] && [ -n "${DISCORD_WEBHOOK_URL:-}" ]; then
+  # Alertmanager's discord_config (v0.28.1) has no allowed_mentions field to set -- checked against
+  # the upstream config docs; message is the only thing to sanitize here.
   for m in RECEIVERS_CRITICAL_EXTRA RECEIVERS_WARNING_EXTRA; do
     add "$m" "    discord_configs:
       - webhook_url: ${DISCORD_WEBHOOK_URL:-}
         send_resolved: true
-        title: '[${PROJECT_NAME:-}] {{ .CommonLabels.alertname }}'
-        message: '{{ range .Alerts }}{{ .Annotations.summary }} [runbook](<{{ .Annotations.runbook_url }}>) [dashboard](<${GRAFANA_EXTERNAL_URL}/d/{{ .Annotations.dashboard }}>) {{ end }}'"
+        title: '[${PROJECT_NAME:-}] {{ .CommonLabels.alertname | ${OTHER_SANITIZE} }}'
+        message: 'Summary: {{ range .Alerts }}{{ .Annotations.summary | ${OTHER_SANITIZE} }} [runbook](<{{ .Annotations.runbook_url | ${MD_LINK_SANITIZE} }}>) [dashboard](<${GRAFANA_EXTERNAL_URL}/d/{{ .Annotations.dashboard | ${MD_LINK_SANITIZE} }}>) {{ end }}'"
   done
 fi
 if [ -f "$AM" ] && [ -n "${ALERT_EMAIL_TO:-}" ]; then
@@ -140,8 +211,23 @@ if [ -f "$AM" ] && [ -n "${ALERT_EMAIL_TO:-}" ]; then
         from: ${SMTP_FROM:-}
         smarthost: ${SMTP_HOST:-}${auth}
         send_resolved: true
-        headers: { Subject: '[${PROJECT_NAME:-}] {{ .CommonLabels.alertname }} ({{ .Status }})' }"
+        headers: { Subject: '[${PROJECT_NAME:-}] {{ .CommonLabels.alertname | ${OTHER_SANITIZE} }} ({{ .Status }})' }"
   done
+fi
+# The triage agent answers 401 unless Alertmanager sends TRIAGE_WEBHOOK_TOKEN. Empty = no header, no check.
+# The agent compares UTF-8 bytes against a latin-1-decoded header, so only ASCII can ever match: refuse
+# anything else here rather than ship a config whose every triage delivery is rejected.
+if [ -f "$AM" ] && [ -n "${TRIAGE_WEBHOOK_TOKEN:-}" ]; then
+  python3 - "$AM" <<'PY'
+import os,re,sys
+p=sys.argv[1]; tok=os.environ["TRIAGE_WEBHOOK_TOKEN"]; s=open(p).read(); m="        # TRIAGE_WEBHOOK_AUTH"
+if not re.fullmatch(r"[!-~]+", tok):
+    sys.exit("ERROR: TRIAGE_WEBHOOK_TOKEN must be printable ASCII with no spaces (e.g. the hex 'make init' generates).")
+if m not in s:
+    sys.exit("ERROR: marker '%s' not found in %s - core/alertmanager/alertmanager.yml.tpl must keep it." % (m.strip(),p))
+auth="        http_config:\n          authorization:\n            type: Bearer\n            credentials: '%s'\n" % tok.replace("'","''")
+open(p,"w").write(s.replace(m, auth+m))
+PY
 fi
 # 4. security module off -> drop only its rules; the log alerts in logs.yml are not part of the module
 [ "${MODULE_SECURITY:-true}" = true ] || rm -f "$ROOT/build/loki/rules/fake/security.yml"

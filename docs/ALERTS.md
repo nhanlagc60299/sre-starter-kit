@@ -183,7 +183,19 @@ not as intrusion detection.
 ### SSHFailedLoginBurst
 Warning, after 1m. More than 20 failed SSH logins in 5 minutes from one address. Usually noise
 from the public internet; worth attention when the source is inside your network.
+It counts only sshd's own `Failed password|keyboard-interactive/pam|gssapi-with-mic ... ssh2` right
+after the syslog prefix and takes the address
+from sshd's own last `from`. Text an SSH client chooses (a username, a non-SSH banner, a disconnect
+reason) sits mid-line, so it cannot fire it or pick the address. A local user on the host can still
+write a whole sshd-shaped line into the auth log with `logger`. Only rsyslog's traditional
+(`Sep 29 10:00:00`) and RFC3339 timestamps are matched. A failed `hostbased` login is not counted: sshd
+ends that line with a client user and host the client chooses, after the address.
 
 ### RootLoginDetected
 Warning, fires immediately. An SSH login as root was accepted. Expected on some setups, alarming
 on others, which is why it only warns.
+It matches only sshd's own `Accepted password|publickey|keyboard-interactive/pam|hostbased|gssapi-with-mic
+for root from <ip> port <n> ssh2` right after the syslog prefix, ending in `ssh2` or what sshd writes
+after it (`<TYPE> SHA256:<fp>`, a certificate's key ID, serial and CA, a FIDO key's signature count, a
+hostbased login's client user and host), so text an SSH client chooses cannot fire it; a local user on
+the host can still write such a line with `logger`.
