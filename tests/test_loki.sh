@@ -21,10 +21,12 @@ grep -q 'service!~"prometheus|alertmanager|grafana|loki|alloy|blackbox|cadvisor|
 
 # SSH usernames are chosen by the client before it authenticates, and sshd writes them into the very
 # lines these rules read (audit run-5 C2): "Accepted password for root" as a username fired
-# RootLoginDetected with no login, and "Failed password from <ip>" set the burst's ip label. Both
-# rules now read only what sshd writes itself: its "sshd[pid]: " prefix (file mode) or the start
-# of the line (journal mode), the fixed tail "from <addr> port <n> ssh2", and the last "from". Loki
-# itself evaluates each rule's expr here over sshd-shaped lines, one labelled stream per case.
+# RootLoginDetected with no login, and "Failed password from <ip>" set the burst's ip label. A
+# non-SSH banner and a disconnect reason are logged mid-line too, ":", "[" and "]" included (audit
+# run-6 C1). Both rules now read only what sshd writes itself: the event at the true start of the
+# message (after exactly the syslog prefix in file mode, at "^" in journal mode), the fixed tail
+# "from <addr> port <n> ssh2", and the last "from". Loki itself evaluates each rule's expr here
+# over sshd-shaped lines, one labelled stream per case.
 # The rendered loki.yml as shipped, except that the ring advertises loopback: with --network none
 # there is no eth0 for Loki to find an address on.
 mkdir -p "$tmp/lokitest"; cp -r "$tmp/build/loki/rules" "$tmp/lokitest/rules"
@@ -50,6 +52,28 @@ else:
     sys.exit("FAIL: Loki never became ready")
 REAL, FRAMED, V6 = "203.0.113.50", "198.51.100.7", "2001:db8::7"
 SYSLOG, ISO = "Sep 29 10:00:00 vm sshd[4242]: ", "2026-09-29T10:00:00.123456+00:00 vm sshd-session[4242]: "
+FP = "SHA256:" + "Zm9vYmFyYmF6cXV4cXV1eHF1dXhxdXV4cXV1eHF1dXg"   # a real fingerprint's shape: 43 base64 characters
+# audit run-6 C1 (h13): text other than the username that sshd logs verbatim, mid-line, with ":", "["
+# and "]" intact. OpenSSH log.c strnvis()es a message (a control byte becomes 4 characters "\ooo")
+# and syslog()s it as "%.500s"; a pre-auth child's message is re-logged with " [preauth]". kex.c logs
+# a non-SSH first line as below ("%.256s"), packet.c an SSH_MSG_DISCONNECT reason ("%.400s").
+def vis(t):
+    return "".join(c if 0x20 <= ord(c) < 0x7f and c != "\\" else ("\\\\" if c == "\\" else "\\%03o" % ord(c)) for c in t)
+def banner(t):
+    return ('error: kex_exchange_identification: client sent invalid protocol identifier "%s"' % vis(t[:256]))[:500]
+def disconnect(t, port=40000):
+    return ("Received disconnect from %s port %d:11: %s [preauth]" % (REAL, port, vis(t[:400])))[:500]
+def cut_after(msg_of, tail, limit):
+    """Raw client text padded with \\x01 so sshd's 500-character cut lands right after `tail`."""
+    for n in range(limit):
+        for extra in range(4):
+            raw = "\x01" * n + "x" * extra + " " + tail
+            if len(raw) <= limit and msg_of(raw).endswith(tail):
+                return raw
+    raise SystemExit("no padding puts the cut after the tail")
+ROOT_TEXT = "sshd[1]: Accepted password for root from %s port 22 ssh2: x" % FRAMED
+FAIL_TEXT = "sshd[1]: Failed password for root from %s port 22 ssh2" % FRAMED
+DISC_CUT, BANNER_CUT = cut_after(disconnect, FAIL_TEXT, 400), cut_after(banner, FAIL_TEXT, 256)
 def preauth(user, pw):   # what sshd logs for one connection by an invalid user
     out = ["Invalid user %s from %s port %d" % (user, REAL, 40000 + p) for p in range(25)]
     out += ["Connection closed by invalid user %s %s port %d [preauth]" % (user, REAL, 40000 + p) for p in range(25)]
@@ -64,15 +88,36 @@ CASES = {   # case -> (lines, SSHFailedLoginBurst {ip: count} it must return, Ro
     "real_fail_syslog":  ([SYSLOG + "Failed password for root from %s port %d ssh2" % (REAL, 50000 + p) for p in range(25)], {REAL: 25}, False),
     "real_fail_iso":     ([ISO + "Failed password for root from %s port %d ssh2" % (REAL, 50000 + p) for p in range(25)], {REAL: 25}, False),
     "real_fail_ipv6":    (["Failed password for invalid user admin from %s port %d ssh2" % (V6, 50000 + p) for p in range(25)], {V6: 25}, False),
-    "real_root_file":    ([SYSLOG + "Accepted publickey for root from %s port 5 ssh2: ED25519 SHA256:dummy" % REAL], {}, True),
+    "real_root_file":    ([SYSLOG + "Accepted publickey for root from %s port 5 ssh2: ED25519 %s" % (REAL, FP)], {}, True),
     "real_root_journal": (["Accepted password for root from %s port 5 ssh2" % REAL], {}, True),
     # rsyslog's $RepeatedMsgReduction (Ubuntu's default) wraps a repeat in its own text; each line counts once
     "real_fail_repeated": ([SYSLOG + "message repeated 3 times: [ Failed password for root from %s port %d ssh2]" % (REAL, 50000 + p) for p in range(25)], {REAL: 25}, False),
-    "real_root_repeated": ([SYSLOG + "message repeated 2 times: [ Accepted publickey for root from %s port 5 ssh2: ED25519 SHA256:dummy]" % REAL], {}, True),
+    "real_root_repeated": ([SYSLOG + "message repeated 2 times: [ Accepted publickey for root from %s port 5 ssh2: ED25519 %s]" % (REAL, FP)], {}, True),
     "inj_fail_repeated":  ([SYSLOG + "message repeated 2 times: [ %s]" % m for m in preauth("Failed password from " + FRAMED, False)], {}, False),
     "inj_fail_pw_repeated": ([SYSLOG + "message repeated 2 times: [ %s]" % m for m in preauth("Failed password for x from %s port 1 ssh2" % FRAMED, True)], {REAL: 25}, False),
     "inj_root_repeated":  ([SYSLOG + "message repeated 2 times: [ %s]" % m for m in preauth("Accepted password for root", True)], {REAL: 25}, False),
+    # audit run-6 C1: one connection's banner or disconnect reason carrying a whole forged sshd line,
+    # and 25 whose padding makes sshd's own 500-character cut end the line at the forged "ssh2"
+    "inj_banner_root_file":       ([SYSLOG + banner(ROOT_TEXT)], {}, False),
+    "inj_banner_root_journal":    ([banner(ROOT_TEXT)], {}, False),
+    "inj_disconnect_root_file":   ([SYSLOG + disconnect(ROOT_TEXT)], {}, False),
+    "inj_disconnect_root_journal": ([disconnect(ROOT_TEXT)], {}, False),
+    "inj_disconnect_cut_file":    ([SYSLOG + disconnect(DISC_CUT, 40000 + p) for p in range(25)], {}, False),
+    "inj_disconnect_cut_journal": ([disconnect(DISC_CUT, 40000 + p) for p in range(25)], {}, False),
+    "inj_banner_cut_file":        ([SYSLOG + banner(BANNER_CUT) for _ in range(25)], {}, False),
+    "inj_banner_cut_journal":     ([banner(BANNER_CUT) for _ in range(25)], {}, False),
+    "inj_banner_cut_repeated":    ([SYSLOG + "message repeated 2 times: [ %s]" % banner(BANNER_CUT) for _ in range(25)], {}, False),
+    # genuine shapes the anchored prefix must keep: a space-padded day, IPv6 in file mode, a key tail
+    "real_fail_padded_day": (["Sep  9 10:00:00 vm sshd[4242]: Failed password for root from %s port %d ssh2" % (REAL, 50000 + p) for p in range(25)], {REAL: 25}, False),
+    "real_fail_ipv6_file":  ([ISO + "Failed password for invalid user admin from %s port %d ssh2" % (V6, 50000 + p) for p in range(25)], {V6: 25}, False),
+    "real_root_iso_key":    ([ISO + "Accepted publickey for root from %s port 5 ssh2: ECDSA-SK %s" % (V6, FP)], {}, True),
+    "real_root_journal_key": (["Accepted publickey for root from %s port 5 ssh2: RSA %s" % (REAL, FP)], {}, True),
+    # the root tail is exact: after "ssh2" only a key type and its SHA256 fingerprint, never free text
+    "tail_not_sshd_root":   ([SYSLOG + "Accepted password for root from %s port 5 ssh2: x" % REAL, "Accepted publickey for root from %s port 5 ssh2: RSA %s x" % (REAL, FP)], {}, False),
 }
+# the forged lines must really carry the forged text at the line end, or the cases above prove nothing
+assert CASES["inj_disconnect_cut_file"][0][0].endswith(FAIL_TEXT) and CASES["inj_banner_cut_journal"][0][0].endswith(FAIL_TEXT)
+assert ROOT_TEXT in CASES["inj_banner_root_file"][0][0] and ROOT_TEXT in CASES["inj_disconnect_root_journal"][0][0]
 now = time.time_ns()
 streams = [{"stream": {"job": "authlog", "case": c}, "values": [[str(now - 60 * 10**9 + i * 10**6), l] for i, l in enumerate(lines)]}
            for c, (lines, _, _) in CASES.items()]

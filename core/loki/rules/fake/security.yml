@@ -1,16 +1,22 @@
 groups:
   - name: security
     rules:
-      # Both rules read only what sshd writes itself, never the username an SSH client chooses
-      # before it authenticates: the line starts at sshd's "sshd[pid]: " (file mode; sshd cuts a
-      # username at ":") or at the start of the message (journal mode), and ends in sshd's own
-      # "from <addr> port <n> ssh2". The greedy ".*" makes the ip sshd's last, real "from" (IPv6 too).
-      # rsyslog's "message repeated N times: [ ... ]" wrapper (Ubuntu's $RepeatedMsgReduction) is
-      # rsyslog's own text, allowed right after the prefix; such a line counts once.
+      # Both rules read only what sshd writes itself, never text an SSH client chooses (a username,
+      # a non-SSH banner, a disconnect reason: sshd logs all three mid-line, and the last two may
+      # hold ":", "[" and "]"; audit run-5 C2, run-6 C1). So the event must sit at the true start of
+      # the message, anchored at "^": in file mode after exactly the syslog prefix rsyslog writes,
+      # traditional "Mmm [ d]d hh:mm:ss host " or RFC3339 "2026-09-29T10:00:00.123456+00:00 host "
+      # (Ubuntu 24.04), then "sshd[pid]: " or "sshd-session[pid]: "; in journal mode the line is
+      # MESSAGE, which starts with sshd's own text. rsyslog's "message repeated N times: [ ... ]"
+      # wrapper (Ubuntu's $RepeatedMsgReduction) is allowed right after that prefix; such a line counts
+      # once. The event ends in sshd's own "from <addr> port <n> ssh2", and the greedy ".*" makes the
+      # ip sshd's last, real "from" (IPv6 too). A root accept may end only in "ssh2" or in the
+      # publickey's "ssh2: <TYPE> SHA256:<fingerprint>": a certificate login logs a longer tail (its
+      # key ID and CA) and is not matched. Other syslog timestamp formats are not matched either.
       - alert: SSHFailedLoginBurst
         expr: |
           sum by (ip) (
-            count_over_time({job="authlog"} |~ `(^|sshd(-session)?\[\d+\]: )(message repeated \d+ times: \[ )?Failed password for (invalid user )?.* from \S+ port \d+ ssh2( ?\])?$` | regexp `.* from (?P<ip>\S+) port \d+ ssh2( ?\])?$` [5m])
+            count_over_time({job="authlog"} |~ `^(?:(?:[A-Z][a-z]{2} [ 0-9]\d \d{2}:\d{2}:\d{2}|\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})) \S+ sshd(?:-session)?\[\d+\]: (?:message repeated \d+ times: \[ )?)?Failed password for (?:invalid user )?.* from \S+ port \d+ ssh2(?: ?\])?$` | regexp `.* from (?P<ip>\S+) port \d+ ssh2( ?\])?$` [5m])
           ) > 20
         for: 1m
         labels: { severity: warning, module: security }
@@ -21,7 +27,7 @@ groups:
 
       - alert: RootLoginDetected
         expr: |
-          sum(count_over_time({job="authlog"} |~ `(^|sshd(-session)?\[\d+\]: )(message repeated \d+ times: \[ )?Accepted (password|publickey) for root from \S+ port \d+ ssh2(: .*)?( ?\])?$` [5m])) > 0
+          sum(count_over_time({job="authlog"} |~ `^(?:(?:[A-Z][a-z]{2} [ 0-9]\d \d{2}:\d{2}:\d{2}|\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})) \S+ sshd(?:-session)?\[\d+\]: (?:message repeated \d+ times: \[ )?)?Accepted (?:password|publickey) for root from \S+ port \d+ ssh2(?:: [A-Z0-9-]+ SHA256:[A-Za-z0-9+/]{43})?(?: ?\])?$` [5m])) > 0
         labels: { severity: warning, module: security }
         annotations:
           dashboard: sre-overview
