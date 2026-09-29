@@ -78,6 +78,12 @@ DISC_CUT, BANNER_CUT = cut_after(disconnect, FAIL_TEXT, 400), cut_after(banner, 
 DISC_ROOT_CUT, BANNER_ROOT_CUT = cut_after(disconnect, ROOT_CUT_TEXT, 400), cut_after(banner, ROOT_CUT_TEXT, 256)
 # OpenSSH auth.c format_method_key(): a certificate's tail, and a FIDO key's signature count
 CERT = "ED25519-CERT %s ID ops-laptop@example.com (serial 42) CA ED25519 %s" % (FP, FP)
+# audit run-7 (h13): the other methods auth.c auth_log() writes. A hostbased line ends in text the
+# CLIENT chooses (hostbased.c: client user "%.100s", client host "%.100s").
+KBD, GSS = "keyboard-interactive/pam", "gssapi-with-mic"
+HB_TAIL = 'ED25519 %s, client user "deploy", client host "bastion.example.com"' % FP
+KBD_ROOT_CUT = "sshd[1]: Accepted %s for root from %s port 22 ssh2" % (KBD, FRAMED)
+KBD_FAIL_CUT = "sshd[1]: Failed %s for root from %s port 22 ssh2" % (KBD, FRAMED)
 def preauth(user, pw):   # what sshd logs for one connection by an invalid user
     out = ["Invalid user %s from %s port %d" % (user, REAL, 40000 + p) for p in range(25)]
     out += ["Connection closed by invalid user %s %s port %d [preauth]" % (user, REAL, 40000 + p) for p in range(25)]
@@ -123,14 +129,35 @@ CASES = {   # case -> (lines, SSHFailedLoginBurst {ip: count} it must return, Ro
     "real_root_cert_file":  ([SYSLOG + "Accepted publickey for root from %s port 5 ssh2: %s" % (REAL, CERT)], {}, True),
     "real_root_cert_journal_sk": (["Accepted publickey for root from %s port 5 ssh2: ECDSA-SK-CERT %s ID ci (serial 7) CA ECDSA %s, signature count = 12" % (REAL, FP, FP)], {}, True),
     "real_root_journal_key": (["Accepted publickey for root from %s port 5 ssh2: RSA %s" % (REAL, FP)], {}, True),
+    # audit run-7 (h13): keyboard-interactive/pam (upstream's default KbdInteractiveAuthentication yes),
+    # hostbased and gssapi-with-mic root logins, and keyboard-interactive/gssapi failure bursts
+    "real_root_kbd_file":    ([SYSLOG + "Accepted %s for root from %s port 5 ssh2" % (KBD, REAL)], {}, True),
+    "real_root_kbd_journal": (["Accepted %s for root from %s port 5 ssh2" % (KBD, V6)], {}, True),
+    "real_root_hostbased":   ([ISO + "Accepted hostbased for root from %s port 5 ssh2: %s" % (REAL, HB_TAIL)], {}, True),
+    "real_root_gssapi":      ([SYSLOG + "message repeated 2 times: [ Accepted %s for root from %s port 5 ssh2]" % (GSS, REAL)], {}, True),
+    "real_fail_kbd_file":    ([SYSLOG + "Failed %s for invalid user admin from %s port %d ssh2" % (KBD, REAL, 50000 + p) for p in range(25)], {REAL: 25}, False),
+    "real_fail_kbd_journal": (["Failed %s for root from %s port %d ssh2" % (KBD, V6, 50000 + p) for p in range(25)], {V6: 25}, False),
+    "real_fail_gssapi_iso":  ([ISO + "Failed %s for root from %s port %d ssh2" % (GSS, REAL, 50000 + p) for p in range(25)], {REAL: 25}, False),
+    # a failed hostbased line is never counted: its client-chosen tail could name any address
+    "hostbased_fail_not_counted": ([SYSLOG + 'Failed hostbased for root from %s port %d ssh2: ED25519 %s, client user "x from %s port 1 ssh2", client host "h"' % (REAL, 50000 + p, FP, FRAMED) for p in range(25)], {}, False),
+    # the same methods written by the client (a username, a banner, a disconnect reason) do nothing
+    "inj_kbd_root_file":     ([SYSLOG + m for m in preauth("Accepted %s for root" % KBD, True)], {REAL: 25}, False),
+    "inj_kbd_root_journal":  ([m for m in preauth("Accepted %s for root from %s port 1 ssh2" % (KBD, FRAMED), False)], {}, False),
+    "inj_hostbased_root_journal": ([m for m in preauth("Accepted hostbased for root from %s port 1 ssh2: %s" % (FRAMED, HB_TAIL), False)], {}, False),
+    "inj_gssapi_root_file":  ([SYSLOG + m for m in preauth("Accepted %s for root from %s port 1 ssh2" % (GSS, FRAMED), False)], {}, False),
+    "inj_kbd_fail_file":     ([SYSLOG + m for m in preauth("Failed %s for x from %s port 1 ssh2" % (KBD, FRAMED), True)], {REAL: 25}, False),
+    "inj_kbd_root_cut_banner": ([SYSLOG + banner(cut_after(banner, KBD_ROOT_CUT, 256))], {}, False),
+    "inj_kbd_fail_cut_disconnect": ([disconnect(cut_after(disconnect, KBD_FAIL_CUT, 400), 40000 + p) for p in range(25)], {}, False),
     # the root tail is exact: after "ssh2" only a key type and its SHA256 fingerprint, never free text
     "tail_not_sshd_root":   ([SYSLOG + "Accepted password for root from %s port 5 ssh2: x" % REAL, "Accepted publickey for root from %s port 5 ssh2: RSA %s x" % (REAL, FP),
-                             "Accepted publickey for root from %s port 5 ssh2: %s x" % (REAL, CERT), "Accepted publickey for root from %s port 5 ssh2: %s, signature count = x" % (REAL, CERT)], {}, False),
+                             "Accepted publickey for root from %s port 5 ssh2: %s x" % (REAL, CERT), "Accepted publickey for root from %s port 5 ssh2: %s, signature count = x" % (REAL, CERT),
+                             "Accepted hostbased for root from %s port 5 ssh2: %s x" % (REAL, HB_TAIL), "Accepted %s for root from %s port 5 ssh2: x" % (KBD, REAL)], {}, False),
 }
 # the forged lines must really carry the forged text at the line end, or the cases above prove nothing
 assert CASES["inj_disconnect_cut_file"][0][0].endswith(FAIL_TEXT) and CASES["inj_banner_cut_journal"][0][0].endswith(FAIL_TEXT)
 assert all(CASES[c][0][0].endswith(ROOT_CUT_TEXT) for c in ("inj_disconnect_root_cut_file", "inj_disconnect_root_cut_journal", "inj_banner_root_cut_file"))
 assert ROOT_TEXT in CASES["inj_banner_root_file"][0][0] and ROOT_TEXT in CASES["inj_disconnect_root_journal"][0][0]
+assert CASES["inj_kbd_root_cut_banner"][0][0].endswith(KBD_ROOT_CUT) and CASES["inj_kbd_fail_cut_disconnect"][0][0].endswith(KBD_FAIL_CUT)
 now = time.time_ns()
 streams = [{"stream": {"job": "authlog", "case": c}, "values": [[str(now - 60 * 10**9 + i * 10**6), l] for i, l in enumerate(lines)]}
            for c, (lines, _, _) in CASES.items()]
