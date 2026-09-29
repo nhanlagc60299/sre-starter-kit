@@ -263,8 +263,8 @@ _TOO_LARGE = object()
 # One upstream body is read, decoded and parsed at a time, process-wide (audit run-5): an 8 MiB body
 # of attacker-shaped alert labels costs 109 MiB while it is a str plus a parse tree. Measured with
 # the audit's section H (4 workers, attacker-shaped 8 MiB alert lists, worst of 20 trials): 351 MiB
-# VmHWM without this lock, against the 256 MiB limit, and 155 MiB with it and the fetchers' bounded
-# copies (audit run-6, see MAX_LABELS). The wait for the lock comes out of the call's own timeout, so a worker that waits
+# VmHWM without this lock, against the 256 MiB limit, and 157 MiB with it (worst of 60 in three
+# runs, with the fetchers' bounded copies of audit run-6, see MAX_LABELS). The wait for the lock comes out of the call's own timeout, so a worker that waits
 # too long counts the source as unreachable, and build_pack keeps to its deadline. The body is read in
 # chunks against that same deadline (audit run-6): an upstream trickling bytes cannot hold the lock
 # past the call's timeout plus one socket read.
@@ -969,8 +969,8 @@ def process(payload):
 # At most this many process() workers at once, inside the container's 256 MiB: an OOM restart would
 # also forget the hourly run cap and the dedup map. One attacker-shaped 8 MiB alert list costs 109 MiB
 # while it is parsed, so get_json parses one body at a time and every fetcher keeps only a bounded
-# copy of it: VmHWM 155 MiB, 351 MiB without the lock (audit run-5 section H, 4 workers, worst of 20
-# trials; see _UPSTREAM), and 128 MiB for 30 alerts of ~25k short labels each, 396 MiB while their
+# copy of it: VmHWM 157 MiB, 351 MiB without the lock (audit run-5 section H, 4 workers, worst of 60
+# trials in three runs; see _UPSTREAM), and 128 MiB for 30 alerts of ~25k short labels each, 396 MiB while their
 # labels were kept by reference (audit run-6, worst of 6; see MAX_LABELS). A group that arrives while every slot
 # is busy is dropped with a log line, not queued: it is not marked triaged, so Alertmanager's next
 # notification for it can still be triaged.

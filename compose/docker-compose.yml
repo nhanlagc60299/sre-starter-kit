@@ -101,9 +101,9 @@ services:
     command: ["python3", "-u", "/app/triage_agent.py"]
     # A 1 MiB webhook body and up to 8 MiB per upstream read, one read and parse at a time, and only a
     # bounded copy of it kept. Measured: four workers on attacker-shaped 8 MiB alert lists peak at
-    # 155 MiB, worst of 20 (audit run-5 section H), and on 30 alerts of ~25k labels each at 128 MiB,
-    # worst of 6 (audit run-6); one such parse is 109 MiB, an ordinary 8 MiB list 47 MiB. The limit
-    # keeps a flood of big alert groups from growing the agent without bound.
+    # 157 MiB (audit run-5 section H, worst of 60 trials in three runs), and on 30 alerts of ~25k
+    # labels each at 128 MiB (audit run-6, worst of 6); one such parse is 109 MiB, an ordinary 8 MiB
+    # list 47 MiB. The limit keeps a flood of big alert groups from growing the agent without bound.
     mem_limit: 256m
     volumes:
       - ../scripts/triage_agent.py:/app/triage_agent.py:ro
