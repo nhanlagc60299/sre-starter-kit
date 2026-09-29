@@ -1055,6 +1055,83 @@ class PackTests(unittest.TestCase):
                     self.assertEqual([r for r in rows if r[:12] in out], [], out)
                     self.assertNotIn("DEK-Info", out)
 
+    def test_run7_r4_an_indented_or_double_escaped_encrypted_pem_loses_every_row(self):
+        # review round 4: the header branch wanted a letter right after one newline of one escape level,
+        # so a key indented in a YAML block scalar (a k8s Secret, Helm values) or escaped twice (JSON in
+        # a JSON log line) stopped the BEGIN rule at "Proc" again and left DEK-Info and the rows.
+        import random
+        rnd = random.Random(41)
+        b64 = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+        rows = ["".join(rnd.choice(b64) for _ in range(64)) for _ in range(6)] + ["".join(rnd.choice(b64) for _ in range(26)) + "=="]
+        dek = "AES-128-CBC,5F0A1B2C3D4E5F60718293A4B5C6D7E8"
+        for sep in ("\n", "\r\n", "\\n", "\\r\\n", "\\\\n", "\\\\r\\\\n"):
+            for indent in ("", "  ", "\t"):
+                key = (sep + indent).join(["-----BEGIN RSA PRIVATE KEY-----", "Proc-Type: 4,ENCRYPTED", "DEK-Info: " + dek, ""]
+                                          + rows + ["-----END RSA PRIVATE KEY-----"])
+                for label, s in (("alone", key), ("in a log line", "key: |" + sep + indent + key + " done")):
+                    with self.subTest(sep=sep, indent=indent, where=label):
+                        out = self.agent.redact(s)
+                        self.assertEqual([r for r in rows if r[:12] in out], [], out)
+                        self.assertNotIn("DEK-Info", out); self.assertNotIn(dek[:11], out)
+
+    def test_run7_r4_the_begin_rule_is_linear_on_repeated_maximal_headers(self):
+        # review round 4: the worst case for the widened header branch - BEGIN, then 9 headers (one past
+        # the 8 it takes), each at its longest separator, indent, name and text, repeated to the cap
+        block = "-----BEGIN RSA PRIVATE KEY-----" + ("\\\\\\r\\\\\\n" + "\t" * 64 + "P" + "a" * 63 + ":" + "v" * 256) * 9
+        s, best = block * (self.agent.HARD_CAP_BYTES // len(block) + 1), 9e9
+        for _ in range(3):
+            start = time.monotonic()
+            self.agent._redact(s, self.agent.DEFAULT_REDACT)
+            best = min(best, time.monotonic() - start)
+        self.assertLess(best, 0.05)   # all rules take about 0.003 s here
+
+    def test_run7_r4_a_jwt_glued_to_a_dash_or_underscore_is_redacted(self):
+        # review round 4: the JWT rule refused a start after "-" or "_", so a JWT right after a PEM END
+        # marker (redacted until the rule moved first), "x-eyJ..." and "id_token_eyJ..." leaked whole
+        import random
+        rnd = random.Random(42)
+        al = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
+        w = lambda n: "".join(rnd.choice(al) for _ in range(n))
+        pay, sig = "eyJzdWIiOiIxMjM0NTY3ODkwIn0" + w(30), w(43)
+        jwt = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9." + pay + "." + sig
+        body = "MIIEvQIBADANBgkqhkiG9w0BAQEFAASC" + w(32)
+        cases = {"x-": ("x-" + jwt, "x-[jwt-redacted]"), "id_token_": ("id_token_" + jwt, "id_token_[jwt-redacted]")}
+        for nl in ("\n", "\\n"):
+            cases["END marker" + nl] = (nl.join(["-----BEGIN PRIVATE KEY-----", body, "-----END PRIVATE KEY-----" + jwt]),
+                                        "[private-key-redacted][jwt-redacted]")
+        for name, (s, want) in cases.items():
+            with self.subTest(name):
+                self.assertEqual(self.agent.redact("tok " + s + " done"), "tok " + want + " done")
+
+    def test_run7_r4_a_mii_blob_with_double_escaped_rows_loses_every_row(self):
+        # review round 4: the MII rule's row separator took one escape level ("\n"), so a key escaped
+        # twice ("\\n", JSON carrying JSON) lost its first row only; and a padded last row before an
+        # escaped closing quote (\" or \\") was not a last row at either level
+        import random
+        rnd = random.Random(43)
+        b64 = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+        w = lambda n: "".join(rnd.choice(b64) for _ in range(n))
+        mii = "MIIEvQIBADANBgkqhkiG9w0BAQEFAASC" + w(32)
+        jwt = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJkdW1teSJ9.DummySigDummySig"
+        for e, sep in (("\\", "\\n"), ("\\\\", "\\\\n"), ("\\\\", "\\\\r\\\\n")):
+            for last, rows in (("full", [w(64), w(64)]), ("padded", [w(64), w(54) + "AAAAAAAA=="])):
+                for tail in (" then " + jwt, ". retrying", sep + "next line", e + '",' + e + '"next' + e + '":1'):
+                    with self.subTest(sep=sep, last=last, tail=tail[:8]):
+                        out = self.agent.redact('{"msg":"load key: ' + mii + sep + sep.join(rows) + tail)
+                        self.assertEqual([r for r in rows if r[:16] in out], [], out)
+                        self.assertNotIn("DummySig", out)
+
+    def test_run7_r4_a_dropped_value_and_colliding_label_names(self):
+        # review round 4: a whitespace-only prefix survived a drop as " ", and two label names that cut
+        # to the same key (both "[cut]", or the same first 300 characters) kept one label only
+        self.assertEqual(self.agent._cut(" " + "x" * 5000), "[cut]")
+        self.assertEqual(self.agent._cut("\t \n" + "x" * 5000), "[cut]")
+        d = {"alertname": "A", "a" * 5000: "1", "b" * 5000: "2", "c" * 301 + "_x": "3", "c" * 301 + "_y": "4"}
+        kept = self.agent._labels(d)
+        self.assertEqual(sorted(kept.values()), ["1", "2", "3", "4", "A"])
+        self.assertTrue(all(len(k) <= 300 for k in kept), kept.keys())
+        self.assertIn("[cut]", kept)
+
     def test_dedup_within_an_hour(self):
         d = self.agent.Dedup(seconds=3600)
         self.assertFalse(d.seen("k")); self.assertTrue(d.seen("k"))

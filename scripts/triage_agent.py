@@ -90,15 +90,20 @@ DEFAULT_REDACT = [
     # rule below loses nothing to it, and a keyword before it ("token=eyJ...") still ends "[redacted]".
     # lookbehind, not \b: "-" is not \w, so "eyJ-eyJ-..." would give \b a start at every "eyJ" and each
     # would rescan the rest of the run. A literal "\n"/"\r"/"\t" in front (a JSON-escaped log line, the
-    # PEM rule's own row separator) also starts one, though its "n" is \w (audit run-6).
-    (r"(?:(?<![\w-])|(?<=\\[nrt]))eyJ[\w-]{1,4096}\.eyJ[\w-]{1,8192}\.[\w-]{0,2048}", "[jwt-redacted]"),
+    # PEM rule's own row separator) also starts one, though its "n" is \w (audit run-6). A JWT glued to
+    # a "-" or "_" ("x-eyJ", "id_token_eyJ", a PEM END marker's "-----eyJ") starts one too (review
+    # round 4): from the run's own start only, through at most 256 characters of it that end in "-"
+    # or "_", which stay; a start at every "-eyJ" would rescan up to 4096 characters each time.
+    (r"(?:(?<![\w-])([\w-]{0,256}?[-_])?|(?<=\\[nrt]))eyJ[\w-]{1,4096}\.eyJ[\w-]{1,8192}\.[\w-]{0,2048}", r"\1[jwt-redacted]"),
     # PEM next: the keyword rule below would otherwise eat "private_key=-----BEGIN" and leave the
     # body. The body class (base64, whitespace, a literal "\n" from a JSON log) stops at "-", so the
     # optional END group never makes it backtrack; a truncated key with no END still loses its body.
     # An encrypted legacy key's RFC 1421 headers ("Proc-Type: 4,ENCRYPTED", "DEK-Info: ...") after
     # BEGIN are part of the block too (review round 3): at most 8 lines of a name, ":" and text that
-    # stops at the line's end, each bounded, then the blank line and the body as before.
-    (r"-----BEGIN [A-Z ]{0,32}PRIVATE KEY-----(?:(?:\r?\n|\\(?:r\\)?n)[A-Za-z][A-Za-z0-9-]{0,63}:[^\r\n\\]{0,256}){0,8}"
+    # stops at the line's end, each bounded, then the blank line and the body as before. A header line
+    # may be indented (a YAML block scalar) and its newline escaped up to three backslashes deep (JSON
+    # carrying JSON), review round 4; the body class takes both already.
+    (r"-----BEGIN [A-Z ]{0,32}PRIVATE KEY-----(?:(?:\r?\n|\\{1,3}(?:r\\{1,3})?n)[ \t]{0,64}[A-Za-z][A-Za-z0-9-]{0,63}:[^\r\n\\]{0,256}){0,8}"
      r"[A-Za-z0-9+/=\s\\]{0,8192}(?:-----END [A-Z ]{0,32}PRIVATE KEY-----)?",
      "[private-key-redacted]"),
     # A whole PEM file base64-encoded once more (a Kubernetes Secret's data, a CI variable):
@@ -151,11 +156,13 @@ DEFAULT_REDACT = [
     # A PEM body that lost its -----BEGIN/END----- header/footer, or never had one in this log line -
     # "MII" is the DER SEQUENCE tag every RSA/EC/PKCS8 key or cert starts with once base64-encoded.
     # The rows after it follow across whitespace or a literal "\n"/"\r" (a JSON-escaped key on one
-    # log line), and only real PEM rows count (audit run-4): exactly 64 characters, or 76 (MIME and
-    # GNU base64's wrap, audit run-5) with no ".eyJ" after it (that is a JWT's header segment, which
-    # the JWT rule below must see whole, audit run-6; a bare "." after a real last row, as in
+    # log line; up to three backslashes deep, JSON carrying JSON, review round 4), and only real PEM
+    # rows count (audit run-4): exactly 64 characters, or 76 (MIME and
+    # GNU base64's wrap, audit run-5) with no ".eyJ" after it (that is a JWT's header segment, audit
+    # run-6; the JWT rule runs first since review round 3, so a JWT it matched is gone by now and
+    # this only keeps a row from reaching into one it did not; a bare "." after a real last row, as in
     # "...row. retrying", still ends the row, audit run-7), or a final row of 4-76 with its "="
-    # padding that ends the line or its value (a quote, comma, brace, bracket or a "." that is not
+    # padding that ends the line or its value (a quote, escaped or not, comma, brace, bracket or a "." that is not
     # ".eyJ" after it: a key inside JSON or a YAML flow sequence, or the end of a sentence), in real
     # base64 shape (whole 4-character groups, then "xx==" or "xxx="). Any row may end the text itself
     # (loki_lines cuts a line at 300 characters, mid-row). One last row, padded or not, may also end
@@ -169,10 +176,10 @@ DEFAULT_REDACT = [
     # nothing after the repeat can fail, so it never backtracks. The trailing "={0,2}" is the first
     # row's own padding.
     (r"(?:\bMII[A-Za-z0-9+/]{20,4096}|(?<=\[redacted\])(?=(?:\\[nr]|\s){1,8}[A-Za-z0-9+/]{64}(?:[A-Za-z0-9+/]{12})?(?![A-Za-z0-9+/=]|\.eyJ)))"
-     r"(?:(?:\\[nr]|\s){1,8}(?:[A-Za-z0-9+/]{64}(?:[A-Za-z0-9+/]{12})?(?![A-Za-z0-9+/=]|\.eyJ)"
-     r"|(?=[A-Za-z0-9+/=]{4,76}[ \t]{0,8}(?:\\[nr]|[\r\n\"',}\]]|\.(?!eyJ)|$))(?:[A-Za-z0-9+/]{4}){0,19}(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?(?![A-Za-z0-9+/=])"
+     r"(?:(?:\\{1,3}[nr]|\s){1,8}(?:[A-Za-z0-9+/]{64}(?:[A-Za-z0-9+/]{12})?(?![A-Za-z0-9+/=]|\.eyJ)"
+     r"|(?=[A-Za-z0-9+/=]{4,76}[ \t]{0,8}(?:\\{1,3}[nr]|\\{0,3}[\r\n\"',}\]]|\.(?!eyJ)|$))(?:[A-Za-z0-9+/]{4}){0,19}(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?(?![A-Za-z0-9+/=])"
      r"|[A-Za-z0-9+/]{1,76}={0,2}\Z)){0,256}"
-     r"(?:(?:\\[nr]|\s){1,8}(?:(?:[A-Za-z0-9+/]{4}){1,19}|(?:[A-Za-z0-9+/]{4}){0,18}(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=))(?=\s))?={0,2}",
+     r"(?:(?:\\{1,3}[nr]|\s){1,8}(?:(?:[A-Za-z0-9+/]{4}){1,19}|(?:[A-Za-z0-9+/]{4}){0,18}(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=))(?=\s))?={0,2}",
      "[pem-redacted]"),
     # A lone base64 body line with no "MII" prefix of its own - a later line of a multi-line PEM once
     # the first has already matched above, or a body pasted without its first line. Exactly 64 base64
@@ -459,8 +466,9 @@ RULE_QUERY_CHARS = 4000  # a rule's PromQL is sent back to Prometheus, so it get
 #   first n ("password=" + 2315 characters, then a token, kept 19 of its characters). So nothing within
 #   CUT_REDACT_MARGIN of the window's end is kept either: longer than any bounded pattern's reach (a
 #   URL's "://" + 256 + ":" + 1024 + "@" is the longest).
-# Without a shrink the margin costs nothing (2048 - 1536 > 0). A value with no whitespace in its first
-# n + 2048 characters is dropped whole (it reads "[cut]", not an empty value), and after a large shrink the value is shorter than n. One
+# Without a shrink the margin costs nothing (2048 - 1536 > 0). A value longer than n + 2048 whose kept
+# part is empty or whitespace (no whitespace in its first n + 2048 characters, or a large shrink) is
+# dropped whole: it reads "[cut]", not an empty value. After a smaller shrink it is shorter than n. One
 # window at a time, so the copy is bounded like the cut, and the trailing run is found in one pass.
 CUT_REDACT_WINDOW = 2048
 CUT_REDACT_MARGIN = 1536
@@ -481,17 +489,28 @@ def _cut(v, n=MAX_FIELD_CHARS):
     k = len(r)
     while k and not r[k - 1].isspace():   # the whitespace-free run the window's end cut
         k -= 1
-    return r[:min(n, k, max(0, len(r) - CUT_REDACT_MARGIN))] or "[cut]"   # dropped whole, and says so
+    r = r[:min(n, k, max(0, len(r) - CUT_REDACT_MARGIN))]
+    return r if r.strip() else "[cut]"   # dropped whole, and says so, whitespace in front or not (review round 4)
 
 
 def _labels(d):
     """At most MAX_LABELS labels, the _KEY_LABELS first, every name and value cut. A name that names a
-    secret is tested whole, before its cut can drop the keyword it ends in (audit run-7)."""
+    secret is tested whole, before its cut can drop the keyword it ends in (audit run-7). Two names that
+    cut to the same key (both "[cut]", or the same first 300 characters) are both kept, the later one
+    as "<key>#2", "#3" and so on (review round 4)."""
     if not isinstance(d, dict):
         return {}
     keys = [k for k in _KEY_LABELS if k in d]
     keys += itertools.islice((k for k in d if k not in _KEY_LABELS), MAX_LABELS - len(keys))
-    return {_cut(k): "[redacted]" if isinstance(k, str) and _SECRET_KEY.search(k) else _cut(d[k]) for k in keys}
+    out = {}
+    for k in keys:
+        c = base = _cut(k)
+        i = 1
+        while c in out:
+            i += 1
+            c = str(base)[:MAX_FIELD_CHARS - len("#%d" % i)] + "#%d" % i
+        out[c] = "[redacted]" if isinstance(k, str) and _SECRET_KEY.search(k) else _cut(d[k])
+    return out
 
 
 def _refs(v):
