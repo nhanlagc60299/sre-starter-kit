@@ -984,6 +984,7 @@ class PackTests(unittest.TestCase):
         self.assertNotIn("dummyval", text)
         self.assertTrue(kept["note"].startswith("x" * 280 + " token "), kept["note"])
         self.assertEqual(len(self.agent._cut("x " * 2500)), 300)   # without a shrink the margin costs nothing
+        self.assertEqual(self.agent._cut("x" * 5000), "[cut]")     # dropped whole, and says so (review round 3)
         for k in ("shrink_pw", "shrink_pem"):
             self.assertNotIn("ghp_", kept[k], k)
         self.assertTrue(all(len(k) <= 300 and len(v) <= 300 for k, v in kept.items()))
@@ -1021,6 +1022,38 @@ class PackTests(unittest.TestCase):
                             if got:
                                 leaks.append((name, n, start, bool(shrink), got))
         self.assertEqual(leaks, [], "a secret crossing a cut kept 9+ characters")
+
+    def test_run7_r3_a_jwt_is_redacted_whole_whatever_its_payload_embeds(self):
+        # review round 3: the token and PEM rules ran before the JWT rule, so a base64url payload that
+        # held "-sk-ant-...", "-ghp_..." or "-MII..." lost only that part and the JWT rule no longer
+        # matched: header, claims and signature leaked, even with the whole string in view.
+        import random
+        rnd = random.Random(33)
+        al = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
+        w = lambda n: "".join(rnd.choice(al) for _ in range(n))
+        hdr, sig = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9", w(43)
+        for name, inner in (("sk-ant-", "sk-ant-" + w(40)), ("ghp_", "ghp_" + w(36)), ("MII", "MII" + w(64)),
+                            ("LS0t", "LS0tLS1CRUdJTi" + w(40)), ("AKIA", "AKIA" + w(16).upper())):
+            pay = "eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4" + "-" + inner + "-" + w(20)
+            with self.subTest(name):
+                self.assertEqual(self.agent.redact("tok " + hdr + "." + pay + "." + sig), "tok [jwt-redacted]")
+
+    def test_run7_r3_an_encrypted_legacy_pem_loses_every_row(self):
+        # review round 3: RFC 1421 headers (Proc-Type, DEK-Info) after "-----BEGIN RSA PRIVATE KEY-----"
+        # stopped the BEGIN rule at "Proc", and the lone-row rule takes only 64-column rows, so the
+        # short last row of the encrypted body stayed in the clear.
+        import random
+        rnd = random.Random(34)
+        b64 = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+        rows = ["".join(rnd.choice(b64) for _ in range(64)) for _ in range(6)] + ["".join(rnd.choice(b64) for _ in range(26)) + "=="]
+        for sep in ("\n", "\\n", "\r\n"):
+            key = sep.join(["-----BEGIN RSA PRIVATE KEY-----", "Proc-Type: 4,ENCRYPTED",
+                            "DEK-Info: AES-128-CBC,5F0A1B2C3D4E5F60718293A4B5C6D7E8", ""] + rows + ["-----END RSA PRIVATE KEY-----"])
+            for label, s in (("alone", key), ("in a log line", "loading key: " + key + " done")):
+                with self.subTest(sep=sep, where=label):
+                    out = self.agent.redact(s)
+                    self.assertEqual([r for r in rows if r[:12] in out], [], out)
+                    self.assertNotIn("DEK-Info", out)
 
     def test_dedup_within_an_hour(self):
         d = self.agent.Dedup(seconds=3600)

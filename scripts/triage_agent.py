@@ -84,10 +84,22 @@ _KEYWORDS = (r"password|passphrase|passwd|pwd|(?<![A-Za-z0-9])pass|secret[_-]?ke
              r"|api[_-]?key|access[_-]?key"
              r"|private[_-]?key|client[_-]?secret|account[_-]?key|subscription[_-]?key|signature")
 DEFAULT_REDACT = [
-    # PEM first: the keyword rule below would otherwise eat "private_key=-----BEGIN" and leave the
+    # A JWT first of all (review round 3): its base64url payload can hold "-sk-...", "-ghp_...",
+    # "-MII..." or "LS0tLS1CRUdJTi...", and a rule that took that part first left the JWT rule nothing
+    # to match, so the header, claims and signature leaked. A JWT holds no "-----BEGIN", so the PEM
+    # rule below loses nothing to it, and a keyword before it ("token=eyJ...") still ends "[redacted]".
+    # lookbehind, not \b: "-" is not \w, so "eyJ-eyJ-..." would give \b a start at every "eyJ" and each
+    # would rescan the rest of the run. A literal "\n"/"\r"/"\t" in front (a JSON-escaped log line, the
+    # PEM rule's own row separator) also starts one, though its "n" is \w (audit run-6).
+    (r"(?:(?<![\w-])|(?<=\\[nrt]))eyJ[\w-]{1,4096}\.eyJ[\w-]{1,8192}\.[\w-]{0,2048}", "[jwt-redacted]"),
+    # PEM next: the keyword rule below would otherwise eat "private_key=-----BEGIN" and leave the
     # body. The body class (base64, whitespace, a literal "\n" from a JSON log) stops at "-", so the
     # optional END group never makes it backtrack; a truncated key with no END still loses its body.
-    (r"-----BEGIN [A-Z ]{0,32}PRIVATE KEY-----[A-Za-z0-9+/=\s\\]{0,8192}(?:-----END [A-Z ]{0,32}PRIVATE KEY-----)?",
+    # An encrypted legacy key's RFC 1421 headers ("Proc-Type: 4,ENCRYPTED", "DEK-Info: ...") after
+    # BEGIN are part of the block too (review round 3): at most 8 lines of a name, ":" and text that
+    # stops at the line's end, each bounded, then the blank line and the body as before.
+    (r"-----BEGIN [A-Z ]{0,32}PRIVATE KEY-----(?:(?:\r?\n|\\(?:r\\)?n)[A-Za-z][A-Za-z0-9-]{0,63}:[^\r\n\\]{0,256}){0,8}"
+     r"[A-Za-z0-9+/=\s\\]{0,8192}(?:-----END [A-Z ]{0,32}PRIVATE KEY-----)?",
      "[private-key-redacted]"),
     # A whole PEM file base64-encoded once more (a Kubernetes Secret's data, a CI variable):
     # "LS0tLS1CRUdJTi" is base64 of "-----BEGIN". Bounded like the rule above.
@@ -211,10 +223,6 @@ DEFAULT_REDACT = [
     (r"\b(?:AKIA|ASIA)[0-9A-Z]{16}\b", "[aws-key-redacted]"),
     (r"\b(?:gh[pousr]_[A-Za-z0-9]{20,255}|xox[abprs]-[A-Za-z0-9-]{1,255}|sk-[A-Za-z0-9_-]{16,255}|sk_live_[A-Za-z0-9]{1,255})",
      "[token-redacted]"),
-    # lookbehind, not \b: "-" is not \w, so "eyJ-eyJ-..." would give \b a start at every "eyJ" and each
-    # would rescan the rest of the run. A literal "\n"/"\r"/"\t" in front (a JSON-escaped log line, the
-    # PEM rule's own row separator) also starts one, though its "n" is \w (audit run-6).
-    (r"(?:(?<![\w-])|(?<=\\[nrt]))eyJ[\w-]{1,4096}\.eyJ[\w-]{1,8192}\.[\w-]{0,2048}", "[jwt-redacted]"),
     # Signed-URL / SAS / STS query parameters: any parameter named *sig or *signature (Azure SAS
     # "sig=", AWS "X-Amz-Signature=", S3 SigV2 and CloudFront "Signature=", GCS "X-Goog-Signature="),
     # "X-Amz-Security-Token=", and a bare API key passed as "key=" (Google Maps and others) - the
@@ -452,7 +460,7 @@ RULE_QUERY_CHARS = 4000  # a rule's PromQL is sent back to Prometheus, so it get
 #   CUT_REDACT_MARGIN of the window's end is kept either: longer than any bounded pattern's reach (a
 #   URL's "://" + 256 + ":" + 1024 + "@" is the longest).
 # Without a shrink the margin costs nothing (2048 - 1536 > 0). A value with no whitespace in its first
-# n + 2048 characters is dropped whole, and after a large shrink the value is shorter than n. One
+# n + 2048 characters is dropped whole (it reads "[cut]", not an empty value), and after a large shrink the value is shorter than n. One
 # window at a time, so the copy is bounded like the cut, and the trailing run is found in one pass.
 CUT_REDACT_WINDOW = 2048
 CUT_REDACT_MARGIN = 1536
@@ -473,7 +481,7 @@ def _cut(v, n=MAX_FIELD_CHARS):
     k = len(r)
     while k and not r[k - 1].isspace():   # the whitespace-free run the window's end cut
         k -= 1
-    return r[:min(n, k, max(0, len(r) - CUT_REDACT_MARGIN))]
+    return r[:min(n, k, max(0, len(r) - CUT_REDACT_MARGIN))] or "[cut]"   # dropped whole, and says so
 
 
 def _labels(d):
