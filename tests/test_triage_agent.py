@@ -819,6 +819,13 @@ class PackTests(unittest.TestCase):
             ("64-col cut mid-row (Loki 300-char cut)", ("ca=" + "\\n".join(rows64))[:300], rows64),
             ("64-col, padded final row, then text", "ca=" + "\\n".join(rows64[:-1] + [rows64[-1][:36]]) + " next=1", rows64),
         ]
+        # review round 1: a final row of whole 4-character groups with no padding (a DER length
+        # divisible by 3, about one key in three), then text, after any separator - and one row alone
+        unpadded = rows64[:-1] + [rows64[-1][:32]]
+        for sep in ("\\n", "\n", " "):
+            cases.append(("64-col, unpadded final row, then text, sep %r" % sep, "ca=" + sep.join(unpadded) + " next=1", unpadded))
+            cases.append(("one unpadded row after the first, then text, sep %r" % sep, "ca=" + sep.join([unpadded[0], unpadded[-1]]) + " next=1",
+                          [unpadded[0], unpadded[-1]]))
         for label, s, rows in cases:
             with self.subTest(label):
                 out = self.agent.redact(s)
@@ -826,7 +833,11 @@ class PackTests(unittest.TestCase):
                 self.assertEqual([r for r in rows if len(r) >= 16 and r[:16] in out], [], out)
                 if label.startswith("64-col cut"):     # the cut row, shorter than 16 past its start, too
                     self.assertNotIn(s[-10:], out)
-        self.assertIn("next=1", self.agent.redact(cases[-1][1]))
+        for label, s, _ in cases:
+            if s.endswith(" next=1"):
+                self.assertIn(" next=1", self.agent.redact(s), label)
+        # one word of that shape at most: the prose after it survives
+        self.assertIn("text will stay", self.agent.redact("ca=" + "\n".join(unpadded) + "\nthis text will stay"))
         # the text after a key is still text: a field name on the next line keeps its name
         self.assertIn("databasePassword: [redacted]", self.agent.redact("ca: " + der[:48] + "\n  databasePassword: hunter2dummy"))
     def test_run4_a_secret_named_label_loses_its_value(self):
@@ -997,8 +1008,8 @@ class ToolTests(unittest.TestCase):
         self.assertEqual(p["sources"]["rules"], "ok")
 
     def test_upstream_bodies_are_read_and_parsed_one_at_a_time(self):
-        # audit run-5: four workers each decoding and parsing an 8 MiB alert list at once reached
-        # 261 MiB against the 256 MiB limit. One body's read, decode and json.loads finish before
+        # audit run-5 section H: four workers each decoding and parsing an attacker-shaped 8 MiB alert
+        # list at once reached a VmHWM of 351 MiB (worst of 20 trials) against the 256 MiB limit. One body's read, decode and json.loads finish before
         # another body's read starts.
         inside, peak, lock, gate, real_loads = [0], [0], threading.Lock(), threading.Barrier(2), json.loads
         class Resp:
@@ -1026,6 +1037,21 @@ class ToolTests(unittest.TestCase):
             for t in ts: t.join()
         self.assertEqual(out, [{"ok": True}, {"ok": True}])
         self.assertEqual(peak[0], 1, "two upstream bodies were being read or parsed at the same time")
+
+    def test_upstream_lock_wait_counts_against_the_call_timeout(self):
+        # review round 1: waiting for the parse lock and then calling urlopen with the full timeout let
+        # one call take twice its timeout, and build_pack overrun TOTAL_DEADLINE. urlopen gets what is left.
+        seen = []
+        class Resp:
+            def __enter__(self): return self
+            def __exit__(self, *a): return False
+            def read(self, n): return b'{"ok": true}'
+        self.agent._UPSTREAM.acquire()
+        threading.Timer(0.3, self.agent._UPSTREAM.release).start()
+        with mock.patch.object(self.agent.urllib.request, "urlopen", lambda req, timeout: seen.append(timeout) or Resp()):
+            self.assertEqual(self.agent.get_json("http://am/api/v2/alerts", timeout=0.5), {"ok": True})
+        self.assertEqual(len(seen), 1)
+        self.assertTrue(0 < seen[0] <= 0.25, seen)
 
     def test_runbook_sanitises_the_name_itself_for_every_caller(self):
         # build_pack calls runbook(alertname) directly, without run_tool's sanitiser

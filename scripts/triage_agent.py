@@ -142,9 +142,10 @@ DEFAULT_REDACT = [
     # log line), and only real PEM rows count (audit run-4): exactly 64 characters, or 76 (MIME and
     # GNU base64's wrap, audit run-5), or a final row of 4-76 with its "=" padding that ends the line
     # or its value (a quote, comma, brace or bracket after it: a key inside JSON or a YAML flow
-    # sequence), in real base64 shape (whole 4-character groups, then "xx==" or "xxx="). A padded
-    # final row may also end at whitespace, and any row may end the text itself (loki_lines cuts a
-    # line at 300 characters, mid-row). A field name after the key ("databasePassword:",
+    # sequence), in real base64 shape (whole 4-character groups, then "xx==" or "xxx="). Any row may
+    # end the text itself (loki_lines cuts a line at 300 characters, mid-row). One last row, padded
+    # or not, may also end at whitespace with more text after it: taken once, outside the repeat, so
+    # at most one following word of that shape is over-redacted. A field name after the key ("databasePassword:",
     # "storageAccountKey=", "appPassword= x") is neither. These two rules run AFTER the keyword and
     # name/value rules (R42): a keyword's value is already "[redacted]", which no base64 row can eat,
     # and before that swap "password=" in front of a quote read as a padded final row. A keyword-named
@@ -156,7 +157,8 @@ DEFAULT_REDACT = [
     (r"(?:\bMII[A-Za-z0-9+/]{20,4096}|(?<=\[redacted\])(?=(?:\\[nr]|\s){1,8}[A-Za-z0-9+/]{64}(?:[A-Za-z0-9+/]{12})?(?![A-Za-z0-9+/=])))"
      r"(?:(?:\\[nr]|\s){1,8}(?:[A-Za-z0-9+/]{64}(?:[A-Za-z0-9+/]{12})?(?![A-Za-z0-9+/=])"
      r"|(?=[A-Za-z0-9+/=]{4,76}[ \t]{0,8}(?:\\[nr]|[\r\n\"',}\]]|$))(?:[A-Za-z0-9+/]{4}){0,19}(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?(?![A-Za-z0-9+/=])"
-     r"|(?:[A-Za-z0-9+/]{4}){0,18}(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)(?=\s)|[A-Za-z0-9+/]{1,76}={0,2}\Z)){0,256}={0,2}",
+     r"|[A-Za-z0-9+/]{1,76}={0,2}\Z)){0,256}"
+     r"(?:(?:\\[nr]|\s){1,8}(?:(?:[A-Za-z0-9+/]{4}){1,19}|(?:[A-Za-z0-9+/]{4}){0,18}(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=))(?=\s))?={0,2}",
      "[pem-redacted]"),
     # A lone base64 body line with no "MII" prefix of its own - a later line of a multi-line PEM once
     # the first has already matched above, or a body pasted without its first line. Exactly 64 base64
@@ -257,10 +259,10 @@ class Budget:
 
 _TOO_LARGE = object()
 # One upstream body is read, decoded and parsed at a time, process-wide (audit run-5): an 8 MiB body
-# of attacker-shaped alert labels costs 109 MiB while it is a str plus a parse tree, and four workers
-# doing that together reached 351 MiB against the 256 MiB limit (157 MiB with this lock; see
-# MAX_WORKERS). A worker waits at most its own call timeout for the lock, then counts the source as
-# unreachable.
+# of attacker-shaped alert labels costs 109 MiB while it is a str plus a parse tree. Measured with
+# the audit's section H (4 workers, attacker-shaped 8 MiB alert lists, worst of 20 trials): 351 MiB
+# VmHWM without this lock, against the 256 MiB limit, and 157 MiB with it. The wait for the lock comes out of the call's own timeout, so a worker that waits
+# too long counts the source as unreachable, and build_pack keeps to its deadline.
 _UPSTREAM = threading.Lock()
 
 
@@ -269,10 +271,14 @@ def get_json(url, headers=None, timeout=SOURCE_TIMEOUT):
     is never parsed: at most one byte past the cap is ever read. Never raises: every source is optional."""
     try:
         req = urllib.request.Request(url, headers={**(headers or {}), "User-Agent": USER_AGENT})
+        t0 = time.monotonic()
         if not _UPSTREAM.acquire(timeout=timeout):
             raise TimeoutError("another upstream body is being parsed")
         try:
-            with urllib.request.urlopen(req, timeout=timeout) as r:
+            left = timeout - (time.monotonic() - t0)   # the wait counts: one call never takes 2x timeout
+            if left <= 0:
+                raise TimeoutError("no time left after waiting for the parse lock")
+            with urllib.request.urlopen(req, timeout=left) as r:
                 raw = r.read(MAX_UPSTREAM_BYTES + 1)
             if len(raw) > MAX_UPSTREAM_BYTES:
                 log("source response over %d bytes, not parsed: %s" % (MAX_UPSTREAM_BYTES, url.split("?")[0]))
@@ -906,8 +912,8 @@ def process(payload):
 
 # At most this many process() workers at once, inside the container's 256 MiB: an OOM restart would
 # also forget the hourly run cap and the dedup map. One attacker-shaped 8 MiB alert list costs 109 MiB
-# while it is parsed, so get_json parses one body at a time; four workers then peaked at 157 MiB,
-# worst of 20 trials (audit run-5; 351 MiB without that lock). A group that arrives while every slot
+# while it is parsed, so get_json parses one body at a time: VmHWM 157 MiB, 351 MiB without that
+# lock (audit run-5 section H, 4 workers, worst of 20 trials; see _UPSTREAM). A group that arrives while every slot
 # is busy is dropped with a log line, not queued: it is not marked triaged, so Alertmanager's next
 # notification for it can still be triaged.
 MAX_WORKERS = 4
