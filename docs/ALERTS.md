@@ -183,7 +183,12 @@ not as intrusion detection.
 ### SSHFailedLoginBurst
 Warning, after 1m. More than 20 failed SSH logins in 5 minutes from one address. Usually noise
 from the public internet; worth attention when the source is inside your network.
+It counts only lines sshd writes itself and takes the address from sshd's own `from`, so a username
+an SSH client sends cannot fire it or pick the address. A local user on the host can still write an
+sshd-shaped line into the auth log with `logger`.
 
 ### RootLoginDetected
 Warning, fires immediately. An SSH login as root was accepted. Expected on some setups, alarming
 on others, which is why it only warns.
+It matches only sshd's own `Accepted ... for root from <ip> port <n> ssh2` line, so a username an SSH
+client sends cannot fire it; a local user on the host can still write such a line with `logger`.
