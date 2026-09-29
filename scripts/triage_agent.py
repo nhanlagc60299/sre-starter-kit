@@ -325,7 +325,11 @@ def _watched(cls):
         create = conn._create_connection
         def connect(*x, **y):
             sock, d = create(*x, **y), getattr(_WATCH, "deadline", None)
-            return d.add(sock) if d else sock
+            try:
+                return d.add(sock) if d else sock
+            except BaseException:          # dup() can fail (EMFILE): the socket must not leak
+                sock.close()
+                raise
         conn._create_connection = connect
         return conn
     return make
@@ -380,10 +384,11 @@ def get_json(url, headers=None, timeout=SOURCE_TIMEOUT):
         if len(raw) > MAX_UPSTREAM_BYTES:
             log("source response over %d bytes, not parsed: %s" % (MAX_UPSTREAM_BYTES, url.split("?")[0]))
             return _TOO_LARGE
-        # The guard fires at the deadline, so a body it cut (a close-delimited one reads as a normal
-        # end) always has no time left here and is refused, never parsed.
+        # A body the guard cut (a close-delimited one reads as a normal end) is refused, never parsed.
+        # guard.fired says so directly: the Timer's clock and time.monotonic() are not the same clock
+        # everywhere, so "no time left" alone could miss a cut that came early.
         left = deadline - time.monotonic()
-        if left <= 0 or not _UPSTREAM.acquire(timeout=left):
+        if guard.fired or left <= 0 or not _UPSTREAM.acquire(timeout=left):
             raise TimeoutError("no time left to parse: another upstream body is being parsed")
         try:
             text, raw = raw.decode(), None   # the bytes go before the parse tree is built
@@ -1056,6 +1061,11 @@ def process(payload):
 # Alertmanager's next notification for it can still be triaged.
 MAX_WORKERS = 4
 WORKERS = threading.BoundedSemaphore(MAX_WORKERS)
+# Webhook bodies are read before a worker slot is taken (so a slow sender cannot hold one), which left
+# the number read at once unbounded. At most this many, each at most MAX_BODY: 8 MiB of body bytes in
+# flight at once. A POST past it gets 503 with its body unread; Alertmanager retries it.
+MAX_BODY_READERS = 8
+BODY_READERS = threading.BoundedSemaphore(MAX_BODY_READERS)
 
 
 def _work(payload):
@@ -1090,12 +1100,18 @@ class Handler(BaseHTTPRequestHandler):
         # counts only silence, so a sender trickling a byte at a time kept the read going, and with
         # the slot taken first four such senders held every slot (audit run-6, ruling R48b).
         # SHUT_RD, so the 408 still goes out.
-        guard = _Deadline(BODY_SECONDS, socket.SHUT_RD)
-        guard.add(self.connection)
+        # At most BODY_READERS bodies are read at once (review round 2): past that, 503 unread.
+        if not BODY_READERS.acquire(blocking=False):
+            self.send_response(503); self.end_headers(); return
         try:
-            body = self.rfile.read(n)
+            guard = _Deadline(BODY_SECONDS, socket.SHUT_RD)
+            try:
+                guard.add(self.connection)
+                body = self.rfile.read(n)
+            finally:
+                guard.cancel()
         finally:
-            guard.cancel()
+            BODY_READERS.release()
         if len(body) < n:
             self.send_response(408 if guard.fired else 400); self.end_headers(); return
         # Only then a slot, and no parse without one: with every slot busy the group gets 200

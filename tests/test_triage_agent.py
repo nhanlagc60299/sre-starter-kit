@@ -1164,6 +1164,39 @@ class ToolTests(unittest.TestCase):
                 self.assertTrue(lock_free and waited < 0.2, "the parse lock was held %.1fs during the network read" % waited)
                 self.assertLess(took, 1.8, "a 1s call took %.1fs" % took)
 
+    def test_run6_r2_a_body_the_guard_cut_is_never_parsed_even_with_time_left(self):
+        # review round 2: a cut close-delimited body was refused only because the Timer fires at the
+        # deadline; a Timer that fired early (another clock) left a valid-looking prefix to be parsed.
+        class Fired:
+            fired = True
+            def __init__(self, *a, **k): pass
+            def add(self, sock): return sock
+            def cancel(self): pass
+        class Resp:
+            def __init__(self): self.body = [b"[1]"]
+            def __enter__(self): return self
+            def __exit__(self, *a): return False
+            def read1(self, n): return self.body.pop() if self.body else b""
+        with mock.patch.object(self.agent, "_Deadline", Fired), mock.patch("builtins.print"), \
+             mock.patch.object(self.agent._OPENER, "open", lambda req, timeout: Resp()):
+            self.assertIsNone(self.agent.get_json("http://am/api/v2/alerts", timeout=5))
+
+    def test_run6_r2_a_failed_dup_leaks_neither_the_socket_nor_the_timer(self):
+        # review round 2: _Deadline.add() dups the socket; a dup() failure (EMFILE) must still close
+        # the connection's socket and cancel the timer.
+        made, real_create = [], socket.create_connection
+        def create(*a, **k):
+            sock = real_create(*a, **k); made.append(sock); return sock
+        timers = lambda: [t for t in threading.enumerate() if isinstance(t, threading.Timer) and t.is_alive()]
+        before = len(timers())
+        with mock.patch.object(socket, "create_connection", create), mock.patch("builtins.print"), \
+             mock.patch.object(socket.socket, "dup", side_effect=OSError(24, "Too many open files")):
+            self.assertIsNone(self.agent.get_json(self.base + "/api/v2/alerts", timeout=30))
+        self.assertEqual(len(made), 1)
+        self.assertEqual(made[0].fileno(), -1, "the connection's socket leaked")
+        time.sleep(0.1)
+        self.assertEqual(len(timers()), before, "the 30s timer was left running")
+
     def test_run6_a_credentialed_request_never_follows_a_redirect_to_another_origin(self):
         # audit run-6 (h9): urllib's default redirect handler copies every header to the new URL,
         # the Grafana Basic header included, whatever its host or port.
@@ -2128,6 +2161,48 @@ class IngressTests(unittest.TestCase):
         for out, took in ended:
             self.assertIn(out, (b"HTTP/1.0 408", b""))     # the 408, or the reset a later byte drew
             self.assertLess(took, 2.5)
+
+    def test_run6_r2_a_failed_dup_on_the_body_read_leaves_no_timer(self):
+        timers = lambda: [t for t in threading.enumerate() if isinstance(t, threading.Timer) and t.is_alive()]
+        before = len(timers())
+        errors = []   # the handler's OSError reaches socketserver, which would print its traceback
+        with mock.patch.object(self.agent, "BODY_SECONDS", 30), mock.patch.object(self.agent, "process") as proc, \
+             mock.patch.object(self.srv, "handle_error", lambda req, addr: errors.append(sys.exc_info()[1])), \
+             mock.patch.object(socket.socket, "dup", side_effect=OSError(24, "Too many open files")):
+            self._raw(self._head(2), b"{}", wait=3)
+            time.sleep(0.2)
+        proc.assert_not_called()
+        self.assertEqual([getattr(e, "errno", None) for e in errors], [24])
+        self.assertEqual(len(timers()), before, "the 30s body timer was left running")
+        self.assertEqual((self.agent.BODY_READERS._value, self.agent.WORKERS._value), (8, 4))
+
+    def test_run6_r2_at_most_eight_bodies_are_read_at_once(self):
+        # review round 2: bodies are read before a worker slot, so nothing capped how many 1 MiB bodies
+        # were in flight. The ninth concurrent sender gets 503 at once, its body never read.
+        conns = []
+        head = ("POST /alert HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer t0k\r\nContent-Type: application/json\r\n"
+                "Content-Length: 1000\r\n\r\n").encode()
+        with mock.patch.dict(os.environ, {"TRIAGE_WEBHOOK_TOKEN": "t0k"}), mock.patch.object(self.agent, "BODY_SECONDS", 3), \
+             mock.patch.object(self.agent, "process") as proc, \
+             mock.patch.object(self.agent.json, "loads", wraps=json.loads) as loads:
+            for _ in range(8):                     # eight slow senders: headers, a byte, then silence
+                c = socket.create_connection(("127.0.0.1", self.port), timeout=10); c.sendall(head + b"{"); conns.append(c)
+            for _ in range(50):
+                if self.agent.BODY_READERS._value == 0: break
+                time.sleep(0.05)
+            all_taken = self.agent.BODY_READERS._value == 0
+            t0 = time.monotonic()
+            out, _ = self._raw(head, b"{" + b" " * 998 + b"}", wait=2)
+            self.assertTrue(out.startswith(b"HTTP/1.0 503"), "expected an immediate 503, got %r" % out[:40])
+            self.assertLess(time.monotonic() - t0, 1.5)
+            self.assertTrue(all_taken, "eight slow senders did not hold all eight body readers")
+            for c in conns:
+                c.settimeout(6); self.assertTrue(c.recv(100).startswith(b"HTTP/1.0 408")); c.close()
+        proc.assert_not_called(); self.assertEqual(loads.call_count, 0)
+        for _ in range(50):
+            if self.agent.BODY_READERS._value == 8: break
+            time.sleep(0.05)
+        self.assertEqual(self.agent.BODY_READERS._value, 8, "a body reader was not given back")
 
     def test_run6_a_bad_or_unread_body_gives_its_slot_back(self):
         with mock.patch.object(self.agent, "process") as proc:
