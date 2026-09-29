@@ -224,11 +224,11 @@ TRIAGE_WEBHOOK_TOKEN=DUMMYTRIAGESECRET
 ENV
 cp -r core "$tmp3/core"
 ( cd "$tmp3" && PATH="$tmp3/bin:$PATH" bash "$OLDPWD/scripts/render.sh" >/dev/null )
-[ -s "$tmp3/argv.log" ] || { echo "FAIL: the python3 stub never ran, so the argv check proves nothing"; exit 1; }
+[ -s "$tmp3/argv.log" ] || { echo "FAIL: the python3 stub never ran, so the python3 argv check proves nothing"; exit 1; }
 for s in DUMMYSLACKSECRET DUMMYDISCORDSECRET DUMMYTEAMSSECRET DUMMYTELEGRAMSECRET DUMMYSMTPSECRET DUMMYTRIAGESECRET; do
   grep -q "$s" "$tmp3/build/alertmanager/alertmanager.yml" || { echo "FAIL: $s did not reach the rendered config"; exit 1; }
   if grep -q "$s" "$tmp3/argv.log"; then echo "FAIL: $s was passed to python3 on its command line"; exit 1; fi
 done
-echo "no receiver secret or triage token on a helper's argv"
+echo "no receiver secret or triage token on python3's argv"
 
 echo "test_alertmanager OK"

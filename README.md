@@ -153,7 +153,12 @@ of their choosing, up to the cap below — restrict who may send it alerts with 
 `0` = unlimited), so a burst of alert groups cannot turn into a burst of dry-run packs. A run the cap
 refuses logs `skip: hourly triage run cap reached`, and its alert group is still marked triaged, so a
 repeat of it within the hour is skipped too. "The group" is the group together with the set of alerts
-in it: when an alert joins or leaves, the group is triaged again.
+in it: a notification whose alert set differs from every one triaged in the last hour is triaged
+again. An alert joining sends one straight away; one resolving does not (`webhook-triage` has
+`send_resolved: false`), so the smaller set is seen at the group's next notification. Only the first
+20 alerts of a group reach the agent (`max_alerts: 20`), so anyone who can post to Alertmanager can
+crowd a genuine alert out of the triage payload with 20 of their own; the page to your receivers is
+unaffected.
 
 The agent also carries a read-only tool registry (`prom_query`, `prom_range`, `loki_query`, `alerts`,
 `deploys`, `runbook`) that Pro's engine may call while it thinks, and Pro prints one `triage-trace`
