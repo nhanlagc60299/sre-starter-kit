@@ -440,10 +440,15 @@ RULE_QUERY_CHARS = 4000  # a rule's PromQL is sent back to Prometheus, so it get
 # A cut must never leave a secret's prefix that no pattern matches any more (audit run-7: a ghp_ token
 # straddling the 300th character kept 9-19 of its characters, where the whole value was redacted
 # before). So a value longer than its cut is redacted over its first n + CUT_REDACT_WINDOW characters
-# and then cut: every bounded pattern (a URL password's 1024, a token's 255, an email's parts) fits
-# whole in that window, and the unbounded ones redact whatever of the value it holds. One window at
-# a time, so the copy is bounded like the cut; the cut then lands in redacted text.
+# and then cut. The window's own end is a cut too, and a secret redacted earlier in it shrinks, which
+# pulls text from that end into the first n (review round 1: "password=" + 2315 characters, then a
+# token, kept 19 of its characters). So nothing within CUT_REDACT_MARGIN of the window's end is ever
+# kept: the margin is longer than any bounded pattern's reach (a URL's "://" + 256 + ":" + 1024 + "@"
+# is the longest), and an unbounded one redacts whatever of a secret the window holds. Without a
+# shrink the margin costs nothing (2048 - 1536 > 0); after a large one the value is shorter than n.
+# One window at a time, so the copy is bounded like the cut.
 CUT_REDACT_WINDOW = 2048
+CUT_REDACT_MARGIN = 1536
 _KEY_LABELS = ("__name__", "alertname", "severity", "instance", "job", "service", "namespace")
 
 
@@ -453,7 +458,10 @@ def _cut(v, n=MAX_FIELD_CHARS):
     if v is None or isinstance(v, (bool, int, float)):
         return v
     s = v if isinstance(v, str) else str(v)
-    return s if len(s) <= n else redact(s[:n + CUT_REDACT_WINDOW])[:n]
+    if len(s) <= n:
+        return s
+    r = redact(s[:n + CUT_REDACT_WINDOW])
+    return r[:n] if len(s) <= n + CUT_REDACT_WINDOW else r[:min(n, max(0, len(r) - CUT_REDACT_MARGIN))]
 
 
 def _labels(d):
@@ -1097,7 +1105,12 @@ BODY_READERS = threading.BoundedSemaphore(MAX_BODY_READERS)
 # of headers. Measured: 64 connections each holding its full header budget add 3.1 MiB (0.05 MiB
 # each, a thread and its deadline timer included), on top of the 165 MiB and the 8 MiB of bodies
 # above: 176 MiB worst case, under the 192 MiB design bar (audit run-7, three runs, 100 peers each).
+# One source address may hold at most MAX_CONNECTIONS_PER_SOURCE of them (review round 1, ruling
+# R51): each slot recycles within HEADER_SECONDS, so one peer reconnecting ~13 times a second could
+# otherwise hold all 64 and starve Alertmanager. 8, like the body readers: Alertmanager is one
+# address, and past 8 at once its POSTs would wait for a body reader anyway; it retries a refused one.
 MAX_CONNECTIONS = 64
+MAX_CONNECTIONS_PER_SOURCE = 8
 CONNECTIONS = threading.BoundedSemaphore(MAX_CONNECTIONS)
 HEADER_SECONDS = 5
 MAX_HEADER_BYTES = 16384
@@ -1224,29 +1237,45 @@ class Handler(BaseHTTPRequestHandler):
 
 
 class Server(ThreadingHTTPServer):
-    """ThreadingHTTPServer with at most MAX_CONNECTIONS requests in flight: one past it is closed
-    before a byte of it is read, and its slot comes back when its request finishes."""
+    """ThreadingHTTPServer with at most MAX_CONNECTIONS requests in flight, and at most
+    MAX_CONNECTIONS_PER_SOURCE from one address: one past either is closed before a byte of it is
+    read, and its slots come back when its request finishes."""
     def __init__(self, *a, **k):
-        self._slots = {}                    # id(request) -> the semaphore it took, given back by the same
+        self._lock = threading.Lock()
+        self._slots = {}                    # id(request) -> (the semaphore it took, its address)
+        self._per_source = {}               # address -> requests in flight
         super().__init__(*a, **k)
 
     def process_request(self, request, client_address):
-        slots = CONNECTIONS
-        if not slots.acquire(blocking=False):
+        slots, src = CONNECTIONS, client_address[0] if isinstance(client_address, tuple) else client_address
+        with self._lock:
+            ok = self._per_source.get(src, 0) < MAX_CONNECTIONS_PER_SOURCE and slots.acquire(blocking=False)
+            if ok:
+                self._per_source[src] = self._per_source.get(src, 0) + 1
+                self._slots[id(request)] = (slots, src)
+        if not ok:
             self.shutdown_request(request)
             return
-        self._slots[id(request)] = slots
         try:
             super().process_request(request, client_address)
-        except BaseException:               # no thread: the slot goes back here
-            self._slots.pop(id(request)).release()
+        except BaseException:               # no thread: the slots go back here
+            self._release(request)
             raise
 
     def process_request_thread(self, request, client_address):
         try:
             super().process_request_thread(request, client_address)
         finally:
-            self._slots.pop(id(request)).release()
+            self._release(request)
+
+    def _release(self, request):
+        with self._lock:
+            slots, src = self._slots.pop(id(request))
+            if self._per_source[src] > 1:
+                self._per_source[src] -= 1
+            else:
+                del self._per_source[src]
+        slots.release()
 
 
 def serve(port=9096):

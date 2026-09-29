@@ -967,6 +967,12 @@ class PackTests(unittest.TestCase):
         name = "a" * 301 + "_password"
         labels = {"alertname": "Leak", "note": "x" * 280 + " token " + tok, name: "dummyval"}
         labels.update({"at%03d" % n: "y" * n + " " + tok for n in range(250, 300, 3)})
+        # review round 1: the redaction window's end is a cut too. A secret redacted earlier in the
+        # window shrinks and pulls the text at that end into the kept 300: a password, and a PEM body
+        import random
+        rnd = random.Random(21)
+        pem = "MII" + "".join(rnd.choice("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/") for _ in range(2327))
+        labels.update({"shrink_pw": "password=" + "A" * 2315 + " " + tok, "shrink_pem": "k=" + pem + " " + tok})
         Fake.routes["/api/v2/alerts"] = (200, [dict(AM_ALERTS[0], labels=labels)])
         Fake.routes["/loki/api/v1/query_range"] = (200, {"status": "success", "data": {"result": [
             {"stream": {}, "values": [["1758000000000000000", "z" * 290 + " " + tok + " retry"]]}]}})
@@ -977,6 +983,9 @@ class PackTests(unittest.TestCase):
         self.assertEqual(kept[name[:300]], "[redacted]")
         self.assertNotIn("dummyval", text)
         self.assertTrue(kept["note"].startswith("x" * 280 + " token "), kept["note"])
+        self.assertEqual(len(self.agent._cut("x" * 5000)), 300)   # without a shrink the margin costs nothing
+        for k in ("shrink_pw", "shrink_pem"):
+            self.assertNotIn("ghp_", kept[k], k)
         self.assertTrue(all(len(k) <= 300 and len(v) <= 300 for k, v in kept.items()))
 
     def test_dedup_within_an_hour(self):
@@ -2269,6 +2278,41 @@ class IngressTests(unittest.TestCase):
             self.assertEqual(self._post(), 200)          # and the next genuine delivery is served
         self.assertEqual(self.agent.CONNECTIONS._value, 64)
 
+    def test_run7_r1_one_source_cannot_hold_every_connection(self):
+        # review round 1 (ruling R51): a slot recycles within HEADER_SECONDS, so one peer reconnecting
+        # ~13 times a second held all 64. One address now holds at most 8; a second address still
+        # gets a slot while the first holds 12 sockets open.
+        self.assertEqual(self.agent.MAX_CONNECTIONS_PER_SOURCE, 8)
+        peer_a, real = set(), self.srv.get_request
+        def get_request():                  # loopback has one address: tell the two peers apart by port
+            sock, addr = real()
+            return sock, ("198.51.100.7" if addr[1] in peer_a else "203.0.113.9", addr[1])
+        held = []
+        with mock.patch.object(self.srv, "get_request", get_request), mock.patch.object(self.agent, "process"):
+            try:
+                for _ in range(12):
+                    c = socket.socket(); c.bind(("127.0.0.1", 0)); peer_a.add(c.getsockname()[1])
+                    c.settimeout(3); c.connect(("127.0.0.1", self.port)); held.append(c)
+                    c.sendall(b"POST /alert HTTP/1.1\r\nX-Pad: ")     # headers never finish
+                time.sleep(0.5)
+                closed = 0
+                for c in held:
+                    c.settimeout(0.2)
+                    try:
+                        closed += c.recv(100) == b""
+                    except socket.timeout:
+                        pass
+                    except OSError:
+                        closed += 1
+                self.assertEqual(closed, 4, "one address held more than 8 connections")
+                self.assertEqual(self._post(), 200)   # the second address is served meanwhile
+            finally:
+                for c in held: c.close()
+            for _ in range(100):
+                if not getattr(self.srv, "_per_source", {}) and self.agent.CONNECTIONS._value == 64: break
+                time.sleep(0.05)
+        self.assertEqual((getattr(self.srv, "_per_source", {}), self.agent.CONNECTIONS._value), ({}, 64))
+
     def test_run7_the_header_phase_has_a_wall_clock_deadline(self):
         # Handler.timeout counts only silence: one byte every few seconds kept a header read going.
         # The request line and headers now have HEADER_SECONDS of wall-clock time in all, then 408.
@@ -2335,14 +2379,18 @@ class IngressTests(unittest.TestCase):
     def test_run6_r2_at_most_eight_bodies_are_read_at_once(self):
         # review round 2: bodies are read before a worker slot, so nothing capped how many 1 MiB bodies
         # were in flight. The ninth concurrent sender gets 503 at once, its body never read.
-        conns = []
+        conns, first8, real = [], set(), self.srv.get_request
         head = ("POST /alert HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer t0k\r\nContent-Type: application/json\r\n"
                 "Content-Length: 1000\r\n\r\n").encode()
+        def get_request():   # the eight senders share one address, so the ninth is not refused by its per-source cap
+            sock, addr = real()
+            return sock, ("198.51.100.7" if addr[1] in first8 else "203.0.113.9", addr[1])
         with mock.patch.dict(os.environ, {"TRIAGE_WEBHOOK_TOKEN": "t0k"}), mock.patch.object(self.agent, "BODY_SECONDS", 3), \
-             mock.patch.object(self.agent, "process") as proc, \
+             mock.patch.object(self.agent, "process") as proc, mock.patch.object(self.srv, "get_request", get_request), \
              mock.patch.object(self.agent.json, "loads", wraps=json.loads) as loads:
             for _ in range(8):                     # eight slow senders: headers, a byte, then silence
-                c = socket.create_connection(("127.0.0.1", self.port), timeout=10); c.sendall(head + b"{"); conns.append(c)
+                c = socket.socket(); c.bind(("127.0.0.1", 0)); first8.add(c.getsockname()[1]); c.settimeout(10)
+                c.connect(("127.0.0.1", self.port)); c.sendall(head + b"{"); conns.append(c)
             for _ in range(50):
                 if self.agent.BODY_READERS._value == 0: break
                 time.sleep(0.05)

@@ -99,8 +99,8 @@ services:
     image: python:3.12-alpine
     profiles: [triage]
     command: ["python3", "-u", "/app/triage_agent.py"]
-    # At most 64 connections (16 KiB of headers each, sent within 5 s) and 8 webhook bodies of
-    # 1 MiB read at once, up to 8 MiB per upstream read, one parse at a time, and only a bounded
+    # At most 64 connections (8 per address, 16 KiB of headers each, sent within 5 s) and 8
+    # webhook bodies of 1 MiB read at once, up to 8 MiB per upstream read, one parse at a time, and only a bounded
     # copy of it kept. Measured: four workers on attacker-shaped
     # 8 MiB alert lists peak at 165 MiB (audit run-5 section H, worst of 60 trials in three
     # runs), and on 30 alerts of ~25k labels each at 143 MiB (audit run-6, worst of 12); one
