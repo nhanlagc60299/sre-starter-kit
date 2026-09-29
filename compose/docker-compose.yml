@@ -99,6 +99,9 @@ services:
     image: python:3.12-alpine
     profiles: [triage]
     command: ["python3", "-u", "/app/triage_agent.py"]
+    # A 1 MiB webhook body and up to 8 MiB per upstream read (about 40 MiB peak on an 8 MiB alert
+    # list): the limit keeps a flood of big alert groups from growing the agent without bound.
+    mem_limit: 256m
     volumes:
       - ../scripts/triage_agent.py:/app/triage_agent.py:ro
       - ../docs/ALERTS.md:/docs/ALERTS.md:ro

@@ -42,7 +42,7 @@ inhibit_rules:
 # a postgres_exporter identifier -- Pro modules, but this template is shared) and reach
 # Slack/Discord/Teams/Telegram/email with the operator's webhook identity. The
 # Slack chain's &/</> HTML-entity escaping is Slack-only -- it showed up literally as "&gt;" outside
-# Slack, so the other receivers use a chain that only folds CR/LF and neutralizes [, ], @ and ` (see
+# Slack, so the other receivers use a chain that only folds line breaks and neutralizes [, ], @ and ` (see
 # scripts/render.sh's comment for the full rationale of each). The email body is not ours: it is
 # Alertmanager's default HTML template, which relies on html/template's own escaping, and only the
 # Subject header goes through ${OTHER_SANITIZE}. ${PROJECT_NAME},
@@ -83,4 +83,7 @@ receivers:
     webhook_configs:
       - url: ${TRIAGE_WEBHOOK_URL}
         send_resolved: false
+        # Anyone who reaches Alertmanager's API can put thousands of alerts in one group; the agent
+        # gets the first 20 (the count of the rest arrives as truncatedAlerts).
+        max_alerts: 20
         # TRIAGE_WEBHOOK_AUTH

@@ -84,4 +84,13 @@ for f in .env .env.bak .env.prod .env.local; do
 done
 if git check-ignore -q --no-index .env.example; then echo "FAIL: .env.example is ignored"; exit 1; fi
 
+# The triage agent parses a 1 MiB webhook body and up to 8 MiB per upstream read: it runs with a
+# default memory limit, so a flood of big alert groups cannot grow it without bound (audit run-4).
+python3 - <<'MEM' || exit 1
+import sys, yaml
+svc = yaml.safe_load(open("compose/docker-compose.yml"))["services"]["triage-agent"]
+if svc.get("mem_limit") != "256m":
+    sys.exit("FAIL: triage-agent has no 256m mem_limit: %r" % svc.get("mem_limit"))
+MEM
+
 echo "test_env_example OK"

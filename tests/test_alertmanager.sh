@@ -13,11 +13,14 @@ grep -q 'severity="critical"' "$tmp/build/alertmanager/alertmanager.yml"  # sani
 printf '%s\n' "TRIAGE_WEBHOOK_TOKEN=\"ab'cd\"" >> "$tmp/.env"
 ( cd "$tmp" && bash "$OLDPWD/scripts/render.sh" >/dev/null )
 ${CONTAINER_ENGINE:-docker} run --rm -v "$tmp/build/alertmanager:/c" --entrypoint amtool prom/alertmanager:v0.28.1 check-config /c/alertmanager.yml
-python3 - "$tmp/build/alertmanager/alertmanager.yml" <<'PYTOK' || { echo "FAIL: webhook-triage does not send TRIAGE_WEBHOOK_TOKEN"; exit 1; }
+python3 - "$tmp/build/alertmanager/alertmanager.yml" <<'PYTOK' || { echo "FAIL: webhook-triage does not send TRIAGE_WEBHOOK_TOKEN, or has no max_alerts: 20"; exit 1; }
 import sys,yaml
 by={r["name"]: r for r in yaml.safe_load(open(sys.argv[1]))["receivers"]}
 wc=by["webhook-triage"]["webhook_configs"][0]
 assert wc.get("http_config",{}).get("authorization")=={"type": "Bearer", "credentials": "ab'cd"}, wc
+# a group of thousands of alerts (anyone who reaches Alertmanager's API can post them) reaches the
+# agent as at most 20, the rest counted in truncatedAlerts
+assert wc.get("max_alerts")==20, ("webhook-triage max_alerts", wc.get("max_alerts"))
 assert all("http_config" not in c for n,r in by.items() if n!="webhook-triage" for c in r.get("webhook_configs",[])), "token leaked to another webhook"
 PYTOK
 # The agent compares the header as bytes of a latin-1 decode against UTF-8 bytes of the token, so a
@@ -123,7 +126,7 @@ PYSAN
 # runbook_url uses this repo's own public URL shape (docs/ALERTS.md#<anchor>), not the private Pro
 # repo's runbooks/<Name>.md.
 cat > "$tmp2/hostile.json" <<'JSON'
-{"Status":"firing","Receiver":"critical","Alerts":[{"Status":"firing","Labels":{},"Annotations":{"summary":"<!channel> <@U123> <https://evil.invalid|runbook> [click](https://evil.invalid) @everyone `x` &lt;!here&gt;\r\n# heading\n","runbook_url":"https://github.com/nhanlagc60299/sre-starter-kit/blob/main/docs/ALERTS.md#test","dashboard":"abc"}}],"GroupLabels":{"alertname":"<!channel>"},"CommonLabels":{"alertname":"<!channel> [x](https://evil.invalid) @here\n# heading"},"CommonAnnotations":{},"ExternalURL":"http://am.invalid"}
+{"Status":"firing","Receiver":"critical","Alerts":[{"Status":"firing","Labels":{},"Annotations":{"summary":"<!channel> <@U123> <https://evil.invalid|runbook> [click](https://evil.invalid) @everyone `x` &lt;!here&gt;\r\n# heading\n\u000b# vt\u000c# ff\u0085# nel\u2028# ls\u2029# ps","runbook_url":"https://github.com/nhanlagc60299/sre-starter-kit/blob/main/docs/ALERTS.md#test","dashboard":"abc"}}],"GroupLabels":{"alertname":"<!channel>"},"CommonLabels":{"alertname":"<!channel> [x](https://evil.invalid) @here\n# heading\u2028# ls\u0085# nel\u000b# vt"},"CommonAnnotations":{},"ExternalURL":"http://am.invalid"}
 JSON
 cat > "$tmp2/ordinary.json" <<'JSON'
 {"Status":"firing","Receiver":"critical","Alerts":[{"Status":"firing","Labels":{"alertname":"ServiceDown"},"Annotations":{"summary":"Container web restarted >3 times in 15m; Service api is DOWN (https://api.example.invalid/health?a=1&b=2)","runbook_url":"https://github.com/nhanlagc60299/sre-starter-kit/blob/main/docs/ALERTS.md#servicedown","dashboard":"sre-app?a=1&b=2"}}],"GroupLabels":{"alertname":"ServiceDown"},"CommonLabels":{"alertname":"ServiceDown"},"CommonAnnotations":{},"ExternalURL":"http://am.invalid"}
@@ -169,6 +172,8 @@ for key, text in fields.items():
         if "@here" in h: bad.append((key, "'@' survived (mention)", h))
         # a CR/LF would start a new line - a markdown heading on Discord/Teams/Telegram, a second email header line
         if re.search(r"(?m)^# heading", h): bad.append((key, "a line break survived", h))
+        # ... and so would VT, FF, NEL and the Unicode line/paragraph separators on some receivers
+        if re.search("[\x0b\x0c\x85\u2028\u2029]", h): bad.append((key, "a line separator survived", h))
         if "`x`" in h: bad.append((key, "'`' survived (code fence)", h))
         if is_slack:
             if "<!channel" in h or "<@U123" in h: bad.append((key, "'<' survived on Slack", h))

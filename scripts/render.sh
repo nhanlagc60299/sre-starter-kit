@@ -67,16 +67,18 @@ export NODE_EXPORTER_TARGET GRAFANA_EXTERNAL_URL
 # "[[]" / "[]]" are the POSIX bracket-expression idiom for a literal [ / ] (a leading ] is literal
 # inside a class); verified against prom/alertmanager:v0.28.1's amtool template render.
 #
-# Both chains first fold CR and LF into a space: a line break in a label would start a new line of
-# its own -- a markdown heading on Discord/Teams/Telegram, a second line in an email Subject.
+# Both chains first fold every line separator into a space -- CR, LF, VT, FF, NEL, U+2028, U+2029
+# (Go string escapes; the template lexer turns them into the characters themselves): a line break in a
+# label would start a new line of its own -- a markdown heading on Discord/Teams/Telegram, a second
+# line in an email Subject -- and some clients break lines on the last five too.
 #
 # SLACK_SANITIZE additionally escapes &,<,> as the HTML entities Slack's own escaping convention
 # already renders as literal characters (its docs: &amp;/&lt;/&gt;) -- Slack-only, & first so it is
 # not itself re-escaped by the </> step. OTHER_SANITIZE (Discord/Teams/Telegram, the email Subject) leaves &,<,>
 # alone: those receivers do not decode entities, so "&gt;3 times" showed up literally there (fix
 # round 1 review) -- ordinary label/annotation text must render the same as before this change.
-SLACK_SANITIZE='reReplaceAll "[\r\n]" " " | reReplaceAll "&" "&amp;" | reReplaceAll "<" "&lt;" | reReplaceAll ">" "&gt;" | reReplaceAll "[[]" "［" | reReplaceAll "[]]" "］" | reReplaceAll "@" "＠" | reReplaceAll "`" "｀"'
-OTHER_SANITIZE='reReplaceAll "[\r\n]" " " | reReplaceAll "[[]" "［" | reReplaceAll "[]]" "］" | reReplaceAll "@" "＠" | reReplaceAll "`" "｀"'
+SLACK_SANITIZE='reReplaceAll "[\r\n\v\f\u0085\u2028\u2029]" " " | reReplaceAll "&" "&amp;" | reReplaceAll "<" "&lt;" | reReplaceAll ">" "&gt;" | reReplaceAll "[[]" "［" | reReplaceAll "[]]" "］" | reReplaceAll "@" "＠" | reReplaceAll "`" "｀"'
+OTHER_SANITIZE='reReplaceAll "[\r\n\v\f\u0085\u2028\u2029]" " " | reReplaceAll "[[]" "［" | reReplaceAll "[]]" "］" | reReplaceAll "@" "＠" | reReplaceAll "`" "｀"'
 # .Annotations.runbook_url/.dashboard are rule-authored, but anyone who can POST to
 # Alertmanager's unauthenticated API sets them too ("x|y> <!channel> <z" would ping a Slack channel).
 # They get their own chain that strips only what leaves a link -- [, <, >, | everywhere, plus ) on
