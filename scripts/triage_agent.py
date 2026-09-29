@@ -4,7 +4,7 @@ redacts it, and either prints it (dry run, the default) or hands it to triage_en
 the Anthropic Messages API with your own key, and posts the returned note. Standard library only, on
 purpose: anyone can read this file end to end and know exactly what leaves their network. Only GETs
 against the kit's services."""
-import base64, hashlib, hmac, json, os, re, threading, time, urllib.error, urllib.parse, urllib.request
+import base64, hashlib, heapq, hmac, itertools, json, os, re, threading, time, urllib.error, urllib.parse, urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 try:
@@ -140,7 +140,8 @@ DEFAULT_REDACT = [
     # "MII" is the DER SEQUENCE tag every RSA/EC/PKCS8 key or cert starts with once base64-encoded.
     # The rows after it follow across whitespace or a literal "\n"/"\r" (a JSON-escaped key on one
     # log line), and only real PEM rows count (audit run-4): exactly 64 characters, or 76 (MIME and
-    # GNU base64's wrap, audit run-5), or a final row of 4-76 with its "=" padding that ends the line
+    # GNU base64's wrap, audit run-5) with no "." after it (that is a JWT's header segment, which the
+    # JWT rule below must see whole, audit run-6), or a final row of 4-76 with its "=" padding that ends the line
     # or its value (a quote, comma, brace or bracket after it: a key inside JSON or a YAML flow
     # sequence), in real base64 shape (whole 4-character groups, then "xx==" or "xxx="). Any row may
     # end the text itself (loki_lines cuts a line at 300 characters, mid-row). One last row, padded
@@ -154,8 +155,8 @@ DEFAULT_REDACT = [
     # separator and the row share no character, each row's end is fixed by a bounded lookahead, and
     # nothing after the repeat can fail, so it never backtracks. The trailing "={0,2}" is the first
     # row's own padding.
-    (r"(?:\bMII[A-Za-z0-9+/]{20,4096}|(?<=\[redacted\])(?=(?:\\[nr]|\s){1,8}[A-Za-z0-9+/]{64}(?:[A-Za-z0-9+/]{12})?(?![A-Za-z0-9+/=])))"
-     r"(?:(?:\\[nr]|\s){1,8}(?:[A-Za-z0-9+/]{64}(?:[A-Za-z0-9+/]{12})?(?![A-Za-z0-9+/=])"
+    (r"(?:\bMII[A-Za-z0-9+/]{20,4096}|(?<=\[redacted\])(?=(?:\\[nr]|\s){1,8}[A-Za-z0-9+/]{64}(?:[A-Za-z0-9+/]{12})?(?![A-Za-z0-9+/=.])))"
+     r"(?:(?:\\[nr]|\s){1,8}(?:[A-Za-z0-9+/]{64}(?:[A-Za-z0-9+/]{12})?(?![A-Za-z0-9+/=.])"
      r"|(?=[A-Za-z0-9+/=]{4,76}[ \t]{0,8}(?:\\[nr]|[\r\n\"',}\]]|$))(?:[A-Za-z0-9+/]{4}){0,19}(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?(?![A-Za-z0-9+/=])"
      r"|[A-Za-z0-9+/]{1,76}={0,2}\Z)){0,256}"
      r"(?:(?:\\[nr]|\s){1,8}(?:(?:[A-Za-z0-9+/]{4}){1,19}|(?:[A-Za-z0-9+/]{4}){0,18}(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=))(?=\s))?={0,2}",
@@ -210,8 +211,9 @@ DEFAULT_REDACT = [
     (r"\b(?:gh[pousr]_[A-Za-z0-9]{20,255}|xox[abprs]-[A-Za-z0-9-]{1,255}|sk-[A-Za-z0-9_-]{16,255}|sk_live_[A-Za-z0-9]{1,255})",
      "[token-redacted]"),
     # lookbehind, not \b: "-" is not \w, so "eyJ-eyJ-..." would give \b a start at every "eyJ" and each
-    # would rescan the rest of the run
-    (r"(?<![\w-])eyJ[\w-]{1,4096}\.eyJ[\w-]{1,8192}\.[\w-]{0,2048}", "[jwt-redacted]"),
+    # would rescan the rest of the run. A literal "\n"/"\r"/"\t" in front (a JSON-escaped log line, the
+    # PEM rule's own row separator) also starts one, though its "n" is \w (audit run-6).
+    (r"(?:(?<![\w-])|(?<=\\[nrt]))eyJ[\w-]{1,4096}\.eyJ[\w-]{1,8192}\.[\w-]{0,2048}", "[jwt-redacted]"),
     # Signed-URL / SAS / STS query parameters: any parameter named *sig or *signature (Azure SAS
     # "sig=", AWS "X-Amz-Signature=", S3 SigV2 and CloudFront "Signature=", GCS "X-Goog-Signature="),
     # "X-Amz-Security-Token=", and a bare API key passed as "key=" (Google Maps and others) - the
@@ -261,9 +263,29 @@ _TOO_LARGE = object()
 # One upstream body is read, decoded and parsed at a time, process-wide (audit run-5): an 8 MiB body
 # of attacker-shaped alert labels costs 109 MiB while it is a str plus a parse tree. Measured with
 # the audit's section H (4 workers, attacker-shaped 8 MiB alert lists, worst of 20 trials): 351 MiB
-# VmHWM without this lock, against the 256 MiB limit, and 157 MiB with it. The wait for the lock comes out of the call's own timeout, so a worker that waits
-# too long counts the source as unreachable, and build_pack keeps to its deadline.
+# VmHWM without this lock, against the 256 MiB limit, and 155 MiB with it and the fetchers' bounded
+# copies (audit run-6, see MAX_LABELS). The wait for the lock comes out of the call's own timeout, so a worker that waits
+# too long counts the source as unreachable, and build_pack keeps to its deadline. The body is read in
+# chunks against that same deadline (audit run-6): an upstream trickling bytes cannot hold the lock
+# past the call's timeout plus one socket read.
 _UPSTREAM = threading.Lock()
+READ_CHUNK = 65536
+
+
+class SameOriginRedirects(urllib.request.HTTPRedirectHandler):
+    """A redirect to another origin is refused, not followed: urllib copies every request header to
+    the new URL, so the Grafana Basic header (or the engine's API key) would go wherever a 302 points
+    (audit run-6). A redirect within the same scheme, host and port is followed as before."""
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        def origin(u):
+            p = urllib.parse.urlsplit(u)
+            return p.scheme.lower(), (p.hostname or "").lower(), p.port or {"http": 80, "https": 443}.get(p.scheme.lower())
+        if origin(req.full_url) != origin(urllib.parse.urljoin(req.full_url, newurl)):
+            raise urllib.error.HTTPError(req.full_url, code, "redirect to another origin refused", headers, fp)
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+_OPENER = urllib.request.build_opener(SameOriginRedirects)
 
 
 def get_json(url, headers=None, timeout=SOURCE_TIMEOUT):
@@ -271,15 +293,22 @@ def get_json(url, headers=None, timeout=SOURCE_TIMEOUT):
     is never parsed: at most one byte past the cap is ever read. Never raises: every source is optional."""
     try:
         req = urllib.request.Request(url, headers={**(headers or {}), "User-Agent": USER_AGENT})
-        t0 = time.monotonic()
+        t0 = time.monotonic(); deadline = t0 + timeout
         if not _UPSTREAM.acquire(timeout=timeout):
             raise TimeoutError("another upstream body is being parsed")
         try:
-            left = timeout - (time.monotonic() - t0)   # the wait counts: one call never takes 2x timeout
+            left = deadline - time.monotonic()   # the wait counts: one call never takes 2x timeout
             if left <= 0:
                 raise TimeoutError("no time left after waiting for the parse lock")
-            with urllib.request.urlopen(req, timeout=left) as r:
-                raw = r.read(MAX_UPSTREAM_BYTES + 1)
+            with _OPENER.open(req, timeout=left) as r:
+                raw = bytearray()
+                while len(raw) <= MAX_UPSTREAM_BYTES:
+                    if time.monotonic() > deadline:
+                        raise TimeoutError("upstream body not read within the call timeout")
+                    chunk = r.read1(min(READ_CHUNK, MAX_UPSTREAM_BYTES + 1 - len(raw)))   # one socket read
+                    if not chunk:
+                        break
+                    raw += chunk
             if len(raw) > MAX_UPSTREAM_BYTES:
                 log("source response over %d bytes, not parsed: %s" % (MAX_UPSTREAM_BYTES, url.split("?")[0]))
                 return _TOO_LARGE
@@ -318,6 +347,36 @@ def prom_url(path, **params):
     return ENV("PROMETHEUS_URL", "http://prometheus:9090") + path + ("?" + urllib.parse.urlencode(params) if params else "")
 
 
+# What a fetcher keeps of a parsed upstream body is a bounded copy, never a reference into it (audit
+# run-6): 30 kept alert-label dicts of ~25k short labels each held an 8 MiB body's worth of objects in
+# every worker, outside the parse lock - 393-396 MiB VmHWM for 4 workers against the 256 MiB limit.
+MAX_LABELS = 64          # per alert or series; the labels a reader needs first are kept first
+MAX_FIELD_CHARS = 300    # per label name, label value or other scalar, like loki_lines' line cut
+MAX_REFS = 10            # inhibitedBy, silencedBy, a deploy's tags
+RULE_QUERY_CHARS = 4000  # a rule's PromQL is sent back to Prometheus, so it gets a longer cut
+_KEY_LABELS = ("__name__", "alertname", "severity", "instance", "job", "service", "namespace")
+
+
+def _cut(v, n=MAX_FIELD_CHARS):
+    """A scalar from an upstream body, as a new bounded value: a string cut to n, a number or None as it is."""
+    if v is None or isinstance(v, (bool, int, float)):
+        return v
+    return (v if isinstance(v, str) else str(v))[:n]
+
+
+def _labels(d):
+    """At most MAX_LABELS labels, the _KEY_LABELS first, every name and value cut."""
+    if not isinstance(d, dict):
+        return {}
+    keys = [k for k in _KEY_LABELS if k in d]
+    keys += itertools.islice((k for k in d if k not in _KEY_LABELS), MAX_LABELS - len(keys))
+    return {_cut(k): _cut(d[k]) for k in keys}
+
+
+def _refs(v):
+    return [_cut(x) for x in v[:MAX_REFS]] if isinstance(v, list) else []
+
+
 def rule_for(name, budget):
     d, st = fetch_json(budget, prom_url("/api/v1/rules", type="alert"))
     if st != "reached":
@@ -327,7 +386,7 @@ def rule_for(name, budget):
     for g in d.get("data", {}).get("groups", []):
         for r in g.get("rules", []):
             if r.get("name") == name:
-                return {"query": r.get("query"), "health": r.get("health"), "group": g.get("name")}, "ok"
+                return {"query": _cut(r.get("query"), RULE_QUERY_CHARS), "health": _cut(r.get("health")), "group": _cut(g.get("name"))}, "ok"
     return None, "empty"
 
 
@@ -340,7 +399,7 @@ def series_now(expr, budget, limit=20):
     if not isinstance(d, dict):
         return None, "empty"
     result = d.get("data", {}).get("result", [])[:limit]
-    return [{"metric": x.get("metric", {}), "value": x["value"][1]} for x in result], ("ok" if result else "empty")
+    return [{"metric": _labels(x.get("metric", {})), "value": _cut(x["value"][1])} for x in result], ("ok" if result else "empty")
 
 
 def series_range(expr, budget, limit=20, minutes=30):
@@ -359,9 +418,9 @@ def series_range(expr, budget, limit=20, minutes=30):
     for x in result:
         vals = [v[1] for v in x.get("values", [])]
         nums = [float(v) for v in vals if v not in ("NaN", "+Inf", "-Inf")]
-        out.append({"metric": x.get("metric", {}), "points": len(vals),
+        out.append({"metric": _labels(x.get("metric", {})), "points": len(vals),
                     "min": ("%g" % min(nums)) if nums else None, "max": ("%g" % max(nums)) if nums else None,
-                    "first": vals[0] if vals else None, "last": vals[-1] if vals else None})
+                    "first": _cut(vals[0]) if vals else None, "last": _cut(vals[-1]) if vals else None})
     return out, ("ok" if out else "empty")
 
 
@@ -381,12 +440,9 @@ def loki_lines(query, budget, minutes=15, limit=50):
         return [], st
     if not isinstance(d, dict):
         return [], "empty"
-    lines = []
-    for s in d.get("data", {}).get("result", []):
-        for ts, line in s.get("values", []):
-            lines.append({"ts": ts, "line": line[:300]})
-    lines.sort(key=lambda x: x["ts"], reverse=True)
-    lines = lines[:limit]
+    # the newest `limit`, without a list of every line the body holds (Loki's own limit is advisory here)
+    lines = heapq.nlargest(limit, ({"ts": _cut(ts), "line": _cut(line)} for s in d.get("data", {}).get("result", [])
+                                   for ts, line in s.get("values", [])), key=lambda x: x["ts"])
     return lines, ("ok" if lines else "empty")
 
 
@@ -407,8 +463,8 @@ def firing_alerts(budget, limit=30):
         return [], st
     if not isinstance(d, list):        # e.g. an error body like {"error": "..."} instead of the alert list
         return [], "empty"
-    out = [{"labels": a.get("labels", {}), "startsAt": a.get("startsAt"), "state": a.get("status", {}).get("state"),
-            "inhibitedBy": a.get("status", {}).get("inhibitedBy", []), "silencedBy": a.get("status", {}).get("silencedBy", [])}
+    out = [{"labels": _labels(a.get("labels", {})), "startsAt": _cut(a.get("startsAt")), "state": _cut(a.get("status", {}).get("state")),
+            "inhibitedBy": _refs(a.get("status", {}).get("inhibitedBy", [])), "silencedBy": _refs(a.get("status", {}).get("silencedBy", []))}
            for a in d[:limit]]
     return out, ("ok" if out else "empty")
 
@@ -424,7 +480,7 @@ def deploys(budget, limit=10, minutes=120):
         return [], st
     if not isinstance(d, list):
         return [], "empty"
-    out = [{"time": a.get("time"), "tags": a.get("tags", []), "text": a.get("text", "")} for a in d]
+    out = [{"time": _cut(a.get("time")), "tags": _refs(a.get("tags", [])), "text": _cut(a.get("text", ""))} for a in d[:limit]]
     return out, ("ok" if out else "empty")
 
 
@@ -912,8 +968,10 @@ def process(payload):
 
 # At most this many process() workers at once, inside the container's 256 MiB: an OOM restart would
 # also forget the hourly run cap and the dedup map. One attacker-shaped 8 MiB alert list costs 109 MiB
-# while it is parsed, so get_json parses one body at a time: VmHWM 157 MiB, 351 MiB without that
-# lock (audit run-5 section H, 4 workers, worst of 20 trials; see _UPSTREAM). A group that arrives while every slot
+# while it is parsed, so get_json parses one body at a time and every fetcher keeps only a bounded
+# copy of it: VmHWM 155 MiB, 351 MiB without the lock (audit run-5 section H, 4 workers, worst of 20
+# trials; see _UPSTREAM), and 128 MiB for 30 alerts of ~25k short labels each, 396 MiB while their
+# labels were kept by reference (audit run-6, worst of 6; see MAX_LABELS). A group that arrives while every slot
 # is busy is dropped with a log line, not queued: it is not marked triaged, so Alertmanager's next
 # notification for it can still be triaged.
 MAX_WORKERS = 4
@@ -945,20 +1003,28 @@ class Handler(BaseHTTPRequestHandler):
             n = -1
         if n < 0 or n > MAX_BODY:                # refused before a single body byte is read
             self.send_response(413 if n > MAX_BODY else 400); self.end_headers(); return
-        try:
-            payload = json.loads(self.rfile.read(n).decode() or "{}")
-        except ValueError:
-            self.send_response(400); self.end_headers(); return
-        if not isinstance(payload, dict):             # process() reads it as an object
-            self.send_response(400); self.end_headers(); return
-        self.send_response(200); self.end_headers()        # Alertmanager retries on non-2xx; never make it wait
+        # A slot is taken before the body is read or parsed (audit run-6): with every slot busy, a group
+        # costs no parse at all. It gets 200 (Alertmanager retries on non-2xx) and is dropped, not
+        # dedup-marked, so its next notification can still be triaged. Every other path gives the slot back.
         if not WORKERS.acquire(blocking=False):
-            log("skip: %d triage runs already in progress" % MAX_WORKERS); return
+            log("skip: %d triage runs already in progress" % MAX_WORKERS)
+            self.send_response(200); self.end_headers(); return
+        handed, status = False, 400
         try:
-            threading.Thread(target=_work, args=(payload,), daemon=True).start()
-        except Exception as e:  # noqa: BLE001 - no thread, no worker: give the slot back or it leaks
-            WORKERS.release()
-            log("triage worker could not start: %s" % e.__class__.__name__)
+            try:
+                payload = json.loads(self.rfile.read(n).decode() or "{}")
+            except ValueError:
+                payload = None
+            if isinstance(payload, dict):                 # process() reads it as an object
+                status = 200                              # Alertmanager retries on non-2xx; never make it wait
+                try:
+                    threading.Thread(target=_work, args=(payload,), daemon=True).start(); handed = True
+                except Exception as e:  # noqa: BLE001 - no thread, no worker: the slot goes back below
+                    log("triage worker could not start: %s" % e.__class__.__name__)
+        finally:
+            if not handed:                                # before any answer, so none outruns it
+                WORKERS.release()
+        self.send_response(status); self.end_headers()
 
     def log_message(self, *a): pass
 

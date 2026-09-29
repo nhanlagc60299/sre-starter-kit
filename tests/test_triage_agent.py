@@ -858,6 +858,73 @@ class PackTests(unittest.TestCase):
         self.assertEqual(out["labels"], {"secret": "[redacted]", "token": ["[redacted]", "[redacted]"], "password": "[redacted]",
                                          "pass": {"v": "[redacted]", "n": ["[redacted]", "[redacted]"]},
                                          "max_tokens": 4096, "bypass": ["yes"]})
+    def test_run6_a_jwt_on_the_row_after_a_pem_blob_loses_all_of_it(self):
+        # audit run-6 h3 run6_probe section 2: a JWT whose header segment is exactly 76 (or 64) base64
+        # characters read as one more PEM row after a MII blob or a "[redacted]"; only the header went,
+        # and the payload and signature passed, since the JWT rule needs "eyJ.." before ".eyJ".
+        import random
+        rnd = random.Random(6)
+        al = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
+        w = lambda n: "".join(rnd.choice(al) for _ in range(n))
+        mii = "MIIEvQIBADANBgkqhkiG9w0BAQEFAASC" + w(32)
+        pay, sig = "eyJzdWIiOiJkdW1teSJ9" + w(20), w(43) + "-_x"
+        for hdr in ("eyJ" + w(73), "eyJ" + w(61)):
+            jwt = hdr + "." + pay + "." + sig
+            for label, s, want in (("after a MII blob", mii + "\n" + jwt, "[pem-redacted]\n[jwt-redacted]"),
+                                   ("after a MII blob, JSON-escaped", mii + "\\n" + jwt, "[pem-redacted]\\n[jwt-redacted]"),
+                                   ("after [redacted]", "token: x\n" + jwt, "token: [redacted]\n[jwt-redacted]")):
+                with self.subTest(label, header=len(hdr)):
+                    self.assertEqual(self.agent.redact(s), want)
+        # a real 76-column row is still a row
+        self.assertEqual(self.agent.redact(mii + "\n" + w(76)), "[pem-redacted]")
+
+    def test_run6_firing_alerts_keep_a_bounded_copy_of_their_labels(self):
+        # audit run-6 h2: firing_alerts kept each of the first 30 alerts' parsed labels dict by
+        # reference, unbounded, outside the parse lock: 4 workers over 30 alerts of ~25k short labels
+        # peaked at 393-396 MiB against the 256 MiB limit.
+        labels = {"a_long_name_" + "n" * 400: "x", "a_long_value": "y" * 1000}
+        labels.update({"l%04d" % i: "v%d" % i for i in range(5000)})
+        labels.update({"alertname": "Forged", "namespace": "prod", "severity": "critical"})
+        alert = dict(AM_ALERTS[0], labels=labels, status={"state": "active", "inhibitedBy": ["i%d" % i for i in range(50)],
+                                                          "silencedBy": ["s" * 1000] * 50})
+        Fake.routes["/api/v2/alerts"] = (200, [alert] * 3)
+        # past the pack budget trim() would drop "firing" whole, which is not what this is about
+        with mock.patch.object(self.agent, "MAX_BYTES", 10 ** 8), mock.patch.object(self.agent, "HARD_CAP_BYTES", 10 ** 8):
+            p = self.agent.build_pack(WEBHOOK)
+        self.assertEqual(len(p["firing"]), 3)
+        for a in p["firing"]:
+            self.assertLessEqual(len(a["labels"]), 64)
+            self.assertTrue(all(len(k) <= 300 and len(v) <= 300 for k, v in a["labels"].items()))
+            self.assertEqual(a["labels"]["a_long_value"], "y" * 300)
+            self.assertEqual([a["labels"].get(k) for k in ("alertname", "namespace", "severity")], ["Forged", "prod", "critical"])
+            self.assertEqual((len(a["inhibitedBy"]), len(a["silencedBy"])), (10, 10))
+            self.assertTrue(all(len(x) <= 300 for x in a["silencedBy"]))
+
+    def test_run6_every_other_fetcher_keeps_a_bounded_copy(self):
+        # the same retained-by-reference shape in series_now/series_range (metric), deploys (tags,
+        # text, count), loki_lines (a body holding more lines than asked for) and rule_for (query)
+        metric = dict({"m%04d" % i: "v" * 400 for i in range(5000)}, __name__="up", instance="web-1")
+        Fake.routes["/api/v1/query_range"] = (200, {"status": "success", "data": {"result": [
+            {"metric": metric, "values": [[1, "1" * 1000], [2, "0"]]}]}})
+        Fake.routes["/api/v1/query"] = (200, {"status": "success", "data": {"result": [{"metric": metric, "value": [1, "0" * 1000]}]}})
+        Fake.routes["/api/annotations"] = (200, [{"time": 1, "tags": ["deploy"] * 500, "text": "t" * 5000}] * 50)
+        Fake.routes["/loki/api/v1/query_range"] = (200, {"status": "success", "data": {"result": [
+            {"stream": {}, "values": [[str(1758000000000000000 + i), "line %d" % i] for i in range(5000)]}]}})
+        Fake.routes["/api/v1/rules"] = (200, {"status": "success", "data": {"groups": [{"name": "g" * 1000, "rules": [
+            {"name": "ServiceDown", "query": "up == 0 or " * 1000 + "up", "health": "ok"}]}]}})
+        b = lambda: self.agent.Budget(5)
+        for rows, _ in (self.agent.series_now("up", b()), self.agent.series_range("up", b())):
+            m = rows[0]["metric"]
+            self.assertEqual(len(m), 64); self.assertEqual((m["__name__"], m["instance"]), ("up", "web-1"))
+            self.assertTrue(all(len(v) <= 300 for r in rows for v in list(r["metric"].values()) + [r.get("value") or r["first"]]))
+        d, _ = self.agent.deploys(b())
+        self.assertEqual(len(d), 10)
+        self.assertTrue(all(len(x["tags"]) <= 10 and len(x["text"]) <= 300 for x in d))
+        lines, _ = self.agent.loki_lines('{a="b"}', b(), limit=50)
+        self.assertEqual([l["line"] for l in lines[:2]], ["line 4999", "line 4998"]); self.assertEqual(len(lines), 50)
+        r, _ = self.agent.rule_for("ServiceDown", b())
+        self.assertLessEqual(len(r["query"]), 4000); self.assertLessEqual(len(r["group"]), 300)
+
     def test_dedup_within_an_hour(self):
         d = self.agent.Dedup(seconds=3600)
         self.assertFalse(d.seen("k")); self.assertTrue(d.seen("k"))
@@ -1018,7 +1085,10 @@ class ToolTests(unittest.TestCase):
                     inside[0] += 1; peak[0] = max(peak[0], inside[0])
                 return self
             def __exit__(self, *a): return False
-            def read(self, n):
+            def read1(self, n):
+                if getattr(self, "done", False):
+                    return b""
+                self.done = True
                 try:
                     gate.wait(timeout=1)    # both threads meet here unless the reads are serialised
                 except threading.BrokenBarrierError:
@@ -1030,7 +1100,7 @@ class ToolTests(unittest.TestCase):
                 inside[0] -= 1
             return r
         out = []
-        with mock.patch.object(self.agent.urllib.request, "urlopen", lambda req, timeout: Resp()), \
+        with mock.patch.object(self.agent._OPENER, "open", lambda req, timeout: Resp()), \
              mock.patch.object(self.agent.json, "loads", loads):
             ts = [threading.Thread(target=lambda: out.append(self.agent.get_json("http://am/api/v2/alerts"))) for _ in range(2)]
             for t in ts: t.start()
@@ -1045,13 +1115,68 @@ class ToolTests(unittest.TestCase):
         class Resp:
             def __enter__(self): return self
             def __exit__(self, *a): return False
-            def read(self, n): return b'{"ok": true}'
+            def read1(self, n, body=[b'{"ok": true}']): return body.pop() if body else b""
         self.agent._UPSTREAM.acquire()
         threading.Timer(0.3, self.agent._UPSTREAM.release).start()
-        with mock.patch.object(self.agent.urllib.request, "urlopen", lambda req, timeout: seen.append(timeout) or Resp()):
+        with mock.patch.object(self.agent._OPENER, "open", lambda req, timeout: seen.append(timeout) or Resp()):
             self.assertEqual(self.agent.get_json("http://am/api/v2/alerts", timeout=0.5), {"ok": True})
         self.assertEqual(len(seen), 1)
         self.assertTrue(0 < seen[0] <= 0.25, seen)
+
+    def test_run6_a_trickling_upstream_releases_the_lock_by_the_call_timeout(self):
+        # audit run-6 (h1, h2, h9): the lock was held for the whole body read, and a socket timeout only
+        # fires on silence, so an upstream sending a few bytes at a time held it for as long as it liked.
+        lst = socket.socket(); lst.bind(("127.0.0.1", 0)); lst.listen(1)
+        self.addCleanup(lst.close)
+        def trickle():
+            c, _ = lst.accept()
+            try:
+                c.recv(65536)
+                c.sendall(b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 100000\r\n\r\n[")
+                end = time.monotonic() + 6
+                while time.monotonic() < end:
+                    c.sendall(b"1," * 5); time.sleep(0.05)
+            except OSError:
+                pass
+            finally:
+                c.close()
+        threading.Thread(target=trickle, daemon=True).start()
+        out = []
+        t = threading.Thread(target=lambda: out.append(self.agent.get_json("http://127.0.0.1:%d/x" % lst.getsockname()[1], timeout=1.0)))
+        start = time.monotonic(); t.start(); time.sleep(0.2)
+        self.assertTrue(self.agent._UPSTREAM.acquire(timeout=10))
+        held = time.monotonic() - start
+        self.agent._UPSTREAM.release(); t.join(10)
+        self.assertEqual(out, [None])
+        self.assertLess(held, 1.8, "the parse lock was held %.1fs by a 1s call" % held)
+
+    def test_run6_a_credentialed_request_never_follows_a_redirect_to_another_origin(self):
+        # audit run-6 (h9): urllib's default redirect handler copies every header to the new URL,
+        # the Grafana Basic header included, whatever its host or port.
+        got = []
+        class Other(BaseHTTPRequestHandler):
+            def do_GET(self):
+                got.append(dict(self.headers)); self.send_response(200); self.end_headers(); self.wfile.write(b"[]")
+            def log_message(self, *a): pass
+        class Redirect(BaseHTTPRequestHandler):
+            def do_GET(self):
+                if self.path.startswith("/same"):
+                    self.send_response(200); self.end_headers(); self.wfile.write(b'{"ok": 1}'); return
+                self.send_response(302)
+                self.send_header("Location", other + "/api/annotations" if self.path.startswith("/away") else "/same")
+                self.end_headers()
+            def log_message(self, *a): pass
+        servers = [ThreadingHTTPServer(("127.0.0.1", 0), h) for h in (Other, Redirect)]
+        for srv in servers:
+            threading.Thread(target=srv.serve_forever, daemon=True).start(); self.addCleanup(srv.server_close); self.addCleanup(srv.shutdown)
+        other, here = ("http://127.0.0.1:%d" % srv.server_address[1] for srv in servers)
+        hdr = {"Authorization": "Basic " + base64.b64encode(b"admin:pw-dummy").decode()}
+        with mock.patch("builtins.print"):
+            r = self.agent.get_json(here + "/away", hdr, timeout=3)
+        self.assertEqual([h.get("Authorization") for h in got], [], "the credential followed a redirect to another port")
+        self.assertIsNone(r)
+        # a redirect within the same origin is still followed
+        self.assertEqual(self.agent.get_json(here + "/stay", hdr, timeout=3), {"ok": 1})
 
     def test_runbook_sanitises_the_name_itself_for_every_caller(self):
         # build_pack calls runbook(alertname) directly, without run_tool's sanitiser
@@ -1913,6 +2038,50 @@ class IngressTests(unittest.TestCase):
             for _ in range(5):
                 self.assertEqual(self._post(), 200)
         self.assertTrue(all(self.agent.WORKERS.acquire(blocking=False) for _ in range(4)))
+        for _ in range(4): self.agent.WORKERS.release()
+
+    def test_run6_a_slot_is_taken_before_the_body_is_parsed(self):
+        # audit run-6: an authenticated body was read and parsed before the WORKERS gate, so every
+        # group cost a parse even when it was then dropped. Admission comes first now.
+        free_at_parse, real = [], json.loads
+        def loads(b, *a, **k):
+            free_at_parse.append(self.agent.WORKERS._value); return real(b, *a, **k)
+        with mock.patch.object(self.agent, "process"), mock.patch.object(self.agent.json, "loads", loads):
+            self.assertEqual(self._post(), 200)
+        self.assertEqual(free_at_parse, [3], "the body was parsed without holding a worker slot")
+
+    def test_run6_with_every_slot_busy_a_group_is_dropped_unread_and_unparsed(self):
+        import io, contextlib
+        self.assertTrue(all(self.agent.WORKERS.acquire(blocking=False) for _ in range(4)))
+        self.addCleanup(lambda: [self.agent.WORKERS.release() for _ in range(4)])
+        buf = io.StringIO()
+        with mock.patch.object(self.agent, "process") as proc, mock.patch.object(self.agent.json, "loads", wraps=json.loads) as loads, \
+             contextlib.redirect_stdout(buf):
+            out, _ = self._raw(self._head(100))            # headers only: the body never arrives, and is never waited for
+            self.assertTrue(out.startswith(b"HTTP/1.0 200"), "expected an immediate 200, got %r" % out[:40])
+            self.assertEqual(self._post(), 200)
+        proc.assert_not_called(); self.assertEqual(loads.call_count, 0)
+        self.assertEqual(buf.getvalue().count("skip: 4 triage runs already in progress"), 2)
+        # not dedup-marked: once a slot is free, the same group runs
+        self.agent.WORKERS.release()
+        with mock.patch.object(self.agent, "process") as proc:
+            self.assertEqual(self._post(), 200)
+            for _ in range(50):
+                if proc.called: break
+                time.sleep(0.05)
+        proc.assert_called_once()
+        self.agent.WORKERS.acquire(timeout=2)
+
+    def test_run6_a_bad_or_unread_body_gives_its_slot_back(self):
+        with mock.patch.object(self.agent, "process") as proc:
+            for body in (b"{bad", b"[]", b"null", b"\xff\xfe"):
+                out, _ = self._raw(self._head(len(body)), body)
+                self.assertTrue(out.startswith(b"HTTP/1.0 400"), "%r -> %r" % (body, out[:40]))
+            with mock.patch.object(self.agent.Handler, "timeout", 1):
+                self._raw(self._head(100), b"{", wait=4)      # the read itself times out
+        proc.assert_not_called()
+        time.sleep(0.2)
+        self.assertTrue(all(self.agent.WORKERS.acquire(blocking=False) for _ in range(4)), "a slot leaked")
         for _ in range(4): self.agent.WORKERS.release()
 
     def test_oversized_content_length_is_413_without_reading_the_body(self):
