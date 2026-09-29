@@ -983,10 +983,44 @@ class PackTests(unittest.TestCase):
         self.assertEqual(kept[name[:300]], "[redacted]")
         self.assertNotIn("dummyval", text)
         self.assertTrue(kept["note"].startswith("x" * 280 + " token "), kept["note"])
-        self.assertEqual(len(self.agent._cut("x" * 5000)), 300)   # without a shrink the margin costs nothing
+        self.assertEqual(len(self.agent._cut("x " * 2500)), 300)   # without a shrink the margin costs nothing
         for k in ("shrink_pw", "shrink_pem"):
             self.assertNotIn("ghp_", kept[k], k)
         self.assertTrue(all(len(k) <= 300 and len(v) <= 300 for k, v in kept.items()))
+        # review round 2 (N1): a pattern that needs a part after the secret (a JWT's "." after the
+        # payload, a token's minimum length, a key's 16 characters) matched nothing when the window's
+        # end cut it off, so its start was kept. Every shape, across the cut and across the window's
+        # end, with and without a secret earlier in the value that shrinks: no 9-character run of the
+        # secret survives _cut (300 and the rule query's 4000) or _labels, then the pack's own redact().
+        b64 = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
+        rw = lambda n, al=b64: "".join(rnd.choice(al) for _ in range(n))
+        jwt_pay, jwt_sig = rw(2600, b64 + "-_"), rw(43, b64 + "-_")
+        pem_rows = [rw(64, b64 + "+/") for _ in range(45)]
+        shapes = {   # name -> (the text placed in the value, the secret part that must not survive)
+            "jwt, long payload": ("eyJhbGciOiJIUzI1NiJ9.eyJ" + jwt_pay + "." + jwt_sig, jwt_pay + jwt_sig),
+            "ghp_": ("ghp_" + (x := rw(36)), x),
+            "AKIA": ("AKIA" + (x := rw(16, "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567")), x),
+            "sk-ant-": ("sk-ant-api03-" + (x := rw(95, b64 + "-_")), x),
+            "PEM body": ("MIIEvQIBADANBgkqhkiG9w0BAQEFAASC\n" + "\n".join(pem_rows), "".join(pem_rows)),
+            "sig= URL": ("https://acct.blob.core.windows.net/c/f?sv=2022-11-02&sig=" + (x := rw(64, b64 + "%")), x),
+            "Bearer": ("Authorization: Bearer " + (x := rw(80, b64 + "._-")), x),
+        }
+        leaks = []
+        for n in (300, self.agent.RULE_QUERY_CHARS):
+            W = n + self.agent.CUT_REDACT_WINDOW
+            for name, (text, secret) in shapes.items():
+                runs = {secret[i:i + 9] for i in range(len(secret) - 8)}
+                for start in (n - 40, n - 9, n - 1, W - 60, W - 20, W - 9, W - 1):
+                    for shrink in ("", "password=" + "Q" * 1800 + " "):
+                        pad = start - len(shrink)
+                        if pad < 1: continue
+                        v = shrink + ("x " * start)[:pad - 1] + " " + text + " tail"
+                        outs = [self.agent._cut(v, n)] + ([self.agent._labels({"l": v})["l"]] if n == 300 else [])
+                        for out in map(self.agent.redact, outs):   # the pack is redacted again as a whole
+                            got = next((r for r in runs if r in out), None)
+                            if got:
+                                leaks.append((name, n, start, bool(shrink), got))
+        self.assertEqual(leaks, [], "a secret crossing a cut kept 9+ characters")
 
     def test_dedup_within_an_hour(self):
         d = self.agent.Dedup(seconds=3600)

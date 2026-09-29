@@ -440,13 +440,20 @@ RULE_QUERY_CHARS = 4000  # a rule's PromQL is sent back to Prometheus, so it get
 # A cut must never leave a secret's prefix that no pattern matches any more (audit run-7: a ghp_ token
 # straddling the 300th character kept 9-19 of its characters, where the whole value was redacted
 # before). So a value longer than its cut is redacted over its first n + CUT_REDACT_WINDOW characters
-# and then cut. The window's own end is a cut too, and a secret redacted earlier in it shrinks, which
-# pulls text from that end into the first n (review round 1: "password=" + 2315 characters, then a
-# token, kept 19 of its characters). So nothing within CUT_REDACT_MARGIN of the window's end is ever
-# kept: the margin is longer than any bounded pattern's reach (a URL's "://" + 256 + ":" + 1024 + "@"
-# is the longest), and an unbounded one redacts whatever of a secret the window holds. Without a
-# shrink the margin costs nothing (2048 - 1536 > 0); after a large one the value is shorter than n.
-# One window at a time, so the copy is bounded like the cut.
+# and then cut. The window's own end is a cut too, and two things follow from it (review rounds 1-2):
+# - A pattern that needs a part after the secret -- a JWT's "." after its payload, a URL password's
+#   "@", a token's minimum length, an AWS key's 16 characters and its \b -- matches nothing when the
+#   window's end cuts that part off, however early the secret starts (a JWT with a 2600-character
+#   payload kept 274 of them). So the last whitespace-free run reaching a cut window's end is dropped
+#   whole: every such secret is one run (a JWT, a key, a URL, a signed-URL value, a PEM row), and one
+#   that spans a space (a Bearer or Basic header, a PEM body) is redacted from its fixed start anyway.
+# - A secret redacted earlier in the window shrinks, which pulls text from the window's end into the
+#   first n ("password=" + 2315 characters, then a token, kept 19 of its characters). So nothing within
+#   CUT_REDACT_MARGIN of the window's end is kept either: longer than any bounded pattern's reach (a
+#   URL's "://" + 256 + ":" + 1024 + "@" is the longest).
+# Without a shrink the margin costs nothing (2048 - 1536 > 0). A value with no whitespace in its first
+# n + 2048 characters is dropped whole, and after a large shrink the value is shorter than n. One
+# window at a time, so the copy is bounded like the cut, and the trailing run is found in one pass.
 CUT_REDACT_WINDOW = 2048
 CUT_REDACT_MARGIN = 1536
 _KEY_LABELS = ("__name__", "alertname", "severity", "instance", "job", "service", "namespace")
@@ -461,7 +468,12 @@ def _cut(v, n=MAX_FIELD_CHARS):
     if len(s) <= n:
         return s
     r = redact(s[:n + CUT_REDACT_WINDOW])
-    return r[:n] if len(s) <= n + CUT_REDACT_WINDOW else r[:min(n, max(0, len(r) - CUT_REDACT_MARGIN))]
+    if len(s) <= n + CUT_REDACT_WINDOW:
+        return r[:n]
+    k = len(r)
+    while k and not r[k - 1].isspace():   # the whitespace-free run the window's end cut
+        k -= 1
+    return r[:min(n, k, max(0, len(r) - CUT_REDACT_MARGIN))]
 
 
 def _labels(d):
