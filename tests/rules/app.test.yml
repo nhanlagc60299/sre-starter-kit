@@ -120,7 +120,7 @@ tests:
   # their labeldrop lets a scraped `service` through. From node-evil: 5xx and slow buckets for
   # "payments" (which would page), and a flood of 200s for the genuine "checkout" (which would
   # dilute its real 50% error rate below every threshold). Neither may count: the app selectors
-  # exclude job=~"kubelet|cadvisor", and the genuine checkout pages as before.
+  # exclude job=~"kubelet|cadvisor|node|alloy", and the genuine checkout pages as before.
   - interval: 1m
     input_series:
       - series: 'http_requests_total{job="checkout",instance="checkout:8080",service="checkout",status="500"}'
@@ -161,10 +161,9 @@ tests:
         exp_alerts: []
 
   # Audit run-7 review round 1: the node-exporter and Alloy DaemonSet pods answer on every node too,
-  # so the same forgeries under job="node" and job="alloy" must not count either. From node-evil: 5xx and slow buckets for
-  # "payments" (which would page), and a flood of 200s for the genuine "checkout" (which would
-  # dilute its real 50% error rate below every threshold). Neither may count: the app selectors
-  # exclude job=~"kubelet|cadvisor", and the genuine checkout pages as before.
+  # so the same forgeries, under job="node" (5xx for "payments", a flood of 200s for "checkout") and
+  # job="alloy" (slow buckets for "payments"), must not count either: the app selectors exclude
+  # job=~"kubelet|cadvisor|node|alloy", and the genuine checkout pages as before.
   - interval: 1m
     input_series:
       - series: 'http_requests_total{job="checkout",instance="checkout:8080",service="checkout",status="500"}'
