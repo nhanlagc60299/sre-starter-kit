@@ -90,20 +90,21 @@ DEFAULT_REDACT = [
     # rule below loses nothing to it, and a keyword before it ("token=eyJ...") still ends "[redacted]".
     # lookbehind, not \b: "-" is not \w, so "eyJ-eyJ-..." would give \b a start at every "eyJ" and each
     # would rescan the rest of the run. A literal "\n"/"\r"/"\t" in front (a JSON-escaped log line, the
-    # PEM rule's own row separator) also starts one, though its "n" is \w (audit run-6). A JWT glued to
-    # a "-" or "_" ("x-eyJ", "id_token_eyJ", a PEM END marker's "-----eyJ") starts one too (review
-    # round 4): from the run's own start only, through at most 256 characters of it that end in "-"
-    # or "_", which stay; a start at every "-eyJ" would rescan up to 4096 characters each time.
-    (r"(?:(?<![\w-])([\w-]{0,256}?[-_])?|(?<=\\[nrt]))eyJ[\w-]{1,4096}\.eyJ[\w-]{1,8192}\.[\w-]{0,2048}", r"\1[jwt-redacted]"),
+    # PEM rule's own row separator) also starts one, though its "n" is \w (audit run-6). So does a "-"
+    # or "_" ("x-eyJ", "id_token_eyJ", a PEM END marker's "-----eyJ", reviews 4-5): the header never
+    # takes a "-eyJ"/"_eyJ", so a start's scan ends where the next start would begin and "eyJ-eyJ-..."
+    # stays linear.
+    (r"(?:(?<![A-Za-z0-9])|(?<=\\[nrt]))eyJ(?:[A-Za-z0-9]|[-_](?!eyJ)){1,4096}\.eyJ[\w-]{1,8192}\.[\w-]{0,2048}", "[jwt-redacted]"),
     # PEM next: the keyword rule below would otherwise eat "private_key=-----BEGIN" and leave the
     # body. The body class (base64, whitespace, a literal "\n" from a JSON log) stops at "-", so the
     # optional END group never makes it backtrack; a truncated key with no END still loses its body.
     # An encrypted legacy key's RFC 1421 headers ("Proc-Type: 4,ENCRYPTED", "DEK-Info: ...") after
     # BEGIN are part of the block too (review round 3): at most 8 lines of a name, ":" and text that
     # stops at the line's end, each bounded, then the blank line and the body as before. A header line
-    # may be indented (a YAML block scalar) and its newline escaped up to three backslashes deep (JSON
-    # carrying JSON), review round 4; the body class takes both already.
-    (r"-----BEGIN [A-Z ]{0,32}PRIVATE KEY-----(?:(?:\r?\n|\\{1,3}(?:r\\{1,3})?n)[ \t]{0,64}[A-Za-z][A-Za-z0-9-]{0,63}:[^\r\n\\]{0,256}){0,8}"
+    # may be indented (a YAML block scalar; spaces, tabs or an escaped "\t") and its newline escaped up
+    # to 4 backslashes deep, which is three JSON encodings (reviews 4-5); the body class takes both
+    # already. A fourth encoding (8 backslashes) is the accepted bound.
+    (r"-----BEGIN [A-Z ]{0,32}PRIVATE KEY-----(?:(?:\r?\n|\\{1,4}(?:r\\{1,4})?n)(?:[ \t]|\\{1,4}t){0,64}[A-Za-z][A-Za-z0-9-]{0,63}:[^\r\n\\]{0,256}){0,8}"
      r"[A-Za-z0-9+/=\s\\]{0,8192}(?:-----END [A-Z ]{0,32}PRIVATE KEY-----)?",
      "[private-key-redacted]"),
     # A whole PEM file base64-encoded once more (a Kubernetes Secret's data, a CI variable):
@@ -156,8 +157,9 @@ DEFAULT_REDACT = [
     # A PEM body that lost its -----BEGIN/END----- header/footer, or never had one in this log line -
     # "MII" is the DER SEQUENCE tag every RSA/EC/PKCS8 key or cert starts with once base64-encoded.
     # The rows after it follow across whitespace or a literal "\n"/"\r" (a JSON-escaped key on one
-    # log line; up to three backslashes deep, JSON carrying JSON, review round 4), and only real PEM
-    # rows count (audit run-4): exactly 64 characters, or 76 (MIME and
+    # log line; up to 4 backslashes deep, three JSON encodings, reviews 4-5), then any indent of up to
+    # 64 spaces, tabs or escaped "\t"s (a YAML block, review round 5; "MII" itself may follow an escaped
+    # "\n" or "\t"), and only real PEM rows count (audit run-4): exactly 64 characters, or 76 (MIME and
     # GNU base64's wrap, audit run-5) with no ".eyJ" after it (that is a JWT's header segment, audit
     # run-6; the JWT rule runs first since review round 3, so a JWT it matched is gone by now and
     # this only keeps a row from reaching into one it did not; a bare "." after a real last row, as in
@@ -175,11 +177,11 @@ DEFAULT_REDACT = [
     # separator and the row share no character, each row's end is fixed by a bounded lookahead, and
     # nothing after the repeat can fail, so it never backtracks. The trailing "={0,2}" is the first
     # row's own padding.
-    (r"(?:\bMII[A-Za-z0-9+/]{20,4096}|(?<=\[redacted\])(?=(?:\\[nr]|\s){1,8}[A-Za-z0-9+/]{64}(?:[A-Za-z0-9+/]{12})?(?![A-Za-z0-9+/=]|\.eyJ)))"
-     r"(?:(?:\\{1,3}[nr]|\s){1,8}(?:[A-Za-z0-9+/]{64}(?:[A-Za-z0-9+/]{12})?(?![A-Za-z0-9+/=]|\.eyJ)"
-     r"|(?=[A-Za-z0-9+/=]{4,76}[ \t]{0,8}(?:\\{1,3}[nr]|\\{0,3}[\r\n\"',}\]]|\.(?!eyJ)|$))(?:[A-Za-z0-9+/]{4}){0,19}(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?(?![A-Za-z0-9+/=])"
+    (r"(?:(?:\b|(?<=\\[nrt]))MII[A-Za-z0-9+/]{20,4096}|(?<=\[redacted\])(?=(?:\\[nr]|\s){1,8}[A-Za-z0-9+/]{64}(?:[A-Za-z0-9+/]{12})?(?![A-Za-z0-9+/=]|\.eyJ)))"
+     r"(?:(?:\\{1,4}[nr]|\s){1,8}(?:[ \t]|\\{1,4}t){0,64}(?:[A-Za-z0-9+/]{64}(?:[A-Za-z0-9+/]{12})?(?![A-Za-z0-9+/=]|\.eyJ)"
+     r"|(?=[A-Za-z0-9+/=]{4,76}[ \t]{0,8}(?:\\{1,4}[nr]|\\{0,3}[\r\n\"',}\]]|\.(?!eyJ)|$))(?:[A-Za-z0-9+/]{4}){0,19}(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?(?![A-Za-z0-9+/=])"
      r"|[A-Za-z0-9+/]{1,76}={0,2}\Z)){0,256}"
-     r"(?:(?:\\{1,3}[nr]|\s){1,8}(?:(?:[A-Za-z0-9+/]{4}){1,19}|(?:[A-Za-z0-9+/]{4}){0,18}(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=))(?=\s))?={0,2}",
+     r"(?:(?:\\{1,4}[nr]|\s){1,8}(?:[ \t]|\\{1,4}t){0,64}(?:(?:[A-Za-z0-9+/]{4}){1,19}|(?:[A-Za-z0-9+/]{4}){0,18}(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=))(?=\s))?={0,2}",
      "[pem-redacted]"),
     # A lone base64 body line with no "MII" prefix of its own - a later line of a multi-line PEM once
     # the first has already matched above, or a body pasted without its first line. Exactly 64 base64

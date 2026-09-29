@@ -1058,21 +1058,34 @@ class PackTests(unittest.TestCase):
     def test_run7_r4_an_indented_or_double_escaped_encrypted_pem_loses_every_row(self):
         # review round 4: the header branch wanted a letter right after one newline of one escape level,
         # so a key indented in a YAML block scalar (a k8s Secret, Helm values) or escaped twice (JSON in
-        # a JSON log line) stopped the BEGIN rule at "Proc" again and left DEK-Info and the rows.
+        # a JSON log line) stopped the BEGIN rule at "Proc" again and left DEK-Info and the rows. Round
+        # 5: each escaped cell is what a JSON encoder writes (json.dumps, 1-3 times), so a tab indent is
+        # "\t" at every level; the rule takes up to 4 backslashes, and a fourth level (8) is the accepted
+        # bound. In redact() and through build_pack, as a webhook annotation.
         import random
         rnd = random.Random(41)
         b64 = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
         rows = ["".join(rnd.choice(b64) for _ in range(64)) for _ in range(6)] + ["".join(rnd.choice(b64) for _ in range(26)) + "=="]
         dek = "AES-128-CBC,5F0A1B2C3D4E5F60718293A4B5C6D7E8"
-        for sep in ("\n", "\r\n", "\\n", "\\r\\n", "\\\\n", "\\\\r\\\\n"):
-            for indent in ("", "  ", "\t"):
-                key = (sep + indent).join(["-----BEGIN RSA PRIVATE KEY-----", "Proc-Type: 4,ENCRYPTED", "DEK-Info: " + dek, ""]
-                                          + rows + ["-----END RSA PRIVATE KEY-----"])
-                for label, s in (("alone", key), ("in a log line", "key: |" + sep + indent + key + " done")):
-                    with self.subTest(sep=sep, indent=indent, where=label):
-                        out = self.agent.redact(s)
-                        self.assertEqual([r for r in rows if r[:12] in out], [], out)
-                        self.assertNotIn("DEK-Info", out); self.assertNotIn(dek[:11], out)
+        def esc(t, level):
+            for _ in range(level):
+                t = json.dumps(t)[1:-1]
+            return t
+        leaks = []
+        for level in range(4):
+            for nl in ("\n", "\r\n"):
+                for indent in ("", "  ", "    ", "\t"):
+                    key = (nl + indent).join(["-----BEGIN RSA PRIVATE KEY-----", "Proc-Type: 4,ENCRYPTED", "DEK-Info: " + dek, ""]
+                                             + rows + ["-----END RSA PRIVATE KEY-----"])
+                    for where, s in (("bare", esc(key, level)), ("yaml", esc("tls.key: |" + nl + indent + key, level)),
+                                     ("json", '{"level":"error","key":"' + esc(key, level) + '","n":1}')):
+                        alert = dict(WEBHOOK["alerts"][0], annotations={"description": s + " done"})
+                        packed = self.agent.build_pack(dict(WEBHOOK, alerts=[alert]))["alerts"][0]["annotations"]["description"]
+                        for via, out in (("redact", self.agent.redact(s + " done")), ("build_pack", packed)):
+                            left = [r[:12] for r in rows if r[:12] in out] + [x for x in ("DEK-Info", dek[:11]) if x in out]
+                            if left or not out.endswith(" done"):
+                                leaks.append((level, repr(nl), repr(indent), where, via, left))
+        self.assertEqual(leaks, [])
 
     def test_run7_r4_the_begin_rule_is_linear_on_repeated_maximal_headers(self):
         # review round 4: the worst case for the widened header branch - BEGIN, then 9 headers (one past
@@ -1131,6 +1144,49 @@ class PackTests(unittest.TestCase):
         self.assertEqual(sorted(kept.values()), ["1", "2", "3", "4", "A"])
         self.assertTrue(all(len(k) <= 300 for k in kept), kept.keys())
         self.assertIn("[cut]", kept)
+
+    def test_run7_r5_a_jwt_glued_to_a_long_run_is_redacted_whole(self):
+        # review round 5: a start after "-" or "_" was found only within 256 characters of the run's start
+        jwt = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0Abc.DummySigDummySigDummySig"
+        for n in (257, 300, 1000):
+            for glue in ("-", "_"):
+                run = ("ab_c-" * n)[:n] + glue
+                with self.subTest(n=n, glue=glue):
+                    self.assertEqual(self.agent.redact("tok " + run + jwt + " done"), "tok " + run + "[jwt-redacted] done")
+
+    def test_run7_r5_the_jwt_rule_is_linear_on_dash_and_underscore_runs(self):
+        # review round 5: a start after every "-"/"_" must not rescan the rest of the run each time
+        for unit in ("eyJ-", "eyJ_", "-eyJ", "eyJa-", "eyJ-----"):
+            s, best = unit * (self.agent.HARD_CAP_BYTES // len(unit)), 9e9
+            for _ in range(3):
+                start = time.monotonic()
+                self.agent._redact(s, self.agent.DEFAULT_REDACT)
+                best = min(best, time.monotonic() - start)
+            self.assertLess(best, 0.08, unit)   # all rules take about 0.02 s here
+
+    def test_run7_r5_an_indented_headerless_mii_blob_loses_every_row(self):
+        # review round 5: a newline and 8 or more spaces of indent passed the row separator's 8 units, and
+        # a JSON-escaped tab ("\t") indent was no separator at all, so rows (every row, escaped) leaked
+        import random
+        rnd = random.Random(51)
+        b64 = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+        w = lambda n: "".join(rnd.choice(b64) for _ in range(n))
+        mii = "MIIEvQIBADANBgkqhkiG9w0BAQEFAASC" + w(32)
+        def esc(t, level):
+            for _ in range(level):
+                t = json.dumps(t)[1:-1]
+            return t
+        leaks = []
+        for level in range(4):
+            for indent in ("", " " * 8, " " * 16, "\t"):
+                for last, rows in (("full", [w(64), w(64)]), ("padded", [w(64), w(54) + "AAAAAAAA=="])):
+                    text = esc("tls.key: |\n" + indent + ("\n" + indent).join([mii] + rows) + "\nnext: x", level)
+                    for where, s in (("bare", text), ("json", '{"level":"error","msg":"' + text + '","n":1}')):
+                        out = self.agent.redact(s)
+                        left = [r[:16] for r in [mii] + rows if r[:16] in out]
+                        if left or "next: x" not in out:
+                            leaks.append((level, repr(indent), last, where, left))
+        self.assertEqual(leaks, [])
 
     def test_dedup_within_an_hour(self):
         d = self.agent.Dedup(seconds=3600)
