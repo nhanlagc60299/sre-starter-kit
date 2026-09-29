@@ -73,7 +73,11 @@ def cut_after(msg_of, tail, limit):
     raise SystemExit("no padding puts the cut after the tail")
 ROOT_TEXT = "sshd[1]: Accepted password for root from %s port 22 ssh2: x" % FRAMED
 FAIL_TEXT = "sshd[1]: Failed password for root from %s port 22 ssh2" % FRAMED
+ROOT_CUT_TEXT = "sshd[1]: Accepted password for root from %s port 22 ssh2" % FRAMED   # exact tail, no ": x"
 DISC_CUT, BANNER_CUT = cut_after(disconnect, FAIL_TEXT, 400), cut_after(banner, FAIL_TEXT, 256)
+DISC_ROOT_CUT, BANNER_ROOT_CUT = cut_after(disconnect, ROOT_CUT_TEXT, 400), cut_after(banner, ROOT_CUT_TEXT, 256)
+# OpenSSH auth.c format_method_key(): a certificate's tail, and a FIDO key's signature count
+CERT = "ED25519-CERT %s ID ops-laptop@example.com (serial 42) CA ED25519 %s" % (FP, FP)
 def preauth(user, pw):   # what sshd logs for one connection by an invalid user
     out = ["Invalid user %s from %s port %d" % (user, REAL, 40000 + p) for p in range(25)]
     out += ["Connection closed by invalid user %s %s port %d [preauth]" % (user, REAL, 40000 + p) for p in range(25)]
@@ -107,16 +111,25 @@ CASES = {   # case -> (lines, SSHFailedLoginBurst {ip: count} it must return, Ro
     "inj_banner_cut_file":        ([SYSLOG + banner(BANNER_CUT) for _ in range(25)], {}, False),
     "inj_banner_cut_journal":     ([banner(BANNER_CUT) for _ in range(25)], {}, False),
     "inj_banner_cut_repeated":    ([SYSLOG + "message repeated 2 times: [ %s]" % banner(BANNER_CUT) for _ in range(25)], {}, False),
+    # review round 1: the same cut, landing on a forged root accept with the exact tail, so only the
+    # root rule's own start anchor stands between it and RootLoginDetected
+    "inj_disconnect_root_cut_file":    ([SYSLOG + disconnect(DISC_ROOT_CUT)], {}, False),
+    "inj_disconnect_root_cut_journal": ([disconnect(DISC_ROOT_CUT)], {}, False),
+    "inj_banner_root_cut_file":        ([SYSLOG + banner(BANNER_ROOT_CUT)], {}, False),
     # genuine shapes the anchored prefix must keep: a space-padded day, IPv6 in file mode, a key tail
     "real_fail_padded_day": (["Sep  9 10:00:00 vm sshd[4242]: Failed password for root from %s port %d ssh2" % (REAL, 50000 + p) for p in range(25)], {REAL: 25}, False),
     "real_fail_ipv6_file":  ([ISO + "Failed password for invalid user admin from %s port %d ssh2" % (V6, 50000 + p) for p in range(25)], {V6: 25}, False),
-    "real_root_iso_key":    ([ISO + "Accepted publickey for root from %s port 5 ssh2: ECDSA-SK %s" % (V6, FP)], {}, True),
+    "real_root_iso_key":    ([ISO + "Accepted publickey for root from %s port 5 ssh2: ECDSA-SK %s, signature count = 7" % (V6, FP)], {}, True),
+    "real_root_cert_file":  ([SYSLOG + "Accepted publickey for root from %s port 5 ssh2: %s" % (REAL, CERT)], {}, True),
+    "real_root_cert_journal_sk": (["Accepted publickey for root from %s port 5 ssh2: ECDSA-SK-CERT %s ID ci (serial 7) CA ECDSA %s, signature count = 12" % (REAL, FP, FP)], {}, True),
     "real_root_journal_key": (["Accepted publickey for root from %s port 5 ssh2: RSA %s" % (REAL, FP)], {}, True),
     # the root tail is exact: after "ssh2" only a key type and its SHA256 fingerprint, never free text
-    "tail_not_sshd_root":   ([SYSLOG + "Accepted password for root from %s port 5 ssh2: x" % REAL, "Accepted publickey for root from %s port 5 ssh2: RSA %s x" % (REAL, FP)], {}, False),
+    "tail_not_sshd_root":   ([SYSLOG + "Accepted password for root from %s port 5 ssh2: x" % REAL, "Accepted publickey for root from %s port 5 ssh2: RSA %s x" % (REAL, FP),
+                             "Accepted publickey for root from %s port 5 ssh2: %s x" % (REAL, CERT), "Accepted publickey for root from %s port 5 ssh2: %s, signature count = x" % (REAL, CERT)], {}, False),
 }
 # the forged lines must really carry the forged text at the line end, or the cases above prove nothing
 assert CASES["inj_disconnect_cut_file"][0][0].endswith(FAIL_TEXT) and CASES["inj_banner_cut_journal"][0][0].endswith(FAIL_TEXT)
+assert all(CASES[c][0][0].endswith(ROOT_CUT_TEXT) for c in ("inj_disconnect_root_cut_file", "inj_disconnect_root_cut_journal", "inj_banner_root_cut_file"))
 assert ROOT_TEXT in CASES["inj_banner_root_file"][0][0] and ROOT_TEXT in CASES["inj_disconnect_root_journal"][0][0]
 now = time.time_ns()
 streams = [{"stream": {"job": "authlog", "case": c}, "values": [[str(now - 60 * 10**9 + i * 10**6), l] for i, l in enumerate(lines)]}

@@ -193,6 +193,6 @@ write a whole sshd-shaped line into the auth log with `logger`. Only rsyslog's t
 Warning, fires immediately. An SSH login as root was accepted. Expected on some setups, alarming
 on others, which is why it only warns.
 It matches only sshd's own `Accepted ... for root from <ip> port <n> ssh2` right after the syslog prefix,
-ending in `ssh2` or a key's `ssh2: <TYPE> SHA256:<fingerprint>`, so text an SSH client chooses cannot
-fire it; a local user on the host can still write such a line with `logger`. An SSH certificate login
-logs a longer tail (key ID and CA) and is not matched.
+ending in `ssh2` or the key sshd names after it (`<TYPE> SHA256:<fp>`, a certificate's key ID, serial
+and CA, a FIDO key's signature count), so text an SSH client chooses cannot fire it; a local user on
+the host can still write such a line with `logger`.
