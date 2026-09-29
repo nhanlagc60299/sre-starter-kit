@@ -154,7 +154,8 @@ of their choosing, up to the cap below — restrict who may send it alerts with 
 refuses logs `skip: hourly triage run cap reached`, and its alert group is still marked triaged, so a
 repeat of it within the hour is skipped too. "The group" is the group together with the set of alerts
 in it: a notification whose alert set differs from every one triaged in the last hour is triaged
-again. An alert joining sends one straight away; one resolving does not (`webhook-triage` has
+again. An alert
+joining is sent at the group's next interval (`group_interval: 5m`, so within 5 minutes); one resolving does not (`webhook-triage` has
 `send_resolved: false`), so the smaller set is seen at the group's next notification. Only the first
 20 alerts of a group reach the agent (`max_alerts: 20`), so anyone who can post to Alertmanager can
 crowd a genuine alert out of the triage payload with 20 of their own; the page to your receivers is
