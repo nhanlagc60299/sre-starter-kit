@@ -83,8 +83,14 @@ export NODE_EXPORTER_TARGET GRAFANA_EXTERNAL_URL
 # mention, a timestamp and an autolink, so a label must not carry them. "＞3 times" still reads as
 # ">3 times"; Telegram is sent as plain text (parse_mode '') and the email Subject is RFC 2047-encoded,
 # as it already is for the other look-alikes. ||spoiler|| is left alone: it can hide text, not add any.
+# A "/" that starts a word ("/start", "(/stop@bot") becomes the look-alike "／" too (audit run-7):
+# Telegram turns it into a tappable bot command even in plain text. Only where Telegram's own parser
+# would start one -- after a non-word character other than "/", before a letter, digit or "_" -- so
+# "https://x/y" and "a/b" in a summary are untouched; runbook_url/dashboard take the link chains.
+# "${1}" and "${2}" are Go regexp group references for Alertmanager: envsubst, the add() splice and
+# the chart's replace insert this value verbatim and never rescan it, so they reach Alertmanager as is.
 SLACK_SANITIZE='reReplaceAll "[\r\n\v\f\x1c-\x1e\u0085\u2028\u2029]" " " | reReplaceAll "&" "&amp;" | reReplaceAll "<" "&lt;" | reReplaceAll ">" "&gt;" | reReplaceAll "[[]" "［" | reReplaceAll "[]]" "］" | reReplaceAll "@" "＠" | reReplaceAll "`" "｀"'
-OTHER_SANITIZE='reReplaceAll "[\r\n\v\f\x1c-\x1e\u0085\u2028\u2029]" " " | reReplaceAll "[[]" "［" | reReplaceAll "[]]" "］" | reReplaceAll "<" "＜" | reReplaceAll ">" "＞" | reReplaceAll "@" "＠" | reReplaceAll "`" "｀"'
+OTHER_SANITIZE='reReplaceAll "[\r\n\v\f\x1c-\x1e\u0085\u2028\u2029]" " " | reReplaceAll "[[]" "［" | reReplaceAll "[]]" "］" | reReplaceAll "<" "＜" | reReplaceAll ">" "＞" | reReplaceAll "(^|[^[:alnum:]_/])/([[:alnum:]_])" "${1}／${2}" | reReplaceAll "@" "＠" | reReplaceAll "`" "｀"'
 # .Annotations.runbook_url/.dashboard are rule-authored, but anyone who can POST to
 # Alertmanager's unauthenticated API sets them too ("x|y> <!channel> <z" would ping a Slack channel).
 # They get their own chain that strips only what leaves a link -- [, <, >, | everywhere, plus ) on

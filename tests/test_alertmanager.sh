@@ -126,7 +126,7 @@ PYSAN
 # runbook_url uses this repo's own public URL shape (docs/ALERTS.md#<anchor>), not the private Pro
 # repo's runbooks/<Name>.md.
 cat > "$tmp2/hostile.json" <<'JSON'
-{"Status":"firing","Receiver":"critical","Alerts":[{"Status":"firing","Labels":{},"Annotations":{"summary":"-# LEAD <!channel> <@U123> <https://evil.invalid|runbook> <#123> </cmd:1:2> <t:1700000000:R> [click](https://evil.invalid) @everyone `x` &lt;!here&gt;\r\n# heading\n\u000b# vt\u000c# ff\u0085# nel\u2028# ls\u2029# ps\u001c# fs\u001d# gs\u001e# rs","runbook_url":"https://github.com/nhanlagc60299/sre-starter-kit/blob/main/docs/ALERTS.md#test","dashboard":"abc"}}],"GroupLabels":{"alertname":"<!channel>"},"CommonLabels":{"alertname":"<!channel> [x](https://evil.invalid) @here\n# heading\u2028# ls\u0085# nel\u000b# vt"},"CommonAnnotations":{},"ExternalURL":"http://am.invalid"}
+{"Status":"firing","Receiver":"critical","Alerts":[{"Status":"firing","Labels":{},"Annotations":{"summary":"-# LEAD /start@evil_bot (/stop <!channel> <@U123> <https://evil.invalid|runbook> <#123> </cmd:1:2> <t:1700000000:R> [click](https://evil.invalid) @everyone `x` &lt;!here&gt;\r\n# heading\n\u000b# vt\u000c# ff\u0085# nel\u2028# ls\u2029# ps\u001c# fs\u001d# gs\u001e# rs","runbook_url":"https://github.com/nhanlagc60299/sre-starter-kit/blob/main/docs/ALERTS.md#test","dashboard":"abc"}}],"GroupLabels":{"alertname":"<!channel>"},"CommonLabels":{"alertname":"<!channel> [x](https://evil.invalid) @here /help\n# heading\u2028# ls\u0085# nel\u000b# vt"},"CommonAnnotations":{},"ExternalURL":"http://am.invalid"}
 JSON
 cat > "$tmp2/ordinary.json" <<'JSON'
 {"Status":"firing","Receiver":"critical","Alerts":[{"Status":"firing","Labels":{"alertname":"ServiceDown"},"Annotations":{"summary":"Container web restarted >3 times in 15m; Service api is DOWN (https://api.example.invalid/health?a=1&b=2)","runbook_url":"https://github.com/nhanlagc60299/sre-starter-kit/blob/main/docs/ALERTS.md#servicedown","dashboard":"sre-app?a=1&b=2"}}],"GroupLabels":{"alertname":"ServiceDown"},"CommonLabels":{"alertname":"ServiceDown"},"CommonAnnotations":{},"ExternalURL":"http://am.invalid"}
@@ -187,9 +187,13 @@ for key, text in fields.items():
             # mention, a timestamp and an autolink: the label's own < and > become look-alikes (audit run-6)
             if any(t in h for t in ("<#123", "</cmd", "<t:17", "<https://evil", "<!channel", "<@U123")): bad.append((key, "'<' survived outside Slack", h))
             if any(t in h for t in ("123>", "1:2>", ":R>", "|runbook>")): bad.append((key, "'>' survived outside Slack", h))
+            # Telegram turns a word-initial "/" into a tappable bot command, even as plain text (audit run-7)
+            if re.search(r"(^|[^\w/])/\w", h): bad.append((key, "a word-initial '/' (bot command) survived outside Slack", h))
     if ".Annotations.summary" in text and not is_slack:
         # a full-width look-alike, never Slack's entity: those receivers show "&gt;" literally
         if "＞3 times" not in o or "&gt;" in o: bad.append((key, "ordinary '>3 times' was garbled outside Slack", o))
+        # ... and a URL's own "/" is not word-initial, so the bot-command look-alike leaves it alone
+        if "(https://api.example.invalid/health?a=1&b=2)" not in o: bad.append((key, "an ordinary URL in the summary was garbled", o))
     if ".Annotations.dashboard" in text:
         if DASHBOARD not in o: bad.append((key, "dashboard query string was corrupted", o))
     if ".Annotations.runbook_url" in text:
