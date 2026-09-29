@@ -96,13 +96,14 @@ DEFAULT_REDACT = [
     # "MII" is the DER SEQUENCE tag every RSA/EC/PKCS8 key or cert starts with once base64-encoded.
     # The rows after it follow across whitespace or a literal "\n"/"\r" (a JSON-escaped key on one
     # log line), and only real PEM rows count (audit run-4): exactly 64 characters, or a final row of
-    # 4-64 with its "=" padding that ends the line. A field name after the key ("databasePassword:",
+    # 4-64 with its "=" padding that ends the line or its value (a quote, comma, brace or bracket
+    # after it: a key inside JSON or a YAML flow sequence). A field name after the key ("databasePassword:",
     # "storageAccountKey=", "appPassword= x") is neither, so the keyword rule still sees it. The
     # separator and the row share no character, each row's end is fixed by a bounded lookahead, and
     # nothing after the repeat can fail, so it never backtracks. The trailing "={0,2}" is the first
     # row's own padding.
     (r"\bMII[A-Za-z0-9+/]{20,4096}(?:(?:\\[nr]|\s){1,8}(?:[A-Za-z0-9+/]{64}(?![A-Za-z0-9+/=])"
-     r"|(?=[A-Za-z0-9+/=]{4,64}[ \t]{0,8}(?:\\[nr]|[\r\n]|$))[A-Za-z0-9+/]{2,64}={0,2}(?![A-Za-z0-9+/=]))){0,256}={0,2}",
+     r"|(?=[A-Za-z0-9+/=]{4,64}[ \t]{0,8}(?:\\[nr]|[\r\n\"',}\]]|$))[A-Za-z0-9+/]{2,64}={0,2}(?![A-Za-z0-9+/=]))){0,256}={0,2}",
      "[pem-redacted]"),
     # A lone base64 body line with no "MII" prefix of its own - a later line of a multi-line PEM once
     # the first has already matched above, or a body pasted without its first line. Exactly 64 base64
@@ -864,6 +865,21 @@ def process(payload):
         print("triage-trace " + json.dumps(trace, sort_keys=True), flush=True)
 
 
+# At most this many process() workers at once. Each can hold an at-cap pack (tens of MiB) inside the
+# container's 256 MiB, and an OOM restart would also forget the hourly run cap and the dedup map. A
+# group that arrives while every slot is busy is dropped with a log line, not queued: it is not marked
+# triaged, so Alertmanager's next notification for it can still be triaged.
+MAX_WORKERS = 4
+WORKERS = threading.BoundedSemaphore(MAX_WORKERS)
+
+
+def _work(payload):
+    try:
+        process(payload)
+    finally:
+        WORKERS.release()
+
+
 class Handler(BaseHTTPRequestHandler):
     timeout = 10   # seconds of socket idle before the connection is dropped; a stalled sender cannot pin a thread
 
@@ -889,7 +905,9 @@ class Handler(BaseHTTPRequestHandler):
         if not isinstance(payload, dict):             # process() reads it as an object
             self.send_response(400); self.end_headers(); return
         self.send_response(200); self.end_headers()        # Alertmanager retries on non-2xx; never make it wait
-        threading.Thread(target=process, args=(payload,), daemon=True).start()
+        if not WORKERS.acquire(blocking=False):
+            log("skip: %d triage runs already in progress" % MAX_WORKERS); return
+        threading.Thread(target=_work, args=(payload,), daemon=True).start()
 
     def log_message(self, *a): pass
 

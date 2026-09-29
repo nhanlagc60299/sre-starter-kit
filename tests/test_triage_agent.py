@@ -757,6 +757,15 @@ class PackTests(unittest.TestCase):
                 for r in rows:
                     self.assertNotIn(r[:20], out)
                 self.assertIn("next: ok", out)
+        # R42: a final row closed by a quote, comma, brace or bracket (a PEM inside JSON, a YAML flow
+        # sequence) is a final row too
+        pem = "MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQD\n" + "R" * 64 + "\nLASTROWdummyQ=="
+        for line in (json.dumps({"ca": pem, "x": 1}), json.dumps([pem]), "ca: '" + pem.replace("\n", " ") + "', x: 1",
+                     "{ca: " + pem.replace("\n", " ") + "}", json.dumps({"ca": pem.rstrip("=")})):
+            with self.subTest(line=line[-40:]):
+                out = self.agent.redact(line)
+                self.assertNotIn("LASTROW", out)
+                self.assertNotIn("R" * 20, out)
         # a final row with no padding at the end of the text
         self.assertNotIn("Zdummy", self.agent.redact("MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQD\n" + "A" * 64 + "\nZdummyZdummy"))
     def test_run4_a_secret_named_label_loses_its_value(self):
@@ -1723,6 +1732,34 @@ class IngressTests(unittest.TestCase):
                                      headers=dict({"Content-Type": "application/json"}, **(headers or {})))
         try: return urllib.request.urlopen(req, timeout=5).status
         except urllib.error.HTTPError as e: e.close(); return e.code
+
+    def test_at_most_four_workers_run_at_once_and_the_rest_are_dropped(self):
+        # R42: every worker can hold an at-cap pack (tens of MiB) inside the 256 MiB container, and an
+        # OOM restart also forgets the run cap and the dedup map. A fifth concurrent group still gets
+        # 200 (Alertmanager must not retry into it) but is dropped with a log line, not queued.
+        gate, started = threading.Event(), []
+        def slow(payload): started.append(payload.get("groupKey")); gate.wait(10)
+        import io, contextlib
+        buf = io.StringIO()
+        with mock.patch.object(self.agent, "process", side_effect=slow), contextlib.redirect_stdout(buf):
+            try:
+                self.assertEqual([self._post() for _ in range(6)], [200] * 6)
+                for _ in range(50):
+                    if len(started) == 4: break
+                    time.sleep(0.05)
+                time.sleep(0.2)
+                self.assertEqual(len(started), 4)
+                self.assertEqual(buf.getvalue().count("skip: 4 triage runs already in progress"), 2)
+            finally:
+                gate.set()
+            for _ in range(50):                        # every slot is released when its worker ends
+                if self.agent.WORKERS._value == 4: break
+                time.sleep(0.05)
+            self.assertEqual(self._post(), 200)
+            for _ in range(50):
+                if len(started) == 5: break
+                time.sleep(0.05)
+        self.assertEqual(len(started), 5)
 
     def test_oversized_content_length_is_413_without_reading_the_body(self):
         with mock.patch.object(self.agent, "process") as proc:
