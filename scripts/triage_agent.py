@@ -139,10 +139,12 @@ DEFAULT_REDACT = [
     # A PEM body that lost its -----BEGIN/END----- header/footer, or never had one in this log line -
     # "MII" is the DER SEQUENCE tag every RSA/EC/PKCS8 key or cert starts with once base64-encoded.
     # The rows after it follow across whitespace or a literal "\n"/"\r" (a JSON-escaped key on one
-    # log line), and only real PEM rows count (audit run-4): exactly 64 characters, or a final row of
-    # 4-64 with its "=" padding that ends the line or its value (a quote, comma, brace or bracket
-    # after it: a key inside JSON or a YAML flow sequence), in real base64 shape (whole 4-character
-    # groups, then "xx==" or "xxx="). A field name after the key ("databasePassword:",
+    # log line), and only real PEM rows count (audit run-4): exactly 64 characters, or 76 (MIME and
+    # GNU base64's wrap, audit run-5), or a final row of 4-76 with its "=" padding that ends the line
+    # or its value (a quote, comma, brace or bracket after it: a key inside JSON or a YAML flow
+    # sequence), in real base64 shape (whole 4-character groups, then "xx==" or "xxx="). A padded
+    # final row may also end at whitespace, and any row may end the text itself (loki_lines cuts a
+    # line at 300 characters, mid-row). A field name after the key ("databasePassword:",
     # "storageAccountKey=", "appPassword= x") is neither. These two rules run AFTER the keyword and
     # name/value rules (R42): a keyword's value is already "[redacted]", which no base64 row can eat,
     # and before that swap "password=" in front of a quote read as a padded final row. A keyword-named
@@ -151,8 +153,10 @@ DEFAULT_REDACT = [
     # separator and the row share no character, each row's end is fixed by a bounded lookahead, and
     # nothing after the repeat can fail, so it never backtracks. The trailing "={0,2}" is the first
     # row's own padding.
-    (r"(?:\bMII[A-Za-z0-9+/]{20,4096}|(?<=\[redacted\])(?=(?:\\[nr]|\s){1,8}[A-Za-z0-9+/]{64}(?![A-Za-z0-9+/=])))(?:(?:\\[nr]|\s){1,8}(?:[A-Za-z0-9+/]{64}(?![A-Za-z0-9+/=])"
-     r"|(?=[A-Za-z0-9+/=]{4,64}[ \t]{0,8}(?:\\[nr]|[\r\n\"',}\]]|$))(?:[A-Za-z0-9+/]{4}){0,16}(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?(?![A-Za-z0-9+/=]))){0,256}={0,2}",
+    (r"(?:\bMII[A-Za-z0-9+/]{20,4096}|(?<=\[redacted\])(?=(?:\\[nr]|\s){1,8}[A-Za-z0-9+/]{64}(?:[A-Za-z0-9+/]{12})?(?![A-Za-z0-9+/=])))"
+     r"(?:(?:\\[nr]|\s){1,8}(?:[A-Za-z0-9+/]{64}(?:[A-Za-z0-9+/]{12})?(?![A-Za-z0-9+/=])"
+     r"|(?=[A-Za-z0-9+/=]{4,76}[ \t]{0,8}(?:\\[nr]|[\r\n\"',}\]]|$))(?:[A-Za-z0-9+/]{4}){0,19}(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?(?![A-Za-z0-9+/=])"
+     r"|(?:[A-Za-z0-9+/]{4}){0,18}(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)(?=\s)|[A-Za-z0-9+/]{1,76}={0,2}\Z)){0,256}={0,2}",
      "[pem-redacted]"),
     # A lone base64 body line with no "MII" prefix of its own - a later line of a multi-line PEM once
     # the first has already matched above, or a body pasted without its first line. Exactly 64 base64
@@ -252,6 +256,12 @@ class Budget:
 
 
 _TOO_LARGE = object()
+# One upstream body is read, decoded and parsed at a time, process-wide (audit run-5): an 8 MiB body
+# of attacker-shaped alert labels costs 109 MiB while it is a str plus a parse tree, and four workers
+# doing that together reached 351 MiB against the 256 MiB limit (157 MiB with this lock; see
+# MAX_WORKERS). A worker waits at most its own call timeout for the lock, then counts the source as
+# unreachable.
+_UPSTREAM = threading.Lock()
 
 
 def get_json(url, headers=None, timeout=SOURCE_TIMEOUT):
@@ -259,12 +269,17 @@ def get_json(url, headers=None, timeout=SOURCE_TIMEOUT):
     is never parsed: at most one byte past the cap is ever read. Never raises: every source is optional."""
     try:
         req = urllib.request.Request(url, headers={**(headers or {}), "User-Agent": USER_AGENT})
-        with urllib.request.urlopen(req, timeout=timeout) as r:
-            raw = r.read(MAX_UPSTREAM_BYTES + 1)
-        if len(raw) > MAX_UPSTREAM_BYTES:
-            log("source response over %d bytes, not parsed: %s" % (MAX_UPSTREAM_BYTES, url.split("?")[0]))
-            return _TOO_LARGE
-        return json.loads(raw.decode())
+        if not _UPSTREAM.acquire(timeout=timeout):
+            raise TimeoutError("another upstream body is being parsed")
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as r:
+                raw = r.read(MAX_UPSTREAM_BYTES + 1)
+            if len(raw) > MAX_UPSTREAM_BYTES:
+                log("source response over %d bytes, not parsed: %s" % (MAX_UPSTREAM_BYTES, url.split("?")[0]))
+                return _TOO_LARGE
+            return json.loads(raw.decode())
+        finally:
+            _UPSTREAM.release()
     except Exception as e:  # noqa: BLE001 - a dead upstream must not kill the triage
         log("source unreachable %s: %s" % (url.split("?")[0], e.__class__.__name__))
         return None
@@ -448,6 +463,15 @@ def redact(obj):
 _SECRET_KEY = re.compile(r"(?i)(?:" + _KEYWORDS + r")$")
 
 
+def _blank(obj):
+    """Everything under a secret-named key: every leaf replaced, whatever its type (audit run-5)."""
+    if isinstance(obj, list):
+        return [_blank(x) for x in obj]
+    if isinstance(obj, dict):
+        return {k: _blank(v) for k, v in obj.items()}
+    return "[redacted]"
+
+
 def _redact(obj, pats):
     if isinstance(obj, str):
         obj = obj[:HARD_CAP_BYTES]   # one string bigger than the whole pack budget is never useful context
@@ -457,7 +481,7 @@ def _redact(obj, pats):
     if isinstance(obj, list):
         return [_redact(x, pats) for x in obj]
     if isinstance(obj, dict):
-        return {k: "[redacted]" if isinstance(v, str) and isinstance(k, str) and _SECRET_KEY.search(k) else _redact(v, pats)
+        return {k: _blank(v) if isinstance(k, str) and _SECRET_KEY.search(k) else _redact(v, pats)
                 for k, v in obj.items()}
     return obj
 
@@ -639,9 +663,17 @@ def post_json(url, body, headers=None, timeout=45):
 
 
 def _chunks(text, size):
-    """Split text into <=size pieces so a long note still reaches a receiver instead of being cut
-    off (Discord: 2000 chars: Telegram: 4096) or rejected outright."""
-    return [text[i:i + size] for i in range(0, len(text), size)] or [""]
+    """Split plain text into <=size pieces so a long note still reaches a receiver (Telegram: 4096)
+    instead of being rejected. Breaks at line boundaries, like _chunks_md, so no runbook command
+    straddles two messages (audit run-5); only a single line longer than `size` is sliced."""
+    chunks = []
+    for line in text.split("\n"):
+        for piece in (line[i:i + size] for i in range(0, max(len(line), 1), size)):
+            if chunks and len(chunks[-1]) + 1 + len(piece) <= size:
+                chunks[-1] += "\n" + piece
+            else:
+                chunks.append(piece)
+    return [c for c in chunks if c] or [""]
 
 
 def _fenced(chunk):
@@ -815,14 +847,16 @@ def post_note(text):
 
 def _dedup_digest(payload, key):
     """The group plus the set of alerts in it (sorted fingerprints, or label sets where an alert has
-    none). Keyed on the group alone, a forged alert posted first with a genuine group's labels got the
-    group triaged and the genuine alert's notification skipped for an hour (audit run-4); now a
-    changed alert set is triaged again, within the hourly run cap. The dedup map outlives the request
-    by an hour: it holds a fixed-size digest, never the sender-sized key."""
+    none) and how many alerts max_alerts cut from it. Keyed on the group alone, a forged alert posted
+    first with a genuine group's labels got the group triaged and the genuine alert's notification
+    skipped for an hour (audit run-4); now a changed alert set is triaged again, within the hourly run
+    cap - including a genuine alert pushed past the first 20, which only truncatedAlerts shows (audit
+    run-5). The dedup map outlives the request by an hour: it holds a fixed-size digest, never the
+    sender-sized key."""
     alerts = payload.get("alerts")
     members = sorted(str(a.get("fingerprint") or json.dumps(a.get("labels"), sort_keys=True)) if isinstance(a, dict)
                      else json.dumps(a, sort_keys=True) for a in (alerts if isinstance(alerts, list) else []))
-    return hashlib.sha256(json.dumps([key, members]).encode("utf-8", "surrogatepass")).hexdigest()
+    return hashlib.sha256(json.dumps([key, members, payload.get("truncatedAlerts")]).encode("utf-8", "surrogatepass")).hexdigest()
 
 
 def process(payload):
@@ -870,10 +904,12 @@ def process(payload):
         print("triage-trace " + json.dumps(trace, sort_keys=True), flush=True)
 
 
-# At most this many process() workers at once. Each can hold an at-cap pack (tens of MiB) inside the
-# container's 256 MiB, and an OOM restart would also forget the hourly run cap and the dedup map. A
-# group that arrives while every slot is busy is dropped with a log line, not queued: it is not marked
-# triaged, so Alertmanager's next notification for it can still be triaged.
+# At most this many process() workers at once, inside the container's 256 MiB: an OOM restart would
+# also forget the hourly run cap and the dedup map. One attacker-shaped 8 MiB alert list costs 109 MiB
+# while it is parsed, so get_json parses one body at a time; four workers then peaked at 157 MiB,
+# worst of 20 trials (audit run-5; 351 MiB without that lock). A group that arrives while every slot
+# is busy is dropped with a log line, not queued: it is not marked triaged, so Alertmanager's next
+# notification for it can still be triaged.
 MAX_WORKERS = 4
 WORKERS = threading.BoundedSemaphore(MAX_WORKERS)
 

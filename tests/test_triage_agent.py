@@ -798,6 +798,37 @@ class PackTests(unittest.TestCase):
         self.assertIn('user="bob"', self.agent.redact("ca: " + self._MII + "\n" + row + '\nuser="bob"'))
         # an ordinary short word on the line after a redacted value is not a PEM row
         self.assertEqual(self.agent.redact("password: x\ndone"), "password: [redacted]\ndone")
+    def test_run5_headerless_pem_shapes_lose_every_row(self):
+        # audit run-5 h3 run5_probe section 1, verbatim shapes (dummy body): the run-4 row rule left a
+        # 76-column body, a key cut mid-row by loki_lines' 300-character cut, and a padded final row
+        # followed by more text partly in the clear.
+        import random
+        rnd = random.Random(5)
+        b64 = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+        der = "MIIEvQIBADANBgkqhkiG9w0BAQEFAASC" + "".join(rnd.choice(b64) for _ in range(1200))
+        wrap = lambda s, w: [s[i:i + w] for i in range(0, len(s), w)]
+        rows64 = wrap(der[:64 * 4 + 40], 64); rows64[-1] = rows64[-1][:34] + "=="
+        rows76 = wrap(der[:76 * 4], 76)
+        cases = [
+            ("64-col, escaped \\n, no keyword", "ca=" + "\\n".join(rows64), rows64),
+            ("64-col, escaped \\n, keyword private_key=", "cfg private_key: " + "\\n".join(rows64), rows64),
+            ("64-col, JSON quoted, keyword", '{"private_key":"' + "\\n".join(rows64) + '"}', rows64),
+            ("64-col, real newlines (annotation text)", "ca:\n" + "\n".join(rows64), rows64),
+            ("76-col (GNU base64 default), escaped \\n", "ca=" + "\\n".join(rows76), rows76),
+            ("76-col, real newlines (annotation text)", "ca:\n" + "\n".join(rows76), rows76),
+            ("64-col cut mid-row (Loki 300-char cut)", ("ca=" + "\\n".join(rows64))[:300], rows64),
+            ("64-col, padded final row, then text", "ca=" + "\\n".join(rows64[:-1] + [rows64[-1][:36]]) + " next=1", rows64),
+        ]
+        for label, s, rows in cases:
+            with self.subTest(label):
+                out = self.agent.redact(s)
+                # the probe's own leak test: any row whose first 16 characters survive
+                self.assertEqual([r for r in rows if len(r) >= 16 and r[:16] in out], [], out)
+                if label.startswith("64-col cut"):     # the cut row, shorter than 16 past its start, too
+                    self.assertNotIn(s[-10:], out)
+        self.assertIn("next=1", self.agent.redact(cases[-1][1]))
+        # the text after a key is still text: a field name on the next line keeps its name
+        self.assertIn("databasePassword: [redacted]", self.agent.redact("ca: " + der[:48] + "\n  databasePassword: hunter2dummy"))
     def test_run4_a_secret_named_label_loses_its_value(self):
         # run-4 h3: patterns only see a string, never the dict key above it, so a Prometheus label or
         # alert label named password/token/api_key kept its value in the pack.
@@ -808,6 +839,14 @@ class PackTests(unittest.TestCase):
         m, l = out["series"][0]["metric"], out["labels"]
         self.assertEqual((m["password"], m["db_token"], m["API_KEY"], l["client_secret"]), ("[redacted]",) * 4)
         self.assertEqual((m["instance"], m["max_tokens"], l["service"], l["bypass"]), ("web-1", "4096", "api", "yes"))
+    def test_run5_a_secret_named_key_loses_a_value_of_any_type(self):
+        # audit run-5 h3: only a str under a secret-named key was replaced; a number, a list or a
+        # dict under "secret"/"token"/"pass" went through as it was.
+        out = self.agent.redact({"labels": {"secret": 12345, "token": ["tokdummyinlist", 7], "password": None,
+                                            "pass": {"v": "nested", "n": [1.5, True]}, "max_tokens": 4096, "bypass": ["yes"]}})
+        self.assertEqual(out["labels"], {"secret": "[redacted]", "token": ["[redacted]", "[redacted]"], "password": "[redacted]",
+                                         "pass": {"v": "[redacted]", "n": ["[redacted]", "[redacted]"]},
+                                         "max_tokens": 4096, "bypass": ["yes"]})
     def test_dedup_within_an_hour(self):
         d = self.agent.Dedup(seconds=3600)
         self.assertFalse(d.seen("k")); self.assertTrue(d.seen("k"))
@@ -957,6 +996,37 @@ class ToolTests(unittest.TestCase):
         self.assertEqual(p["sources"]["alertmanager"], "unreachable"); self.assertEqual(p["firing"], [])
         self.assertEqual(p["sources"]["rules"], "ok")
 
+    def test_upstream_bodies_are_read_and_parsed_one_at_a_time(self):
+        # audit run-5: four workers each decoding and parsing an 8 MiB alert list at once reached
+        # 261 MiB against the 256 MiB limit. One body's read, decode and json.loads finish before
+        # another body's read starts.
+        inside, peak, lock, gate, real_loads = [0], [0], threading.Lock(), threading.Barrier(2), json.loads
+        class Resp:
+            def __enter__(self):
+                with lock:
+                    inside[0] += 1; peak[0] = max(peak[0], inside[0])
+                return self
+            def __exit__(self, *a): return False
+            def read(self, n):
+                try:
+                    gate.wait(timeout=1)    # both threads meet here unless the reads are serialised
+                except threading.BrokenBarrierError:
+                    pass
+                return b'{"ok": true}'
+        def loads(s, *a, **k):
+            r = real_loads(s, *a, **k)
+            with lock:
+                inside[0] -= 1
+            return r
+        out = []
+        with mock.patch.object(self.agent.urllib.request, "urlopen", lambda req, timeout: Resp()), \
+             mock.patch.object(self.agent.json, "loads", loads):
+            ts = [threading.Thread(target=lambda: out.append(self.agent.get_json("http://am/api/v2/alerts"))) for _ in range(2)]
+            for t in ts: t.start()
+            for t in ts: t.join()
+        self.assertEqual(out, [{"ok": True}, {"ok": True}])
+        self.assertEqual(peak[0], 1, "two upstream bodies were being read or parsed at the same time")
+
     def test_runbook_sanitises_the_name_itself_for_every_caller(self):
         # build_pack calls runbook(alertname) directly, without run_tool's sanitiser
         with open(os.path.join(self.tmp, "escape.md"), "w") as f:
@@ -1095,6 +1165,22 @@ class PostTests(unittest.TestCase):
             rebuilt = "".join(json.loads(b)["text"] for b in tg_posts)
             self.assertEqual(rebuilt, long_text)
         finally: os.environ.update({"TELEGRAM_BOT_TOKEN": "", "TELEGRAM_CHAT_ID": ""})
+
+    def test_telegram_chunks_break_at_line_boundaries(self):
+        # audit run-5 h9 check 11: a runbook command straddling offset 4096 arrived as a prefix at the
+        # end of one Telegram message and the rest at the start of the next.
+        cmd = "kubectl -n prod describe deployment api | tail -20"
+        text = "Triage: " + "h" * 4040 + "\nCheck first (from runbook)\n  " + cmd + "\nNot seen: tail line"
+        self.assertLess(text.index(cmd), 4096); self.assertGreater(text.index(cmd) + len(cmd), 4096)
+        os.environ.update({"TELEGRAM_BOT_TOKEN": "t0k", "TELEGRAM_CHAT_ID": "-100"})
+        try:
+            self.agent.post_note(text)
+            msgs = [json.loads(b)["text"] for p, b, _ in Sink.posts if p.startswith("/tg/")]
+        finally: os.environ.update({"TELEGRAM_BOT_TOKEN": "", "TELEGRAM_CHAT_ID": ""})
+        self.assertEqual(len(msgs), 2)
+        self.assertTrue(all(len(m) <= 4096 for m in msgs))
+        self.assertIn("  " + cmd, msgs[1])
+        self.assertEqual("\n".join(msgs), text)
 
     def test_email_receiver_failure_does_not_raise(self):
         # no fake SMTP server here; port 1 refuses immediately, so this exercises attempt()'s own
@@ -1879,6 +1965,20 @@ class IngressTests(unittest.TestCase):
                 self.agent.process(dict(WEBHOOK, groupKey="same-group", alerts=alerts))
                 ran.append(bp.call_count > before)
         self.assertEqual(ran, [True, False, True, False, True, True, False, True])
+
+    def test_dedup_key_counts_alerts_cut_by_max_alerts(self):
+        # audit run-5 h1: under max_alerts: 20, a genuine alert pushed past the first 20 never reaches
+        # the webhook, so the alert set looked unchanged and the notification was skipped. Alertmanager
+        # still counts it in truncatedAlerts, which is part of the key now.
+        alerts = [dict(WEBHOOK["alerts"][0], fingerprint="f%02d" % i) for i in range(20)]
+        with mock.patch.dict(os.environ, {"TRIAGE_MAX_RUNS_PER_HOUR": "0"}), \
+                mock.patch.object(self.agent, "build_pack", return_value={"sources": {}}) as bp, mock.patch("builtins.print"):
+            ran = []
+            for cut in (0, 1, 1):
+                before = bp.call_count
+                self.agent.process(dict(WEBHOOK, groupKey="max-alerts-group", alerts=alerts, truncatedAlerts=cut))
+                ran.append(bp.call_count > before)
+        self.assertEqual(ran, [True, True, False])
 
     def test_run_cap_zero_is_unlimited(self):
         with mock.patch.dict(os.environ, {"TRIAGE_MAX_RUNS_PER_HOUR": "0"}):

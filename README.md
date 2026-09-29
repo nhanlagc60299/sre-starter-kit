@@ -158,8 +158,9 @@ again. An alert
 joining is sent at the group's next interval (`group_interval: 5m`, so within 5 minutes); one resolving does not (`webhook-triage` has
 `send_resolved: false`), so the smaller set is seen at the group's next notification. Only the first
 20 alerts of a group reach the agent (`max_alerts: 20`), so anyone who can post to Alertmanager can
-crowd a genuine alert out of the triage payload with 20 of their own; the page to your receivers is
-unaffected.
+crowd a genuine alert out of the triage payload with 20 of their own. The number of alerts cut is part
+of "the set", so the notification is still triaged again, but without the genuine alert in the pack;
+the page to your receivers is unaffected.
 
 The agent also carries a read-only tool registry (`prom_query`, `prom_range`, `loki_query`, `alerts`,
 `deploys`, `runbook`) that Pro's engine may call while it thinks, and Pro prints one `triage-trace`
