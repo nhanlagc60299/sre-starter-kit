@@ -749,7 +749,7 @@ class PackTests(unittest.TestCase):
             with self.subTest(line=line):
                 self.assertNotIn("hunter2dummy", self.agent.redact(line))
         # real multi-row keys still lose every row, raw and JSON-escaped, with and without padding
-        rows = ["A" * 64, "B" * 64, "Cdummy+/" * 4 + "Q=="]
+        rows = ["A" * 64, "B" * 64, "Cdummy+/" * 4 + "QQ=="]   # a real final row: 34 characters, then "=="
         for sep in ("\n", "\\n", "\r\n", "\n    "):
             key = "MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQD" + sep + sep.join(rows)
             with self.subTest(sep=sep):
@@ -759,15 +759,45 @@ class PackTests(unittest.TestCase):
                 self.assertIn("next: ok", out)
         # R42: a final row closed by a quote, comma, brace or bracket (a PEM inside JSON, a YAML flow
         # sequence) is a final row too
-        pem = "MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQD\n" + "R" * 64 + "\nLASTROWdummyQ=="
+        pem = "MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQD\n" + "R" * 64 + "\nLASTROWdummyQQ=="
         for line in (json.dumps({"ca": pem, "x": 1}), json.dumps([pem]), "ca: '" + pem.replace("\n", " ") + "', x: 1",
-                     "{ca: " + pem.replace("\n", " ") + "}", json.dumps({"ca": pem.rstrip("=")})):
+                     "{ca: " + pem.replace("\n", " ") + "}", json.dumps({"ca": pem.rstrip("=") + "AA"})):
             with self.subTest(line=line[-40:]):
                 out = self.agent.redact(line)
                 self.assertNotIn("LASTROW", out)
                 self.assertNotIn("R" * 20, out)
         # a final row with no padding at the end of the text
         self.assertNotIn("Zdummy", self.agent.redact("MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQD\n" + "A" * 64 + "\nZdummyZdummy"))
+    def test_run4_keyword_after_a_pem_block_is_redacted_first(self):
+        # R42 round 2: the final-row lookahead took "password=" before a quote as a padded PEM row,
+        # the PEM rule ate it, and the keyword rule never saw the quoted value. Keywords now run
+        # before the headerless-PEM rules, and a final row must have real base64 shape.
+        row = "R" * 64
+        for line in ("ca=" + self._MII + ' password="hunter2dummy"',
+                     "TLS_CA=" + self._MII + '\nPASSWORD="hunter2dummy"',
+                     "ca: " + self._MII + "\n" + row + "\ntoken='hunter2dummy'",
+                     "ca: " + self._MII + "\n" + row + '\nsecret="hunter2dummy"',
+                     "ca: " + self._MII + "\n" + row + '\napiKey="hunter2dummy"',
+                     "ca: " + self._MII + "\n" + row + '\npwd="hunter2dummy"',
+                     json.dumps({"ca": self._MII + "\n" + row, "password": "hunter2dummy"})):
+            with self.subTest(line=line[-30:]):
+                out = self.agent.redact(line)
+                self.assertNotIn("hunter2dummy", out)
+                self.assertNotIn(row[:20], out)
+                self.assertNotIn(self._MII[:20], out)
+        # ... and a PEM held by a keyword-named field still loses every row: the keyword rule now
+        # takes only the first, and the PEM rule continues from the "[redacted]" it left
+        for line in ("private_key: " + self._MII + "\n  " + row + "\n  LASTdummQQ==",
+                     "private_key=" + self._MII + " " + row + " LASTdummQQ==",
+                     "PRIVATE_KEY=" + self._MII + "\\n" + row + "\\nLASTdummQQ== next"):
+            with self.subTest(line=line[:30]):
+                out = self.agent.redact(line)
+                for part in (self._MII[:20], row[:20], "LASTdumm"):
+                    self.assertNotIn(part, out)
+        # a final row has real base64 shape, so an ordinary field after a key is not eaten as one
+        self.assertIn('user="bob"', self.agent.redact("ca: " + self._MII + "\n" + row + '\nuser="bob"'))
+        # an ordinary short word on the line after a redacted value is not a PEM row
+        self.assertEqual(self.agent.redact("password: x\ndone"), "password: [redacted]\ndone")
     def test_run4_a_secret_named_label_loses_its_value(self):
         # run-4 h3: patterns only see a string, never the dict key above it, so a Prometheus label or
         # alert label named password/token/api_key kept its value in the pack.
@@ -1752,14 +1782,26 @@ class IngressTests(unittest.TestCase):
                 self.assertEqual(buf.getvalue().count("skip: 4 triage runs already in progress"), 2)
             finally:
                 gate.set()
-            for _ in range(50):                        # every slot is released when its worker ends
-                if self.agent.WORKERS._value == 4: break
-                time.sleep(0.05)
+            # every slot is released when its worker ends: all four can be taken again (and given back)
+            self.assertTrue(all(self.agent.WORKERS.acquire(timeout=2) for _ in range(4)))
+            for _ in range(4): self.agent.WORKERS.release()
             self.assertEqual(self._post(), 200)
             for _ in range(50):
                 if len(started) == 5: break
                 time.sleep(0.05)
         self.assertEqual(len(started), 5)
+
+    def test_a_worker_that_cannot_start_gives_its_slot_back(self):
+        # R42 round 2: Thread.start() can raise (no threads left); the slot taken for it must not leak,
+        # or four such failures would stop triage for good.
+        # only the agent's own worker thread fails: the server's per-request threads come from socketserver
+        def start(): raise RuntimeError("can't start new thread")
+        no_threads = types.SimpleNamespace(Thread=lambda *a, **k: types.SimpleNamespace(start=start))
+        with mock.patch.object(self.agent, "threading", no_threads), mock.patch("builtins.print"):
+            for _ in range(5):
+                self.assertEqual(self._post(), 200)
+        self.assertTrue(all(self.agent.WORKERS.acquire(blocking=False) for _ in range(4)))
+        for _ in range(4): self.agent.WORKERS.release()
 
     def test_oversized_content_length_is_413_without_reading_the_body(self):
         with mock.patch.object(self.agent, "process") as proc:

@@ -92,25 +92,6 @@ DEFAULT_REDACT = [
     # A whole PEM file base64-encoded once more (a Kubernetes Secret's data, a CI variable):
     # "LS0tLS1CRUdJTi" is base64 of "-----BEGIN". Bounded like the rule above.
     (r"LS0tLS1CRUdJTi[A-Za-z0-9+/]{0,8192}={0,2}", "[pem-redacted]"),
-    # A PEM body that lost its -----BEGIN/END----- header/footer, or never had one in this log line -
-    # "MII" is the DER SEQUENCE tag every RSA/EC/PKCS8 key or cert starts with once base64-encoded.
-    # The rows after it follow across whitespace or a literal "\n"/"\r" (a JSON-escaped key on one
-    # log line), and only real PEM rows count (audit run-4): exactly 64 characters, or a final row of
-    # 4-64 with its "=" padding that ends the line or its value (a quote, comma, brace or bracket
-    # after it: a key inside JSON or a YAML flow sequence). A field name after the key ("databasePassword:",
-    # "storageAccountKey=", "appPassword= x") is neither, so the keyword rule still sees it. The
-    # separator and the row share no character, each row's end is fixed by a bounded lookahead, and
-    # nothing after the repeat can fail, so it never backtracks. The trailing "={0,2}" is the first
-    # row's own padding.
-    (r"\bMII[A-Za-z0-9+/]{20,4096}(?:(?:\\[nr]|\s){1,8}(?:[A-Za-z0-9+/]{64}(?![A-Za-z0-9+/=])"
-     r"|(?=[A-Za-z0-9+/=]{4,64}[ \t]{0,8}(?:\\[nr]|[\r\n\"',}\]]|$))[A-Za-z0-9+/]{2,64}={0,2}(?![A-Za-z0-9+/=]))){0,256}={0,2}",
-     "[pem-redacted]"),
-    # A lone base64 body line with no "MII" prefix of its own - a later line of a multi-line PEM once
-    # the first has already matched above, or a body pasted without its first line. Exactly 64 base64
-    # characters (PEM's own wrap width) containing at least one uppercase letter: that requirement is
-    # what keeps a 64-character lowercase hex digest (sha256, common in ordinary logs) out of this.
-    # Indentation (a YAML block) and a CRLF line end are allowed around it, and the indent is kept.
-    (r"(?m)^([ \t]{0,64})(?=[^\n]{0,63}[A-Z])[A-Za-z0-9+/]{64}\r?$", r"\1[pem-redacted]"),
     # The keyword must directly precede the separator - that trailing requirement alone is what
     # separates "safe" from "secret": max_tokens=, token_count=, tokenizer_latency=, secretary_id=,
     # passwordless_login= and pwd_check_interval= all have the keyword followed by more identifier
@@ -155,6 +136,30 @@ DEFAULT_REDACT = [
      r'(?:[\w.-]{0,64}(?:password|passwd|secret|token)[\w.-]{0,64}|(?:[\w.-]{0,64}[_.-])?key)'
      r'\\{0,3}"\s{0,16},\s{0,16}\\{0,3}"value\\{0,3}"\s{0,16}:\s{0,16}\\{0,3}")(?:\\.|[^"\\\n])*',
      r"\1[redacted]"),
+    # A PEM body that lost its -----BEGIN/END----- header/footer, or never had one in this log line -
+    # "MII" is the DER SEQUENCE tag every RSA/EC/PKCS8 key or cert starts with once base64-encoded.
+    # The rows after it follow across whitespace or a literal "\n"/"\r" (a JSON-escaped key on one
+    # log line), and only real PEM rows count (audit run-4): exactly 64 characters, or a final row of
+    # 4-64 with its "=" padding that ends the line or its value (a quote, comma, brace or bracket
+    # after it: a key inside JSON or a YAML flow sequence), in real base64 shape (whole 4-character
+    # groups, then "xx==" or "xxx="). A field name after the key ("databasePassword:",
+    # "storageAccountKey=", "appPassword= x") is neither. These two rules run AFTER the keyword and
+    # name/value rules (R42): a keyword's value is already "[redacted]", which no base64 row can eat,
+    # and before that swap "password=" in front of a quote read as a padded final row. A keyword-named
+    # field holding a PEM (private_key: MII...) loses its first row to the keyword rule, so the rule
+    # also starts right after a "[redacted]" when a full 64-character row follows it. The
+    # separator and the row share no character, each row's end is fixed by a bounded lookahead, and
+    # nothing after the repeat can fail, so it never backtracks. The trailing "={0,2}" is the first
+    # row's own padding.
+    (r"(?:\bMII[A-Za-z0-9+/]{20,4096}|(?<=\[redacted\])(?=(?:\\[nr]|\s){1,8}[A-Za-z0-9+/]{64}(?![A-Za-z0-9+/=])))(?:(?:\\[nr]|\s){1,8}(?:[A-Za-z0-9+/]{64}(?![A-Za-z0-9+/=])"
+     r"|(?=[A-Za-z0-9+/=]{4,64}[ \t]{0,8}(?:\\[nr]|[\r\n\"',}\]]|$))(?:[A-Za-z0-9+/]{4}){0,16}(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?(?![A-Za-z0-9+/=]))){0,256}={0,2}",
+     "[pem-redacted]"),
+    # A lone base64 body line with no "MII" prefix of its own - a later line of a multi-line PEM once
+    # the first has already matched above, or a body pasted without its first line. Exactly 64 base64
+    # characters (PEM's own wrap width) containing at least one uppercase letter: that requirement is
+    # what keeps a 64-character lowercase hex digest (sha256, common in ordinary logs) out of this.
+    # Indentation (a YAML block) and a CRLF line end are allowed around it, and the indent is kept.
+    (r"(?m)^([ \t]{0,64})(?=[^\n]{0,63}[A-Z])[A-Za-z0-9+/]{64}\r?$", r"\1[pem-redacted]"),
     # A secret passed as a command-line flag with spaces or tabs (--password x); "--password=x" is
     # also the keyword rule's. The flag must end at the separator, so --password-file/--token-ttl
     # stay intact.
@@ -907,7 +912,11 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(200); self.end_headers()        # Alertmanager retries on non-2xx; never make it wait
         if not WORKERS.acquire(blocking=False):
             log("skip: %d triage runs already in progress" % MAX_WORKERS); return
-        threading.Thread(target=_work, args=(payload,), daemon=True).start()
+        try:
+            threading.Thread(target=_work, args=(payload,), daemon=True).start()
+        except Exception as e:  # noqa: BLE001 - no thread, no worker: give the slot back or it leaks
+            WORKERS.release()
+            log("triage worker could not start: %s" % e.__class__.__name__)
 
     def log_message(self, *a): pass
 
