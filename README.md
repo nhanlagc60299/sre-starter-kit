@@ -48,8 +48,11 @@ with `TRIAGE_WEBHOOK_TOKEN` once it is set (`make init` generates it; see AI tri
 authenticates only the Alertmanager-to-agent hop: Alertmanager's own API has no authentication, so
 anyone who can reach it can still trigger triage runs with labels they choose, up to
 `TRIAGE_MAX_RUNS_PER_HOUR` -- restrict who can send it alerts with Alertmanager's own
-`--web.config.file` basic auth or a NetworkPolicy. The blackbox exporter (9115) is not published
-either, but any container on the compose network can call its `/probe?target=<url>` and have it fetch
+`--web.config.file` basic auth or a NetworkPolicy. Any container on the compose network can still
+open connections to it: the agent caps what one costs before the token is checked (64 connections,
+8 per address, headers within 5 seconds and 16 KiB), but such a container could hold those slots and
+delay Alertmanager's deliveries, so keep untrusted containers off that network. The blackbox exporter
+(9115) is not published either, but any container on the compose network can call its `/probe?target=<url>` and have it fetch
 any URL from the monitoring host's network position; keep untrusted containers off that network.
 
 To reach Grafana from your laptop, tunnel instead of opening the port:
