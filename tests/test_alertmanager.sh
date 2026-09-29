@@ -126,7 +126,7 @@ PYSAN
 # runbook_url uses this repo's own public URL shape (docs/ALERTS.md#<anchor>), not the private Pro
 # repo's runbooks/<Name>.md.
 cat > "$tmp2/hostile.json" <<'JSON'
-{"Status":"firing","Receiver":"critical","Alerts":[{"Status":"firing","Labels":{},"Annotations":{"summary":"<!channel> <@U123> <https://evil.invalid|runbook> [click](https://evil.invalid) @everyone `x` &lt;!here&gt;\r\n# heading\n\u000b# vt\u000c# ff\u0085# nel\u2028# ls\u2029# ps","runbook_url":"https://github.com/nhanlagc60299/sre-starter-kit/blob/main/docs/ALERTS.md#test","dashboard":"abc"}}],"GroupLabels":{"alertname":"<!channel>"},"CommonLabels":{"alertname":"<!channel> [x](https://evil.invalid) @here\n# heading\u2028# ls\u0085# nel\u000b# vt"},"CommonAnnotations":{},"ExternalURL":"http://am.invalid"}
+{"Status":"firing","Receiver":"critical","Alerts":[{"Status":"firing","Labels":{},"Annotations":{"summary":"-# LEAD <!channel> <@U123> <https://evil.invalid|runbook> [click](https://evil.invalid) @everyone `x` &lt;!here&gt;\r\n# heading\n\u000b# vt\u000c# ff\u0085# nel\u2028# ls\u2029# ps\u001c# fs\u001d# gs\u001e# rs","runbook_url":"https://github.com/nhanlagc60299/sre-starter-kit/blob/main/docs/ALERTS.md#test","dashboard":"abc"}}],"GroupLabels":{"alertname":"<!channel>"},"CommonLabels":{"alertname":"<!channel> [x](https://evil.invalid) @here\n# heading\u2028# ls\u0085# nel\u000b# vt"},"CommonAnnotations":{},"ExternalURL":"http://am.invalid"}
 JSON
 cat > "$tmp2/ordinary.json" <<'JSON'
 {"Status":"firing","Receiver":"critical","Alerts":[{"Status":"firing","Labels":{"alertname":"ServiceDown"},"Annotations":{"summary":"Container web restarted >3 times in 15m; Service api is DOWN (https://api.example.invalid/health?a=1&b=2)","runbook_url":"https://github.com/nhanlagc60299/sre-starter-kit/blob/main/docs/ALERTS.md#servicedown","dashboard":"sre-app?a=1&b=2"}}],"GroupLabels":{"alertname":"ServiceDown"},"CommonLabels":{"alertname":"ServiceDown"},"CommonAnnotations":{},"ExternalURL":"http://am.invalid"}
@@ -173,7 +173,11 @@ for key, text in fields.items():
         # a CR/LF would start a new line - a markdown heading on Discord/Teams/Telegram, a second email header line
         if re.search(r"(?m)^# heading", h): bad.append((key, "a line break survived", h))
         # ... and so would VT, FF, NEL and the Unicode line/paragraph separators on some receivers
-        if re.search("[\x0b\x0c\x85\u2028\u2029]", h): bad.append((key, "a line separator survived", h))
+        if re.search("[\x0b\x0c\x1c-\x1e\x85\u2028\u2029]", h): bad.append((key, "a line separator survived", h))
+        # Discord and Teams render a message that opens "# " or "-# " as a heading or subtext: those
+        # two open with fixed text, never with the summary
+        if (".discord_configs.message" in key or ".msteamsv2_configs.text" in key) and re.match(r"\s*-?#", h):
+            bad.append((key, "label text opens the message (heading or subtext)", h))
         if "`x`" in h: bad.append((key, "'`' survived (code fence)", h))
         if is_slack:
             if "<!channel" in h or "<@U123" in h: bad.append((key, "'<' survived on Slack", h))

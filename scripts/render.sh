@@ -67,18 +67,20 @@ export NODE_EXPORTER_TARGET GRAFANA_EXTERNAL_URL
 # "[[]" / "[]]" are the POSIX bracket-expression idiom for a literal [ / ] (a leading ] is literal
 # inside a class); verified against prom/alertmanager:v0.28.1's amtool template render.
 #
-# Both chains first fold every line separator into a space -- CR, LF, VT, FF, NEL, U+2028, U+2029
-# (Go string escapes; the template lexer turns them into the characters themselves): a line break in a
-# label would start a new line of its own -- a markdown heading on Discord/Teams/Telegram, a second
-# line in an email Subject -- and some clients break lines on the last five too.
+# Both chains first fold every line separator into a space -- CR, LF, VT, FF, FS, GS, RS, NEL, U+2028,
+# U+2029 (Go string escapes; the template lexer turns them into the characters themselves): a line
+# break in a label would start a new line of its own -- a markdown heading on Discord/Teams/Telegram,
+# a second line in an email Subject -- and some clients break lines on the others too (Python's
+# str.splitlines does on FS, GS and RS). The Discord message and the Teams text also open with the
+# fixed word "Summary:", so a summary that starts "# " or "-# " is not a heading or subtext there.
 #
 # SLACK_SANITIZE additionally escapes &,<,> as the HTML entities Slack's own escaping convention
 # already renders as literal characters (its docs: &amp;/&lt;/&gt;) -- Slack-only, & first so it is
 # not itself re-escaped by the </> step. OTHER_SANITIZE (Discord/Teams/Telegram, the email Subject) leaves &,<,>
 # alone: those receivers do not decode entities, so "&gt;3 times" showed up literally there (fix
 # round 1 review) -- ordinary label/annotation text must render the same as before this change.
-SLACK_SANITIZE='reReplaceAll "[\r\n\v\f\u0085\u2028\u2029]" " " | reReplaceAll "&" "&amp;" | reReplaceAll "<" "&lt;" | reReplaceAll ">" "&gt;" | reReplaceAll "[[]" "［" | reReplaceAll "[]]" "］" | reReplaceAll "@" "＠" | reReplaceAll "`" "｀"'
-OTHER_SANITIZE='reReplaceAll "[\r\n\v\f\u0085\u2028\u2029]" " " | reReplaceAll "[[]" "［" | reReplaceAll "[]]" "］" | reReplaceAll "@" "＠" | reReplaceAll "`" "｀"'
+SLACK_SANITIZE='reReplaceAll "[\r\n\v\f\x1c-\x1e\u0085\u2028\u2029]" " " | reReplaceAll "&" "&amp;" | reReplaceAll "<" "&lt;" | reReplaceAll ">" "&gt;" | reReplaceAll "[[]" "［" | reReplaceAll "[]]" "］" | reReplaceAll "@" "＠" | reReplaceAll "`" "｀"'
+OTHER_SANITIZE='reReplaceAll "[\r\n\v\f\x1c-\x1e\u0085\u2028\u2029]" " " | reReplaceAll "[[]" "［" | reReplaceAll "[]]" "］" | reReplaceAll "@" "＠" | reReplaceAll "`" "｀"'
 # .Annotations.runbook_url/.dashboard are rule-authored, but anyone who can POST to
 # Alertmanager's unauthenticated API sets them too ("x|y> <!channel> <z" would ping a Slack channel).
 # They get their own chain that strips only what leaves a link -- [, <, >, | everywhere, plus ) on
@@ -171,7 +173,7 @@ if [ -f "$AM" ] && [ -n "${TEAMS_WEBHOOK_URL:-}" ]; then
       - webhook_url: ${TEAMS_WEBHOOK_URL:-}
         send_resolved: true
         title: '[${PROJECT_NAME:-}] {{ .CommonLabels.alertname | ${OTHER_SANITIZE} }}'
-        text: '{{ range .Alerts }}{{ .Annotations.summary | ${OTHER_SANITIZE} }} [runbook]({{ .Annotations.runbook_url | ${MD_LINK_SANITIZE} }}) [dashboard](${GRAFANA_EXTERNAL_URL}/d/{{ .Annotations.dashboard | ${MD_LINK_SANITIZE} }}) {{ end }}'"
+        text: 'Summary: {{ range .Alerts }}{{ .Annotations.summary | ${OTHER_SANITIZE} }} [runbook]({{ .Annotations.runbook_url | ${MD_LINK_SANITIZE} }}) [dashboard](${GRAFANA_EXTERNAL_URL}/d/{{ .Annotations.dashboard | ${MD_LINK_SANITIZE} }}) {{ end }}'"
   done
 fi
 if [ -f "$AM" ] && [ -n "${DISCORD_WEBHOOK_URL:-}" ]; then
@@ -182,7 +184,7 @@ if [ -f "$AM" ] && [ -n "${DISCORD_WEBHOOK_URL:-}" ]; then
       - webhook_url: ${DISCORD_WEBHOOK_URL:-}
         send_resolved: true
         title: '[${PROJECT_NAME:-}] {{ .CommonLabels.alertname | ${OTHER_SANITIZE} }}'
-        message: '{{ range .Alerts }}{{ .Annotations.summary | ${OTHER_SANITIZE} }} [runbook](<{{ .Annotations.runbook_url | ${MD_LINK_SANITIZE} }}>) [dashboard](<${GRAFANA_EXTERNAL_URL}/d/{{ .Annotations.dashboard | ${MD_LINK_SANITIZE} }}>) {{ end }}'"
+        message: 'Summary: {{ range .Alerts }}{{ .Annotations.summary | ${OTHER_SANITIZE} }} [runbook](<{{ .Annotations.runbook_url | ${MD_LINK_SANITIZE} }}>) [dashboard](<${GRAFANA_EXTERNAL_URL}/d/{{ .Annotations.dashboard | ${MD_LINK_SANITIZE} }}>) {{ end }}'"
   done
 fi
 if [ -f "$AM" ] && [ -n "${ALERT_EMAIL_TO:-}" ]; then
