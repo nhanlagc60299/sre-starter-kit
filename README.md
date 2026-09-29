@@ -152,7 +152,8 @@ of their choosing, up to the cap below — restrict who may send it alerts with 
 `--web.config.file` basic auth or a NetworkPolicy. `TRIAGE_MAX_RUNS_PER_HOUR` caps triage runs in any rolling hour (empty = 30,
 `0` = unlimited), so a burst of alert groups cannot turn into a burst of dry-run packs. A run the cap
 refuses logs `skip: hourly triage run cap reached`, and its alert group is still marked triaged, so a
-repeat of it within the hour is skipped too.
+repeat of it within the hour is skipped too. "The group" is the group together with the set of alerts
+in it: when an alert joins or leaves, the group is triaged again.
 
 The agent also carries a read-only tool registry (`prom_query`, `prom_range`, `loki_query`, `alerts`,
 `deploys`, `runbook`) that Pro's engine may call while it thinks, and Pro prints one `triage-trace`
