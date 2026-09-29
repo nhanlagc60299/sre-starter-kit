@@ -159,3 +159,47 @@ tests:
       - eval_time: 15m
         alertname: HighP95Latency
         exp_alerts: []
+
+  # Audit run-7 review round 1: the node-exporter and Alloy DaemonSet pods answer on every node too,
+  # so the same forgeries under job="node" and job="alloy" must not count either. From node-evil: 5xx and slow buckets for
+  # "payments" (which would page), and a flood of 200s for the genuine "checkout" (which would
+  # dilute its real 50% error rate below every threshold). Neither may count: the app selectors
+  # exclude job=~"kubelet|cadvisor", and the genuine checkout pages as before.
+  - interval: 1m
+    input_series:
+      - series: 'http_requests_total{job="checkout",instance="checkout:8080",service="checkout",status="500"}'
+        values: '0+30x30'
+      - series: 'http_requests_total{job="checkout",instance="checkout:8080",service="checkout",status="200"}'
+        values: '0+30x30'
+      - series: 'http_request_duration_seconds_bucket{job="checkout",instance="checkout:8080",service="checkout",le="0.5"}'
+        values: '0+60x30'
+      - series: 'http_request_duration_seconds_bucket{job="checkout",instance="checkout:8080",service="checkout",le="+Inf"}'
+        values: '0+60x30'
+      - series: 'http_requests_total{job="node",instance="node-evil",service="checkout",status="200"}'
+        values: '0+6000x30'
+      - series: 'http_requests_total{job="node",instance="node-evil",service="payments",status="500"}'
+        values: '0+60x30'
+      - series: 'http_request_duration_seconds_bucket{job="alloy",instance="node-evil",service="payments",le="2.5"}'
+        values: '0x30'
+      - series: 'http_request_duration_seconds_bucket{job="alloy",instance="node-evil",service="payments",le="+Inf"}'
+        values: '0+60x30'
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: HighErrorRate
+        exp_alerts:
+          - exp_labels: { severity: critical, module: app, service: checkout }
+            exp_annotations:
+              dashboard: sre-app
+              summary: "checkout 5xx rate is 50% over 5m"
+              runbook_url: https://github.com/nhanlagc60299/sre-starter-kit/blob/main/docs/ALERTS.md#higherrorrate
+      - eval_time: 20m
+        alertname: ElevatedErrorRate
+        exp_alerts:
+          - exp_labels: { severity: warning, module: app, service: checkout }
+            exp_annotations:
+              dashboard: sre-app
+              summary: "checkout 5xx rate is 50.0% over 15m"
+              runbook_url: https://github.com/nhanlagc60299/sre-starter-kit/blob/main/docs/ALERTS.md#elevatederrorrate
+      - eval_time: 15m
+        alertname: HighP95Latency
+        exp_alerts: []

@@ -1,3 +1,5 @@
+# node_* selects job="node" and container_* job="cadvisor" (the same job names in compose and the
+# chart): on Kubernetes a node's kubelet or DaemonSet pods can serve any metric name (audit run-7).
 groups:
   - name: infra
     rules:
@@ -11,7 +13,7 @@ groups:
           runbook_url: https://github.com/nhanlagc60299/sre-starter-kit/blob/main/docs/ALERTS.md#nodedown
 
       - alert: DiskFull
-        expr: (node_filesystem_avail_bytes{fstype!~"tmpfs|overlay"} / node_filesystem_size_bytes) * 100 < 5
+        expr: (node_filesystem_avail_bytes{job="node",fstype!~"tmpfs|overlay"} / node_filesystem_size_bytes{job="node"}) * 100 < 5
         for: 2m
         labels: { severity: critical, module: infra }
         annotations:
@@ -20,7 +22,7 @@ groups:
           runbook_url: https://github.com/nhanlagc60299/sre-starter-kit/blob/main/docs/ALERTS.md#diskfull
 
       - alert: DiskLow
-        expr: (node_filesystem_avail_bytes{fstype!~"tmpfs|overlay"} / node_filesystem_size_bytes) * 100 < 15
+        expr: (node_filesystem_avail_bytes{job="node",fstype!~"tmpfs|overlay"} / node_filesystem_size_bytes{job="node"}) * 100 < 15
         for: 10m
         labels: { severity: warning, module: infra }
         annotations:
@@ -29,7 +31,7 @@ groups:
           runbook_url: https://github.com/nhanlagc60299/sre-starter-kit/blob/main/docs/ALERTS.md#disklow
 
       - alert: DiskWillFillIn24h
-        expr: predict_linear(node_filesystem_avail_bytes{fstype!~"tmpfs|overlay"}[6h], 24*3600) < 0
+        expr: predict_linear(node_filesystem_avail_bytes{job="node",fstype!~"tmpfs|overlay"}[6h], 24*3600) < 0
         for: 30m
         labels: { severity: warning, module: infra }
         annotations:
@@ -38,7 +40,7 @@ groups:
           runbook_url: https://github.com/nhanlagc60299/sre-starter-kit/blob/main/docs/ALERTS.md#diskwillfillin24h
 
       - alert: HighCPU
-        expr: 100 - (avg by (instance) (rate(node_cpu_seconds_total{mode="idle"}[5m])) * 100) > 85
+        expr: 100 - (avg by (instance) (rate(node_cpu_seconds_total{job="node",mode="idle"}[5m])) * 100) > 85
         for: 15m
         labels: { severity: warning, module: infra }
         annotations:
@@ -47,7 +49,7 @@ groups:
           runbook_url: https://github.com/nhanlagc60299/sre-starter-kit/blob/main/docs/ALERTS.md#highcpu
 
       - alert: HighMemory
-        expr: (1 - node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes) * 100 > 90
+        expr: (1 - node_memory_MemAvailable_bytes{job="node"} / node_memory_MemTotal_bytes{job="node"}) * 100 > 90
         for: 10m
         labels: { severity: warning, module: infra }
         annotations:
@@ -66,7 +68,7 @@ groups:
       # at all, so the comparison would never be true and this alert would never fire.
       # The `up == 1` guard keeps it quiet for anyone running without the cadvisor profile.
       - alert: ContainerMetricsMissing
-        expr: up{job="cadvisor"} == 1 and on() absent(container_memory_working_set_bytes{name!=""})
+        expr: up{job="cadvisor"} == 1 and on() absent(container_memory_working_set_bytes{job="cadvisor",name!=""})
         for: 5m
         labels: { severity: critical, module: infra }
         annotations:
@@ -85,7 +87,7 @@ groups:
       # sampling every 4s: a container living 15s per cycle was visible in every sample, 5s in
       # 70% of them, 2s in 20%, and one exiting immediately in none at all.
       - alert: ContainerRestartLoop
-        expr: changes(container_start_time_seconds{name!=""}[15m]) > 3
+        expr: changes(container_start_time_seconds{job="cadvisor",name!=""}[15m]) > 3
         labels: { severity: critical, module: infra }
         annotations:
           dashboard: sre-overview
@@ -106,7 +108,7 @@ groups:
       # Requires cgroup v2 -- the counter comes from the kernel's memory.events. On a cgroup v1
       # host the series does not exist and this rule is silent rather than wrong.
       - alert: ContainerAtMemoryCeiling
-        expr: rate(container_memory_events_max_total{name!=""}[5m]) > 0
+        expr: rate(container_memory_events_max_total{job="cadvisor",name!=""}[5m]) > 0
         for: 15m
         labels: { severity: warning, module: infra }
         annotations:
@@ -124,7 +126,7 @@ groups:
       # limit of 0, and dividing by it yields +Inf, which would fire for every unlimited
       # container on the host. Filtering first means those series are simply absent.
       - alert: ContainerMemoryNearLimit
-        expr: container_memory_working_set_bytes{name!=""} / (container_spec_memory_limit_bytes{name!=""} > 0) > 0.8
+        expr: container_memory_working_set_bytes{job="cadvisor",name!=""} / (container_spec_memory_limit_bytes{job="cadvisor",name!=""} > 0) > 0.8
         for: 10m
         labels: { severity: warning, module: infra }
         annotations:
