@@ -6,6 +6,8 @@
 #     otherwise a hosted, unobservable fact that source cannot show);
 #   - `persist-credentials: false` on every `actions/checkout` step, so the (now read-only) token
 #     is never even written to .git/config for that PR-controlled code to find.
+# And every `uses:` in every workflow is pinned to a full commit SHA with its `# vX.Y.Z` beside it
+# (audit run-5): a tag can be moved to other code, a commit cannot.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -40,5 +42,18 @@ for job_name, job in doc.get("jobs", {}).items():
 if checkouts < 1:
     sys.exit(f"FAIL: {path} has no actions/checkout steps -- nothing to check")
 
-print(f"OK: permissions: contents: read, {checkouts} checkout step(s) all persist-credentials: false")
+import glob, re
+pinned = 0
+for wf in sorted(glob.glob(".github/workflows/*.y*ml")):
+    for n, line in enumerate(open(wf), 1):
+        m = re.match(r"\s*(?:-\s+)?uses:\s*(\S+)(.*)$", line)
+        if not m:
+            continue
+        if not re.fullmatch(r"[\w.-]+/[\w./-]+@[0-9a-f]{40}", m.group(1)) or not re.fullmatch(r"\s+# v\d+\.\d+\.\d+\s*", m.group(2)):
+            sys.exit(f"FAIL: {wf}:{n} must pin a full commit SHA with a '# vX.Y.Z' comment: {line.strip()}")
+        pinned += 1
+if pinned < checkouts:
+    sys.exit("FAIL: fewer pinned `uses:` lines than checkout steps -- the pin check matched nothing")
+
+print(f"OK: permissions: contents: read, {checkouts} checkout step(s) all persist-credentials: false, {pinned} uses: pinned by SHA")
 PY
