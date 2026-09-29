@@ -93,8 +93,9 @@ DEFAULT_REDACT = [
     # PEM rule's own row separator) also starts one, though its "n" is \w (audit run-6). So does a "-"
     # or "_" ("x-eyJ", "id_token_eyJ", a PEM END marker's "-----eyJ", reviews 4-5): the header never
     # takes a "-eyJ"/"_eyJ", so a start's scan ends where the next start would begin and "eyJ-eyJ-..."
-    # stays linear.
-    (r"(?:(?<![A-Za-z0-9])|(?<=\\[nrt]))eyJ(?:[A-Za-z0-9]|[-_](?!eyJ)){1,4096}\.eyJ[\w-]{1,8192}\.[\w-]{0,2048}", "[jwt-redacted]"),
+    # stays linear. So does a URL-encoded byte or a "\u" escape ("id_token%3DeyJ", "%22eyJ", "\u003deyJ",
+    # R53): an OAuth redirect URL nests its token encoded. Both lookbehinds are fixed-width.
+    (r"(?:(?<![A-Za-z0-9])|(?<=\\[nrt])|(?<=%[0-9A-Fa-f]{2})|(?<=\\u[0-9A-Fa-f]{4}))eyJ(?:[A-Za-z0-9]|[-_](?!eyJ)){1,4096}\.eyJ[\w-]{1,8192}\.[\w-]{0,2048}", "[jwt-redacted]"),
     # PEM next: the keyword rule below would otherwise eat "private_key=-----BEGIN" and leave the
     # body. The body class (base64, whitespace, a literal "\n" from a JSON log) stops at "-", so the
     # optional END group never makes it backtrack; a truncated key with no END still loses its body.
@@ -173,11 +174,12 @@ DEFAULT_REDACT = [
     # name/value rules (R42): a keyword's value is already "[redacted]", which no base64 row can eat,
     # and before that swap "password=" in front of a quote read as a padded final row. A keyword-named
     # field holding a PEM (private_key: MII...) loses its first row to the keyword rule, so the rule
-    # also starts right after a "[redacted]" when a full 64-character row follows it. The
+    # also starts right after a "[redacted]" when a full 64-character row follows it, after the same
+    # indent a row may have (R53). The
     # separator and the row share no character, each row's end is fixed by a bounded lookahead, and
     # nothing after the repeat can fail, so it never backtracks. The trailing "={0,2}" is the first
     # row's own padding.
-    (r"(?:(?:\b|(?<=\\[nrt]))MII[A-Za-z0-9+/]{20,4096}|(?<=\[redacted\])(?=(?:\\[nr]|\s){1,8}[A-Za-z0-9+/]{64}(?:[A-Za-z0-9+/]{12})?(?![A-Za-z0-9+/=]|\.eyJ)))"
+    (r"(?:(?:\b|(?<=\\[nrt]))MII[A-Za-z0-9+/]{20,4096}|(?<=\[redacted\])(?=(?:\\[nr]|\s){1,8}(?:[ \t]|\\{1,4}t){0,64}[A-Za-z0-9+/]{64}(?:[A-Za-z0-9+/]{12})?(?![A-Za-z0-9+/=]|\.eyJ)))"
      r"(?:(?:\\{1,4}[nr]|\s){1,8}(?:[ \t]|\\{1,4}t){0,64}(?:[A-Za-z0-9+/]{64}(?:[A-Za-z0-9+/]{12})?(?![A-Za-z0-9+/=]|\.eyJ)"
      r"|(?=[A-Za-z0-9+/=]{4,76}[ \t]{0,8}(?:\\{1,4}[nr]|\\{0,3}[\r\n\"',}\]]|\.(?!eyJ)|$))(?:[A-Za-z0-9+/]{4}){0,19}(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?(?![A-Za-z0-9+/=])"
      r"|[A-Za-z0-9+/]{1,76}={0,2}\Z)){0,256}"
@@ -679,6 +681,9 @@ def _blank(obj):
 def _redact(obj, pats):
     if isinstance(obj, str):
         obj = obj[:HARD_CAP_BYTES]   # one string bigger than the whole pack budget is never useful context
+        # JSON's "\/" is "/" (PHP's json_encode writes every "/" that way), and a PEM row with "\/" in it
+        # is no longer a row (R53). Linear; a "\/" escaped once more ("\\\/") is not undone.
+        obj = obj.replace("\\/", "/")
         for pat, rep in pats:
             obj = re.sub(pat, rep, obj)
         return obj

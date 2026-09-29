@@ -1188,6 +1188,68 @@ class PackTests(unittest.TestCase):
                             leaks.append((level, repr(indent), last, where, left))
         self.assertEqual(leaks, [])
 
+    def test_run7_r53_a_keyword_named_mii_blob_with_indented_rows_loses_every_row(self):
+        # R53: the rule's start after a keyword's "[redacted]" took 8 separator units and no indent, so
+        # rows indented past them (7+ spaces with CRLF, 8+ with LF, 9+ once escaped) leaked
+        import random
+        rnd = random.Random(53)
+        b64 = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+        w = lambda n: "".join(rnd.choice(b64) for _ in range(n))
+        mii = "MIIEvQIBADANBgkqhkiG9w0BAQEFAASC" + w(32)
+        def esc(t, level):
+            for _ in range(level):
+                t = json.dumps(t)[1:-1]
+            return t
+        leaks = []
+        for level in range(4):
+            for nl in ("\n", "\r\n"):
+                for indent in ("", " " * 7, " " * 8, " " * 9, " " * 16, " " * 64, "\t"):
+                    for kw in ("private_key: ", "private_key=", '"private_key": "'):
+                        for last, rows in (("full", [w(64), w(64)]), ("padded", [w(64), w(40) + "AA=="])):
+                            out = self.agent.redact(esc(kw + (nl + indent).join([mii] + rows) + nl + "next: x", level))
+                            left = [r[:16] for r in [mii] + rows if r[:16] in out]
+                            # escaped, the keyword's unquoted or quoted value runs on over "next:" (as before)
+                            if left or (level == 0 and "next: x" not in out):
+                                leaks.append((level, repr(nl), repr(indent), kw, last, left))
+        self.assertEqual(leaks, [])
+
+    def test_run7_r53_a_jwt_after_a_url_encoded_or_u_escaped_separator_is_redacted(self):
+        # R53: "%3D", "%22" (an OAuth redirect URL's nested token) and "=" end in a letter or digit,
+        # so the JWT rule found no start after them and the whole token leaked
+        jwt = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0Abc.DummySigDummySigDummySig"
+        for glue in ("id_token%3D", "next=%22", "\\u003d", "="):
+            with self.subTest(glue=glue):
+                self.assertEqual(self.agent.redact("tok " + glue + jwt + " done"), "tok " + glue + "[jwt-redacted] done")
+
+    def test_run7_r53_the_jwt_rule_is_linear_after_encoded_separators(self):
+        for unit in ("%3DeyJ", "\\u003deyJ", "=eyJ", "%3DeyJ" + "a" * 4000):
+            s, best = unit * (self.agent.HARD_CAP_BYTES // len(unit)), 9e9
+            for _ in range(3):
+                start = time.monotonic()
+                self.agent._redact(s, self.agent.DEFAULT_REDACT)
+                best = min(best, time.monotonic() - start)
+            self.assertLess(best, 0.08, unit[:12])
+
+    def test_run7_r53_a_mii_blob_with_json_escaped_slashes_loses_every_row(self):
+        # R53: PHP's json_encode writes "/" as "\/", so a row holding "/" was no longer a row. Level 2 is
+        # a JSON-escaped string re-encoded by PHP (one "\/" per "/"), not PHP twice ("\\\/"; not covered)
+        import random
+        rnd = random.Random(530)
+        b64 = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+        w = lambda n: "".join(rnd.choice(b64) for _ in range(n))
+        mii = "MIIEvQIBADANBgkqhkiG9w0BAQEFAASC" + w(32)
+        rows = [w(63) + "/" for _ in range(3)] + [w(40) + "AA=="]
+        php = lambda t: json.dumps(t)[1:-1].replace("/", "\\/")
+        leaks = []
+        for level, enc in ((1, php), (2, lambda t: php(json.dumps(t)[1:-1]))):
+            for s in (enc("key:\n" + "\n".join([mii] + rows) + "\nnext: x"),
+                      '{"msg":"' + enc("key:\n" + "\n".join([mii] + rows)) + '","next":1}'):
+                out = self.agent.redact(s)
+                left = [r[:16] for r in [mii] + rows if r[:16] in out.replace("\\/", "/")]
+                if left or ("next" not in out):
+                    leaks.append((level, left, out[:80]))
+        self.assertEqual(leaks, [])
+
     def test_dedup_within_an_hour(self):
         d = self.agent.Dedup(seconds=3600)
         self.assertFalse(d.seen("k")); self.assertTrue(d.seen("k"))
