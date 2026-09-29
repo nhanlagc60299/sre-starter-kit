@@ -5,10 +5,12 @@ groups:
       # before it authenticates: the line starts at sshd's "sshd[pid]: " (file mode; sshd cuts a
       # username at ":") or at the start of the message (journal mode), and ends in sshd's own
       # "from <addr> port <n> ssh2". The greedy ".*" makes the ip sshd's last, real "from" (IPv6 too).
+      # rsyslog's "message repeated N times: [ ... ]" wrapper (Ubuntu's $RepeatedMsgReduction) is
+      # rsyslog's own text, allowed right after the prefix; such a line counts once.
       - alert: SSHFailedLoginBurst
         expr: |
           sum by (ip) (
-            count_over_time({job="authlog"} |~ `(^|sshd(-session)?\[\d+\]: )Failed password for (invalid user )?.* from \S+ port \d+ ssh2$` | regexp `.* from (?P<ip>\S+) port \d+ ssh2$` [5m])
+            count_over_time({job="authlog"} |~ `(^|sshd(-session)?\[\d+\]: )(message repeated \d+ times: \[ )?Failed password for (invalid user )?.* from \S+ port \d+ ssh2( ?\])?$` | regexp `.* from (?P<ip>\S+) port \d+ ssh2( ?\])?$` [5m])
           ) > 20
         for: 1m
         labels: { severity: warning, module: security }
@@ -19,7 +21,7 @@ groups:
 
       - alert: RootLoginDetected
         expr: |
-          sum(count_over_time({job="authlog"} |~ `(^|sshd(-session)?\[\d+\]: )Accepted (password|publickey) for root from \S+ port \d+ ssh2(: .*)?$` [5m])) > 0
+          sum(count_over_time({job="authlog"} |~ `(^|sshd(-session)?\[\d+\]: )(message repeated \d+ times: \[ )?Accepted (password|publickey) for root from \S+ port \d+ ssh2(: .*)?( ?\])?$` [5m])) > 0
         labels: { severity: warning, module: security }
         annotations:
           dashboard: sre-overview

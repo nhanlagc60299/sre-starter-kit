@@ -66,6 +66,12 @@ CASES = {   # case -> (lines, SSHFailedLoginBurst {ip: count} it must return, Ro
     "real_fail_ipv6":    (["Failed password for invalid user admin from %s port %d ssh2" % (V6, 50000 + p) for p in range(25)], {V6: 25}, False),
     "real_root_file":    ([SYSLOG + "Accepted publickey for root from %s port 5 ssh2: ED25519 SHA256:dummy" % REAL], {}, True),
     "real_root_journal": (["Accepted password for root from %s port 5 ssh2" % REAL], {}, True),
+    # rsyslog's $RepeatedMsgReduction (Ubuntu's default) wraps a repeat in its own text; each line counts once
+    "real_fail_repeated": ([SYSLOG + "message repeated 3 times: [ Failed password for root from %s port %d ssh2]" % (REAL, 50000 + p) for p in range(25)], {REAL: 25}, False),
+    "real_root_repeated": ([SYSLOG + "message repeated 2 times: [ Accepted publickey for root from %s port 5 ssh2: ED25519 SHA256:dummy]" % REAL], {}, True),
+    "inj_fail_repeated":  ([SYSLOG + "message repeated 2 times: [ %s]" % m for m in preauth("Failed password from " + FRAMED, False)], {}, False),
+    "inj_fail_pw_repeated": ([SYSLOG + "message repeated 2 times: [ %s]" % m for m in preauth("Failed password for x from %s port 1 ssh2" % FRAMED, True)], {REAL: 25}, False),
+    "inj_root_repeated":  ([SYSLOG + "message repeated 2 times: [ %s]" % m for m in preauth("Accepted password for root", True)], {REAL: 25}, False),
 }
 now = time.time_ns()
 streams = [{"stream": {"job": "authlog", "case": c}, "values": [[str(now - 60 * 10**9 + i * 10**6), l] for i, l in enumerate(lines)]}
