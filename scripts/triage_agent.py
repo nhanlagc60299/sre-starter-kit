@@ -95,9 +95,15 @@ DEFAULT_REDACT = [
     # A PEM body that lost its -----BEGIN/END----- header/footer, or never had one in this log line -
     # "MII" is the DER SEQUENCE tag every RSA/EC/PKCS8 key or cert starts with once base64-encoded.
     # The rows after it follow across whitespace or a literal "\n"/"\r" (a JSON-escaped key on one
-    # log line). The separator and the row share no character, so the repeat cannot backtrack
-    # across a row boundary; every quantifier is bounded. The trailing "={0,2}" is optional padding.
-    (r"\bMII[A-Za-z0-9+/]{20,4096}(?:(?:\\[nr]|\s){1,8}[A-Za-z0-9+/]{16,4096}){0,256}={0,2}", "[pem-redacted]"),
+    # log line), and only real PEM rows count (audit run-4): exactly 64 characters, or a final row of
+    # 4-64 with its "=" padding that ends the line. A field name after the key ("databasePassword:",
+    # "storageAccountKey=", "appPassword= x") is neither, so the keyword rule still sees it. The
+    # separator and the row share no character, each row's end is fixed by a bounded lookahead, and
+    # nothing after the repeat can fail, so it never backtracks. The trailing "={0,2}" is the first
+    # row's own padding.
+    (r"\bMII[A-Za-z0-9+/]{20,4096}(?:(?:\\[nr]|\s){1,8}(?:[A-Za-z0-9+/]{64}(?![A-Za-z0-9+/=])"
+     r"|(?=[A-Za-z0-9+/=]{4,64}[ \t]{0,8}(?:\\[nr]|[\r\n]|$))[A-Za-z0-9+/]{2,64}={0,2}(?![A-Za-z0-9+/=]))){0,256}={0,2}",
+     "[pem-redacted]"),
     # A lone base64 body line with no "MII" prefix of its own - a later line of a multi-line PEM once
     # the first has already matched above, or a body pasted without its first line. Exactly 64 base64
     # characters (PEM's own wrap width) containing at least one uppercase letter: that requirement is
@@ -430,6 +436,12 @@ def redact(obj):
     return _redact(obj, pats)
 
 
+# A dict key that names a secret (a Prometheus or alert label called password, db_token, API_KEY):
+# the patterns only ever see the value, never the key above it, so the value goes whole. The key must
+# end in the keyword, like the keyword rule's separator requirement: max_tokens keeps its value.
+_SECRET_KEY = re.compile(r"(?i)(?:" + _KEYWORDS + r")$")
+
+
 def _redact(obj, pats):
     if isinstance(obj, str):
         obj = obj[:HARD_CAP_BYTES]   # one string bigger than the whole pack budget is never useful context
@@ -439,7 +451,8 @@ def _redact(obj, pats):
     if isinstance(obj, list):
         return [_redact(x, pats) for x in obj]
     if isinstance(obj, dict):
-        return {k: _redact(v, pats) for k, v in obj.items()}
+        return {k: "[redacted]" if isinstance(v, str) and isinstance(k, str) and _SECRET_KEY.search(k) else _redact(v, pats)
+                for k, v in obj.items()}
     return obj
 
 
@@ -720,8 +733,12 @@ def post_note(text):
     text = "\n".join(redact(l) for l in text.split("\n"))
     # redact() caps each line, not the note: bound the whole of it here, after redaction (so a cut can
     # never split a secret the patterns would have caught) and before any receiver formats it.
+    # The cut is at the last line break before the cap, so a fenced runbook command is posted whole
+    # or not at all, never as a prefix of itself; only a first line longer than the cap (the
+    # headline, never a command) is cut mid-line.
     if len(text) > NOTE_MAX_CHARS:
-        text = text[:NOTE_MAX_CHARS] + "\n(note truncated at %d characters)" % NOTE_MAX_CHARS
+        cut = text.rfind("\n", 0, NOTE_MAX_CHARS + 1)
+        text = text[:cut if cut > 0 else NOTE_MAX_CHARS] + "\n(note truncated at %d characters)" % NOTE_MAX_CHARS
     oks = []
     def attempt(name, fn):
         try:
@@ -736,16 +753,20 @@ def post_note(text):
             for i, chunk in enumerate(_chunks_md(format_note(text, "slack"), SLACK_CHUNK_CHARS)):
                 if i:
                     time.sleep(1)
-                post_json(ENV("SLACK_WEBHOOK_URL"), {"text": chunk}, timeout=10)
+                # no link or media unfurls: the note quotes URLs from alert and log text
+                post_json(ENV("SLACK_WEBHOOK_URL"), {"text": chunk, "unfurl_links": False, "unfurl_media": False}, timeout=10)
         attempt("slack", slack)
     if ENV("DISCORD_WEBHOOK_URL"):
         def discord():
             # chunks break at line boundaries with balanced fences; if a chunk's POST fails, the loop
             # stops there and attempt() logs it - whatever already sent stays sent (a half note
-            # beats none), nothing further is attempted.
-            for chunk in _chunks_md(format_note(text, "discord"), DISCORD_CHUNK_CHARS):
+            # beats none), nothing further is attempted. Paced like Slack, one post per second.
+            # flags 4 is SUPPRESS_EMBEDS: no link previews of URLs the note quotes.
+            for i, chunk in enumerate(_chunks_md(format_note(text, "discord"), DISCORD_CHUNK_CHARS)):
+                if i:
+                    time.sleep(1)
                 post_json(ENV("DISCORD_WEBHOOK_URL"),
-                          {"content": chunk, "allowed_mentions": {"parse": []}}, timeout=10)
+                          {"content": chunk, "allowed_mentions": {"parse": []}, "flags": 4}, timeout=10)
         attempt("discord", discord)
     if ENV("TELEGRAM_BOT_TOKEN") and ENV("TELEGRAM_CHAT_ID"):
         def telegram():
@@ -755,7 +776,8 @@ def post_note(text):
             # and lose the note entirely, which is worse than plain text.
             for chunk in _chunks(text, TELEGRAM_CHUNK_CHARS):
                 post_json(TELEGRAM_API % ENV("TELEGRAM_BOT_TOKEN"),
-                          {"chat_id": ENV("TELEGRAM_CHAT_ID"), "text": chunk}, timeout=10)
+                          {"chat_id": ENV("TELEGRAM_CHAT_ID"), "text": chunk,
+                           "link_preview_options": {"is_disabled": True}}, timeout=10)
         attempt("telegram", telegram)
     if ENV("ALERT_EMAIL_TO") and ENV("SMTP_HOST"):
         def mail():
@@ -785,10 +807,21 @@ def post_note(text):
     return any(oks)
 
 
+def _dedup_digest(payload, key):
+    """The group plus the set of alerts in it (sorted fingerprints, or label sets where an alert has
+    none). Keyed on the group alone, a forged alert posted first with a genuine group's labels got the
+    group triaged and the genuine alert's notification skipped for an hour (audit run-4); now a
+    changed alert set is triaged again, within the hourly run cap. The dedup map outlives the request
+    by an hour: it holds a fixed-size digest, never the sender-sized key."""
+    alerts = payload.get("alerts")
+    members = sorted(str(a.get("fingerprint") or json.dumps(a.get("labels"), sort_keys=True)) if isinstance(a, dict)
+                     else json.dumps(a, sort_keys=True) for a in (alerts if isinstance(alerts, list) else []))
+    return hashlib.sha256(json.dumps([key, members]).encode("utf-8", "surrogatepass")).hexdigest()
+
+
 def process(payload):
     key = payload.get("groupKey") or json.dumps(payload.get("groupLabels", {}), sort_keys=True)
-    # the dedup map outlives the request by an hour: hold a fixed-size digest, never the sender-sized key
-    if DEDUP.seen(hashlib.sha256(str(key).encode("utf-8", "surrogatepass")).hexdigest()):
+    if DEDUP.seen(_dedup_digest(payload, key)):
         log("skip: group already triaged within %ds: %s" % (DEDUP_SECONDS, json.dumps(key))); return
     if not run_allowed():
         log("skip: hourly triage run cap reached"); return

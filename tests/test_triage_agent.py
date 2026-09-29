@@ -735,6 +735,40 @@ class PackTests(unittest.TestCase):
         self.assertEqual(self.agent.combine("empty", "skipped"), "empty")
         self.assertEqual(self.agent.combine(), "skipped")
 
+    _MII = "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAdummy"
+    def test_run4_pem_row_continuation_takes_only_real_pem_rows(self):
+        # run-4 h3: the headerless-PEM rule continued across any 16+ base64-alphabet run after a line
+        # break, so a field name after a MII token ("databasePassword") was eaten as a PEM row and
+        # the keyword rule never saw it. A continuation row is now a real one: exactly 64 characters,
+        # or a final row of 4-64 (with its "=" padding) that ends the line.
+        for line in ("ca: " + self._MII + "\n  databasePassword: hunter2dummy",
+                     "ca=" + self._MII + " databasePassword=hunter2dummy",
+                     "ca=" + self._MII + "\\nstorageAccountKey=hunter2dummy",
+                     "ca=" + self._MII + "\n  appPassword= hunter2dummy user=bob",
+                     "ca=" + self._MII + "\n  appPassword=\thunter2dummy user=bob"):
+            with self.subTest(line=line):
+                self.assertNotIn("hunter2dummy", self.agent.redact(line))
+        # real multi-row keys still lose every row, raw and JSON-escaped, with and without padding
+        rows = ["A" * 64, "B" * 64, "Cdummy+/" * 4 + "Q=="]
+        for sep in ("\n", "\\n", "\r\n", "\n    "):
+            key = "MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQD" + sep + sep.join(rows)
+            with self.subTest(sep=sep):
+                out = self.agent.redact("key: " + key + sep + "next: ok")
+                for r in rows:
+                    self.assertNotIn(r[:20], out)
+                self.assertIn("next: ok", out)
+        # a final row with no padding at the end of the text
+        self.assertNotIn("Zdummy", self.agent.redact("MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQD\n" + "A" * 64 + "\nZdummyZdummy"))
+    def test_run4_a_secret_named_label_loses_its_value(self):
+        # run-4 h3: patterns only see a string, never the dict key above it, so a Prometheus label or
+        # alert label named password/token/api_key kept its value in the pack.
+        pack = {"series": [{"metric": {"__name__": "x", "password": "hunter2dummy", "db_token": "tok-dummy",
+                                       "API_KEY": "k-dummy", "instance": "web-1", "max_tokens": "4096"}}],
+                "labels": {"client_secret": "cs-dummy", "service": "api", "bypass": "yes"}}
+        out = self.agent.redact(pack)
+        m, l = out["series"][0]["metric"], out["labels"]
+        self.assertEqual((m["password"], m["db_token"], m["API_KEY"], l["client_secret"]), ("[redacted]",) * 4)
+        self.assertEqual((m["instance"], m["max_tokens"], l["service"], l["bypass"]), ("web-1", "4096", "api", "yes"))
     def test_dedup_within_an_hour(self):
         d = self.agent.Dedup(seconds=3600)
         self.assertFalse(d.seen("k")); self.assertTrue(d.seen("k"))
@@ -950,7 +984,7 @@ class Sink(BaseHTTPRequestHandler):
 
     def do_POST(self):
         n = int(self.headers.get("Content-Length", "0")); Sink.posts.append((self.path, self.rfile.read(n).decode(), {k.lower(): v for k, v in self.headers.items()}))
-        if self.path.startswith("/slack-down"):
+        if self.path.startswith(("/slack-down", "/discord-down")):
             self.send_response(500); self.end_headers(); return
         self.send_response(200); self.send_header("Content-Length", "2"); self.end_headers(); self.wfile.write(b"ok")
 
@@ -1280,8 +1314,9 @@ class PostTests(unittest.TestCase):
         with mock.patch.object(self.agent.time, "sleep") as sleep:
             self.agent.post_note(text)
         slack = [p for p, _, _ in Sink.posts if p == "/slack"]
+        discord = [p for p, _, _ in Sink.posts if p == "/discord"]
         self.assertGreater(len(slack), 2)
-        self.assertEqual([c.args for c in sleep.call_args_list], [(1,)] * (len(slack) - 1))
+        self.assertEqual([c.args for c in sleep.call_args_list], [(1,)] * (len(slack) - 1 + len(discord) - 1))
         # a failing chunk ends the Slack loop: no further chunk, no further pause, Discord still sent
         Sink.posts = []
         os.environ["SLACK_WEBHOOK_URL"] = self.base + "/slack-down"
@@ -1291,8 +1326,63 @@ class PostTests(unittest.TestCase):
         finally:
             os.environ["SLACK_WEBHOOK_URL"] = self.base + "/slack"
         self.assertEqual(len([p for p, _, _ in Sink.posts if p == "/slack-down"]), 1)
-        self.assertEqual(sleep.call_count, 0)
+        self.assertEqual(sleep.call_count, len([p for p, _, _ in Sink.posts if p == "/discord"]) - 1)   # Discord's own pauses only
         self.assertTrue([p for p, _, _ in Sink.posts if p == "/discord"])
+
+    def test_discord_chunks_are_paced_one_second_apart_and_stop_on_an_error(self):
+        text = "Triage: " + "x" * 5000 + "        (confidence: low)"
+        os.environ["SLACK_WEBHOOK_URL"] = ""
+        try:
+            with mock.patch.object(self.agent.time, "sleep") as sleep:
+                self.agent.post_note(text)
+            discord = [p for p, _, _ in Sink.posts if p == "/discord"]
+            self.assertGreater(len(discord), 2)
+            self.assertEqual([c.args for c in sleep.call_args_list], [(1,)] * (len(discord) - 1))
+            Sink.posts = []
+            os.environ["DISCORD_WEBHOOK_URL"] = self.base + "/discord-down"
+            with mock.patch.object(self.agent.time, "sleep") as sleep:
+                self.assertFalse(self.agent.post_note(text))
+            self.assertEqual(len([p for p, _, _ in Sink.posts if p == "/discord-down"]), 1)
+            self.assertEqual(sleep.call_count, 0)
+        finally:
+            os.environ.update({"SLACK_WEBHOOK_URL": self.base + "/slack", "DISCORD_WEBHOOK_URL": self.base + "/discord"})
+
+    def test_link_previews_are_suppressed_on_every_chat_receiver(self):
+        # the note quotes URLs from alert and log text: a preview would fetch them from Slack's,
+        # Discord's or Telegram's servers and unfurl whatever they return under the triage note
+        os.environ.update({"TELEGRAM_BOT_TOKEN": "t0k", "TELEGRAM_CHAT_ID": "-100"})
+        try:
+            self.agent.post_note("Triage: x\nNot seen: https://example.invalid/a")
+        finally:
+            os.environ.update({"TELEGRAM_BOT_TOKEN": "", "TELEGRAM_CHAT_ID": ""})
+        by = {p: json.loads(b) for p, b, _ in Sink.posts}
+        self.assertIs(by["/slack"]["unfurl_links"], False)
+        self.assertIs(by["/slack"]["unfurl_media"], False)
+        self.assertEqual(by["/discord"]["flags"], 4)   # SUPPRESS_EMBEDS
+        tg = next(v for k, v in by.items() if k.startswith("/tg/"))
+        self.assertEqual(tg["link_preview_options"], {"is_disabled": True})
+
+    def test_note_cap_cuts_at_a_line_boundary_never_inside_a_command(self):
+        # run-4 h2: the 8000-character cut could land inside a fenced runbook command and post a
+        # prefix of it ("... describe deployment api" without "| tail -20") as if from the runbook
+        cmd = "kubectl -n prod describe deployment api | tail -20"
+        head = "Triage: x        (confidence: low)\nProbable cause\n  1. " + "h" * 7000 + "\nCheck first (from runbook)\n"
+        for extra in range(0, len(cmd) + 1, 7):   # the cut lands at every point of the second command
+            text = head + "  echo ok\n" + "  " + cmd + "\n" + "Not seen: " + "n" * (1000 - extra) + "\nTrace: t"
+            pad = self.agent.NOTE_MAX_CHARS - len(head) - len("  echo ok\n  ") - extra
+            text = text.replace("h" * 7000, "h" * (7000 + pad), 1)
+            Sink.posts = []
+            with mock.patch.object(self.agent.time, "sleep"):
+                self.agent.post_note(text)
+            for path, field in (("/slack", "text"), ("/discord", "content")):
+                md = "\n".join(json.loads(b)[field] for p, b, _ in Sink.posts if p == path)
+                self.assertIn("(note truncated at 8000 characters)", md)
+                fenced, inside = [], False
+                for line in md.splitlines():
+                    if line == "```": inside = not inside
+                    elif inside: fenced.append(line)
+                for line in fenced:
+                    self.assertIn(line, ("echo ok", cmd), (extra, path))
 
     def test_slack_is_chunked_under_its_limit_after_escaping(self):
         # run-3: Slack got the whole note in one POST, and "&" grows fivefold once escaped
@@ -1692,6 +1782,24 @@ class IngressTests(unittest.TestCase):
             for key in ("repeat", "repeat", "other"):
                 self.agent.process(dict(WEBHOOK, groupKey=key))
         self.assertEqual(bp.call_count, 2)
+
+    def test_dedup_keys_on_the_group_and_its_alert_set(self):
+        # run-4 h1: dedup keyed on groupKey alone, so a forged alert posted first with a genuine
+        # group's labels got that group triaged, and the notification carrying the genuine alert an
+        # hour later was skipped. The key is now the groupKey plus the group's sorted alert
+        # fingerprints (label sets when there are none): a changed alert set is triaged again, the
+        # same set in another order is not, and the hourly cap still bounds it all.
+        a1, f1 = dict(WEBHOOK["alerts"][0], fingerprint="a1"), dict(WEBHOOK["alerts"][0], fingerprint="f1")
+        nofp = lambda a, **lab: dict({k: v for k, v in a.items() if k != "fingerprint"}, labels=dict(a["labels"], **lab))
+        seq = [[f1], [f1], [f1, a1], [a1, f1], [a1], [nofp(a1, pod="x")], [nofp(a1, pod="x")], [nofp(a1, pod="y")]]
+        with mock.patch.dict(os.environ, {"TRIAGE_MAX_RUNS_PER_HOUR": "0"}), \
+                mock.patch.object(self.agent, "build_pack", return_value={"sources": {}}) as bp, mock.patch("builtins.print"):
+            ran = []
+            for alerts in seq:
+                before = bp.call_count
+                self.agent.process(dict(WEBHOOK, groupKey="same-group", alerts=alerts))
+                ran.append(bp.call_count > before)
+        self.assertEqual(ran, [True, False, True, False, True, True, False, True])
 
     def test_run_cap_zero_is_unlimited(self):
         with mock.patch.dict(os.environ, {"TRIAGE_MAX_RUNS_PER_HOUR": "0"}):
